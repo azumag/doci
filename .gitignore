@@ -1,0 +1,24 @@
+# secrets / auth
+.env
+*.client_secret.json
+client_secret*.json
+youtube_token.json
+*token*.json
+
+# generated artifacts
+output/
+*.wav
+*.mp3.tmp
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store
+._*
+
+# keep bundled BGM (assets/bgm) but ignore stray audio elsewhere
+!assets/bgm/*.mp3
+!assets/bgm/*.ogg
+!assets/bgm/*.wav

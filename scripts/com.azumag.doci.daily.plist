@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 毎日 09:00 に doci を実行。導入:
+     cp scripts/com.azumag.doci.daily.plist ~/Library/LaunchAgents/
+     launchctl load ~/Library/LaunchAgents/com.azumag.doci.daily.plist
+     ※ ProgramArguments のパスは実環境に合わせて編集すること。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.azumag.doci.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/azumag/azumag/work/doci/scripts/run_daily.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>9</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/azumag/azumag/work/doci/output/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/azumag/azumag/work/doci/output/logs/launchd.err.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

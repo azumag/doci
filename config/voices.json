@@ -1,0 +1,12 @@
+{
+  "chinese_ai": {
+    "voicevox_speaker": 3,
+    "label": "中華AI (ずんだもん/ノーマル)",
+    "note": "共産主義者ペルソナ。communismコーナーで使用。"
+  },
+  "american_ai": {
+    "voicevox_speaker": 14,
+    "label": "メリケンAI (冥鳴ひまり/ノーマル)",
+    "note": "資本主義者ペルソナ。capitalismコーナーで使用。"
+  }
+}
