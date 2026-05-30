@@ -10,7 +10,7 @@ import sys
 from datetime import date as _date
 from pathlib import Path
 
-from . import ai_text, compose, config, corners, history, minimax, voicevox
+from . import ai_text, compose, config, corners, history, imagegen, voicevox
 
 
 def _log(msg: str) -> None:
@@ -37,13 +37,15 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     # 3) 映像
     scenes_meta = script["scenes"]
     scene_objs: list[compose.Scene] = []
+    use_video = config.VIDEO_BACKEND == "minimax" and video_scenes > 0
     for i, sm in enumerate(scenes_meta):
-        img = workdir / f"scene_{i:02d}.jpg"
-        _log(f"画像生成 scene{i} (Minimax image)…")
-        minimax.generate_image(sm["visual_prompt"], img, aspect_ratio="9:16")
+        img = workdir / f"scene_{i:02d}.png"
+        _log(f"画像生成 scene{i} ({config.IMAGE_BACKEND})…")
+        imagegen.generate_image(sm["visual_prompt"], img, aspect_ratio="9:16")
         path, is_video = img, False
-        if i < video_scenes:
+        if use_video and i < video_scenes:
             try:
+                from . import minimax
                 _log(f"動画生成 scene{i} (Minimax Hailuo)… 数分かかります")
                 mp4 = workdir / f"scene_{i:02d}.mp4"
                 vprompt = (sm["visual_prompt"] + " " + sm.get("motion", "")).strip()

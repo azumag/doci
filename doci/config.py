@@ -53,12 +53,28 @@ TEXT_BACKEND = get("TEXT_BACKEND", "claude_cli")
 TEXT_MODEL = get("TEXT_MODEL", "claude-opus-4-8")
 OPENCODE_AGENT = get("OPENCODE_AGENT", "")
 
-# --- minimax ---
+# --- 画像/動画バックエンド選択 ---
+# IMAGE_BACKEND: gemini (既定) | openrouter | minimax
+IMAGE_BACKEND = get("IMAGE_BACKEND", "gemini")
+# VIDEO_BACKEND: none (既定/v1は動画なし) | minimax
+VIDEO_BACKEND = get("VIDEO_BACKEND", "none")
+
+# --- gemini (画像生成: nano banana) ---
+GEMINI_API_KEY = get("GEMINI_API_KEY", "")
+GEMINI_IMAGE_MODEL = get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+GEMINI_API_VERSION = get("GEMINI_API_VERSION", "v1beta")
+
+# --- openrouter (画像生成の代替) ---
+OPENROUTER_API_KEY = get("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+OPENROUTER_IMAGE_MODEL = get("OPENROUTER_IMAGE_MODEL", "google/gemini-2.5-flash-image")
+
+# --- minimax (画像/動画。メディアトークン枠が要る) ---
 MINIMAX_API_KEY = get("MINIMAX_API_KEY", "")
 MINIMAX_MEDIA_BASE_URL = get("MINIMAX_MEDIA_BASE_URL", "https://api.minimax.io/v1").rstrip("/")
 MINIMAX_IMAGE_MODEL = get("MINIMAX_IMAGE_MODEL", "image-01")
 MINIMAX_VIDEO_MODEL = get("MINIMAX_VIDEO_MODEL", "MiniMax-Hailuo-2.3")
-MINIMAX_VIDEO_SCENES = get_int("MINIMAX_VIDEO_SCENES", 1)
+MINIMAX_VIDEO_SCENES = get_int("MINIMAX_VIDEO_SCENES", 0)
 
 # --- voicevox ---
 VOICEVOX_URL = get("VOICEVOX_URL", "http://192.168.11.13:50021").rstrip("/")
