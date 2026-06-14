@@ -97,15 +97,22 @@ def _run_anthropic(prompt: str, model: str) -> str:
     return "".join(b.get("text", "") for b in data.get("content", []))
 
 
-def _run_opencode(prompt: str, agent: str) -> str:
-    if not agent:
-        raise RuntimeError("OPENCODE_AGENT が未設定です (TEXT_BACKEND=opencode)")
-    proc = subprocess.run(
-        ["opencode", "run", "--agent", agent, prompt],
-        capture_output=True,
-        text=True,
-        timeout=240,
-    )
+def _run_opencode(prompt: str, model: str, agent: str) -> str:
+    cmd = ["opencode", "run"]
+    if model:
+        cmd += ["-m", model]
+    elif agent:
+        cmd += ["--agent", agent]
+    else:
+        raise RuntimeError(
+            "OPENCODE_MODEL か OPENCODE_AGENT のどちらかを設定してください (TEXT_BACKEND=opencode)"
+        )
+    # opencode はエージェント動作でカレントにファイルを書くことがあるため、
+    # 使い捨ての作業ディレクトリに隔離する（生成物の repo 汚染を防ぐ）。
+    scratch = config.OUTPUT / ".opencode_scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    cmd += ["--dir", str(scratch), prompt]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
     if proc.returncode != 0:
         raise RuntimeError(f"opencode failed (rc={proc.returncode}): {proc.stderr[:500]}")
     return proc.stdout
@@ -119,7 +126,7 @@ def _dispatch(prompt: str) -> str:
     if backend == "anthropic":
         return _run_anthropic(prompt, model)
     if backend == "opencode":
-        return _run_opencode(prompt, config.OPENCODE_AGENT)
+        return _run_opencode(prompt, config.OPENCODE_MODEL, config.OPENCODE_AGENT)
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")
 
 

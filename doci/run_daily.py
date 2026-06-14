@@ -10,7 +10,7 @@ import sys
 from datetime import date as _date
 from pathlib import Path
 
-from . import ai_text, compose, config, corners, history, imagegen, voicevox
+from . import ai_text, compose, config, corners, history, imagegen, routing, voicevox
 
 
 def _log(msg: str) -> None:
@@ -61,19 +61,47 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     compose.compose(scene_objs, tts.wav_path, tts.duration, out_mp4, bgm=config.bgm_path())
     _log(f"動画完成: {out_mp4} ({out_mp4.stat().st_size} bytes)")
 
-    # 5) アップロード
+    # 4.5) 尺→配信ルーティング（issue #3）
+    route = routing.classify(tts.duration)
+    _log(
+        f"ルート: {route.tier} ({tts.duration:.0f}s) "
+        f"youtube_short={route.is_youtube_short} 推奨={'/'.join(route.platforms)}"
+    )
+
+    # 5) アップロード（現状 YouTube のみ実投稿。tier で Short/長尺を出し分け）
     video_id = None
     if do_upload:
         from . import youtube
         _log("YouTube アップロード…")
-        desc = script["description"] + "\n\n#Shorts"
-        video_id = youtube.upload(out_mp4, script["title"], desc, script.get("tags", []))
+        desc = script["description"] + (f"\n\n{route.hashtag}" if route.hashtag else "")
+        tags = script.get("tags", [])
+        if route.is_youtube_short and "Shorts" not in tags:
+            tags = tags + ["Shorts"]
+        video_id = youtube.upload(out_mp4, script["title"], desc, tags)
     else:
         _log("アップロードはスキップ (--no-upload)")
 
     # 6) 履歴
-    history.record(corner.key, script["title"], video_id, extra={"workdir": str(workdir)})
-    return {"corner": corner.key, "title": script["title"], "video": str(out_mp4), "video_id": video_id}
+    history.record(
+        corner.key,
+        script["title"],
+        video_id,
+        extra={
+            "workdir": str(workdir),
+            "duration_sec": round(tts.duration, 1),
+            "tier": route.tier,
+            "platforms": route.platforms,
+        },
+    )
+    return {
+        "corner": corner.key,
+        "title": script["title"],
+        "video": str(out_mp4),
+        "video_id": video_id,
+        "duration_sec": round(tts.duration, 1),
+        "tier": route.tier,
+        "platforms": route.platforms,
+    }
 
 
 def main() -> None:

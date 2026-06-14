@@ -52,6 +52,8 @@ def get_float(key: str, default: float) -> float:
 TEXT_BACKEND = get("TEXT_BACKEND", "claude_cli")
 TEXT_MODEL = get("TEXT_MODEL", "claude-opus-4-8")
 OPENCODE_AGENT = get("OPENCODE_AGENT", "")
+# provider/model 形式（例: opencode-go/minimax-m3）。指定時は --agent より優先。
+OPENCODE_MODEL = get("OPENCODE_MODEL", "")
 
 # --- 画像/動画バックエンド選択 ---
 # IMAGE_BACKEND: gemini (既定) | openrouter | minimax
