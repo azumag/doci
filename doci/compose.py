@@ -29,6 +29,86 @@ class Scene:
     caption: str = ""
 
 
+# --- 字幕（発話フルテロップ: issue #5） ---
+SUB_LINE_CHARS = 13          # 1行あたり文字数
+SUB_MAX_LINES = 2            # 最大行数
+SUB_MAX_CHARS = SUB_LINE_CHARS * SUB_MAX_LINES  # 1チャンク最大文字数(=26)
+SUB_MIN_DUR = 0.7           # 最小表示秒（短すぎるチャンクは結合してチラつき防止）
+SUB_Y_RATIO = 0.64         # 縦位置（中央やや下。下部UIを避ける）
+
+
+def _segment_chunks(text: str) -> list[str]:
+    """1文を画面に収まる ≤SUB_MAX_CHARS のチャンク列に分割。
+    「。！？」は表示せず除去、「、」を優先の区切りに使う。
+    """
+    import re as _re
+
+    text = text.replace("。", "").replace("！", "").replace("？", "").strip()
+    if not text:
+        return []
+    phrases = [p for p in _re.split(r"(?<=、)", text) if p.strip()]
+    chunks: list[str] = []
+    cur = ""
+    for p in phrases:
+        if cur and len(cur) + len(p) > SUB_MAX_CHARS:
+            chunks.append(cur)
+            cur = p
+        else:
+            cur += p
+    if cur:
+        chunks.append(cur)
+    # 単一句が長すぎる場合のハード分割
+    out: list[str] = []
+    for c in chunks:
+        while len(c) > SUB_MAX_CHARS:
+            out.append(c[:SUB_MAX_CHARS])
+            c = c[SUB_MAX_CHARS:]
+        out.append(c)
+    return [c.strip("、") for c in out if c.strip("、")]
+
+
+def build_subtitles(segments) -> list[tuple[str, float, float]]:
+    """発話 segments（文ごとの text/start/end）を字幕チャンク（text,start,end）列に。
+    各文の時間窓 [start,end] を、チャンクの文字数比で按分する（MVP）。
+    最小表示時間を満たさないチャンクは、同一文内の前後の隣チャンクへ結合して
+    チラつきを防ぐ（文をまたぐ結合はしない＝読みの一貫性を保つ）。
+    """
+    raw: list[list] = []  # [text, start, end, seg_id]
+    for si, seg in enumerate(segments):
+        chunks = _segment_chunks(seg.text)
+        if not chunks:
+            continue
+        total = sum(len(c) for c in chunks) or 1
+        span = max(seg.end - seg.start, 0.001)
+        t = seg.start
+        for c in chunks:
+            d = span * (len(c) / total)
+            raw.append([c, t, t + d, si])
+            t += d
+        raw[-1][2] = seg.end  # 丸め誤差を末尾で吸収
+
+    i = 0
+    while i < len(raw):
+        c, s, e, sid = raw[i]
+        if (e - s) >= SUB_MIN_DUR:
+            i += 1
+            continue
+        # 前（同一文・溢れない）へ結合
+        if i > 0 and raw[i - 1][3] == sid and len(raw[i - 1][0]) + len(c) <= SUB_MAX_CHARS:
+            raw[i - 1][0] += c
+            raw[i - 1][2] = e
+            raw.pop(i)
+            continue
+        # 次（同一文・溢れない）へ前置き結合
+        if i + 1 < len(raw) and raw[i + 1][3] == sid and len(c) + len(raw[i + 1][0]) <= SUB_MAX_CHARS:
+            raw[i + 1][0] = c + raw[i + 1][0]
+            raw[i + 1][1] = s
+            raw.pop(i)
+            continue
+        i += 1  # 結合できない短チャンクは諦める（稀な一語文など）
+    return [(c, s, e) for c, s, e, _ in raw]
+
+
 def _font_path() -> str | None:
     for f in JP_FONT_CANDIDATES:
         if Path(f).exists():
@@ -52,7 +132,7 @@ def _scene_durations(total: float, n: int, min_each: float = 1.5) -> list[float]
     return durs
 
 
-def _wrap(text: str, width: int = 14, max_lines: int = 3) -> str:
+def _wrap(text: str, width: int = SUB_LINE_CHARS, max_lines: int = SUB_MAX_LINES) -> str:
     text = (text or "").strip().replace("\n", "")
     lines, cur = [], ""
     for ch in text:
@@ -91,7 +171,7 @@ def _render_caption_png(text: str, out_png: Path) -> bool:
     pad_x, pad_y = int(size * 0.7), int(size * 0.45)
     box_w, box_h = int(text_w + pad_x * 2), int(text_h + pad_y * 2)
     x0 = (W - box_w) // 2
-    y0 = int(H * 0.70)
+    y0 = int(H * SUB_Y_RATIO)
     draw.rounded_rectangle(
         [x0, y0, x0 + box_w, y0 + box_h], radius=int(size * 0.35), fill=(0, 0, 0, 150)
     )
@@ -144,6 +224,7 @@ def compose(
     narration_dur: float,
     out_path: Path,
     bgm: Path | None = None,
+    segments=None,
 ) -> Path:
     if not scenes:
         raise ValueError("scenes が空です")
@@ -158,16 +239,23 @@ def compose(
         clips = [_build_scene_clip(s, d, i, tmp) for i, (s, d) in enumerate(zip(scenes, durs))]
         silent = _concat(clips, tmp)
 
-        # 字幕PNG（シーン窓に同期）
+        # 字幕PNG。segments があれば「発話フル字幕」（チャンク窓に同期: issue #5）、
+        # 無ければ従来のシーン見出し（シーン窓）にフォールバック。
         caps: list[tuple[Path, float, float]] = []
-        t = 0.0
-        for sc, d in zip(scenes, durs):
-            s, e = t, t + d
-            t = e
-            if sc.caption:
-                png = tmp / f"cap_{len(caps):02d}.png"
-                if _render_caption_png(sc.caption, png):
+        if segments:
+            for text, s, e in build_subtitles(segments):
+                png = tmp / f"cap_{len(caps):03d}.png"
+                if _render_caption_png(text, png):
                     caps.append((png, s, e))
+        else:
+            t = 0.0
+            for sc, d in zip(scenes, durs):
+                s, e = t, t + d
+                t = e
+                if sc.caption:
+                    png = tmp / f"cap_{len(caps):03d}.png"
+                    if _render_caption_png(sc.caption, png):
+                        caps.append((png, s, e))
 
         inputs = ["-i", str(silent), "-i", str(narration_wav)]
         bgm_idx = None

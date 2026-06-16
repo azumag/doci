@@ -74,7 +74,10 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     # 4) 合成
     _log("合成 (ffmpeg)…")
     out_mp4 = workdir / "video.mp4"
-    compose.compose(scene_objs, tts.wav_path, tts.duration, out_mp4, bgm=config.bgm_path())
+    compose.compose(
+        scene_objs, tts.wav_path, tts.duration, out_mp4,
+        bgm=config.bgm_path(), segments=tts.segments,
+    )
     _log(f"動画完成: {out_mp4} ({out_mp4.stat().st_size} bytes)")
 
     # 4.5) 尺→配信ルーティング（issue #3）
