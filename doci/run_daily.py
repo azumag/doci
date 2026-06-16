@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from datetime import date as _date
@@ -34,22 +35,37 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     tts = voicevox.synthesize(script["narration"], corner.speaker, workdir / "narration.wav")
     _log(f"narration {tts.duration:.1f}s")
 
-    # 3) 映像
+    # 3) 映像（尺連動で画像枚数を増やす: issue #4）
+    #    短尺は台本のシーン数のまま。長尺はシーンのプロンプトを順序保存で使い回し、
+    #    1枚あたり約 SECONDS_PER_IMAGE 秒になるよう枚数を増やして間延びを防ぐ。
     scenes_meta = script["scenes"]
-    scene_objs: list[compose.Scene] = []
+    n_scenes = len(scenes_meta)
+    target = math.ceil(tts.duration / config.SECONDS_PER_IMAGE) if tts.duration > 0 else n_scenes
+    n_images = max(n_scenes, min(target, config.MAX_IMAGES))
+    if n_images > n_scenes:
+        _log(f"映像スケール: {n_scenes}シーン→{n_images}枚 (約{tts.duration / n_images:.0f}s/枚)")
     use_video = config.VIDEO_BACKEND == "minimax" and video_scenes > 0
-    for i, sm in enumerate(scenes_meta):
-        img = workdir / f"scene_{i:02d}.png"
-        _log(f"画像生成 scene{i} ({config.IMAGE_BACKEND})…")
-        imagegen.generate_image(sm["visual_prompt"], img, aspect_ratio="9:16")
+    scene_objs: list[compose.Scene] = []
+    occ: dict[int, int] = {}
+    for j in range(n_images):
+        si = j * n_scenes // n_images  # スロット→元シーンへ順序保存でマップ
+        k = occ.get(si, 0)
+        occ[si] = k + 1
+        sm = scenes_meta[si]
+        img = workdir / f"scene_{si:02d}_{k}.png"
+        vprompt = sm["visual_prompt"]
+        if k > 0:  # 同一シーンの2枚目以降は構図を変えた別画像にする（使い回しの単調回避）
+            vprompt = f"{vprompt}, alternate camera angle and composition, variation {k + 1}"
+        _log(f"画像生成 {j + 1}/{n_images} (scene{si} var{k}, {config.IMAGE_BACKEND})…")
+        imagegen.generate_image(vprompt, img, aspect_ratio="9:16")
         path, is_video = img, False
-        if use_video and i < video_scenes:
+        if use_video and k == 0 and si < video_scenes:
             try:
                 from . import minimax
-                _log(f"動画生成 scene{i} (Minimax Hailuo)… 数分かかります")
-                mp4 = workdir / f"scene_{i:02d}.mp4"
-                vprompt = (sm["visual_prompt"] + " " + sm.get("motion", "")).strip()
-                minimax.generate_video(vprompt, mp4, first_frame_image=img)
+                _log(f"動画生成 scene{si} (Minimax Hailuo)… 数分かかります")
+                mp4 = workdir / f"scene_{si:02d}.mp4"
+                vprompt2 = (sm["visual_prompt"] + " " + sm.get("motion", "")).strip()
+                minimax.generate_video(vprompt2, mp4, first_frame_image=img)
                 path, is_video = mp4, True
             except Exception as e:  # 動画失敗時は静止画にフォールバック
                 _log(f"動画生成失敗→静止画にフォールバック: {e}")

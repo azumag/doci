@@ -89,6 +89,12 @@ YOUTUBE_CLIENT_SECRET_FILE = get("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.js
 YOUTUBE_TOKEN_FILE = get("YOUTUBE_TOKEN_FILE", "youtube_token.json")
 YOUTUBE_PRIVACY = get("YOUTUBE_PRIVACY", "unlisted")
 
+# --- visual density (issue #4): 長尺で画像枚数を尺連動で増やす ---
+# 画像1枚あたりの目安表示秒。短いほど画が増えて間延びしにくいがコスト増。
+SECONDS_PER_IMAGE = get_float("SECONDS_PER_IMAGE", 11.0)
+# 1本あたりの画像枚数上限（生成コスト/時間の歯止め）。
+MAX_IMAGES = get_int("MAX_IMAGES", 16)
+
 # --- video ---
 VIDEO_WIDTH = get_int("VIDEO_WIDTH", 1080)
 VIDEO_HEIGHT = get_int("VIDEO_HEIGHT", 1920)
