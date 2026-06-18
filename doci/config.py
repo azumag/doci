@@ -56,10 +56,19 @@ OPENCODE_AGENT = get("OPENCODE_AGENT", "")
 OPENCODE_MODEL = get("OPENCODE_MODEL", "")
 
 # --- 画像/動画バックエンド選択 ---
-# IMAGE_BACKEND: gemini (既定) | openrouter | minimax
+# IMAGE_BACKEND: gemini (既定) | openrouter | minimax  ← 素材が無い時のAI生成フォールバック
 IMAGE_BACKEND = get("IMAGE_BACKEND", "gemini")
 # VIDEO_BACKEND: none (既定/v1は動画なし) | minimax
 VIDEO_BACKEND = get("VIDEO_BACKEND", "none")
+
+# --- 素材調達バックエンド (issue #9): AI生成の前段で実フリー素材を取得 ---
+# ASSET_BACKEND: pexels (既定/縦・大量・関連度良/商用OK・帰属不要) | none(常にAI生成)
+# 取得できなければ IMAGE_BACKEND のAI生成へフォールバックする二段構え。
+ASSET_BACKEND = get("ASSET_BACKEND", "pexels")
+PEXELS_API_KEY = get("PEXELS_API_KEY", "")
+PEXELS_ORIENTATION = get("PEXELS_ORIENTATION", "portrait")
+# 検索1回で取る候補数。同一シーンのバリエーション(使い回し回避)はこの中から別候補を選ぶ。
+ASSET_PER_PAGE = get_int("ASSET_PER_PAGE", 30)
 
 # --- gemini (画像生成: nano banana) ---
 GEMINI_API_KEY = get("GEMINI_API_KEY", "")

@@ -11,7 +11,7 @@ import sys
 from datetime import date as _date
 from pathlib import Path
 
-from . import ai_text, compose, config, corners, history, imagegen, routing, voicevox
+from . import ai_text, assets, compose, config, corners, history, imagegen, routing, voicevox
 
 
 def _log(msg: str) -> None:
@@ -53,11 +53,23 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         occ[si] = k + 1
         sm = scenes_meta[si]
         img = workdir / f"scene_{si:02d}_{k}.png"
-        vprompt = sm["visual_prompt"]
-        if k > 0:  # 同一シーンの2枚目以降は構図を変えた別画像にする（使い回しの単調回避）
-            vprompt = f"{vprompt}, alternate camera angle and composition, variation {k + 1}"
-        _log(f"画像生成 {j + 1}/{n_images} (scene{si} var{k}, {config.IMAGE_BACKEND})…")
-        imagegen.generate_image(vprompt, img, aspect_ratio="9:16")
+        base_prompt = sm["visual_prompt"]
+        # 1) まず実フリー素材を当てる（issue #9）。variant=k で同一シーンは別候補を選ぶ。
+        got = None
+        if config.ASSET_BACKEND not in ("", "none"):
+            try:
+                got = assets.fetch_image(base_prompt, img, aspect_ratio="9:16", variant=k)
+                if got is not None:
+                    _log(f"素材取得 {j + 1}/{n_images} (scene{si} var{k}, {config.ASSET_BACKEND})")
+            except Exception as e:  # 素材失敗時はAI生成へフォールバック
+                _log(f"素材取得失敗({config.ASSET_BACKEND}): {e} → AI生成にフォールバック")
+        # 2) 素材が無ければAI生成（構図変化語を足して使い回しの単調を避ける）。
+        if got is None:
+            vprompt = base_prompt
+            if k > 0:
+                vprompt = f"{base_prompt}, alternate camera angle and composition, variation {k + 1}"
+            _log(f"画像生成 {j + 1}/{n_images} (scene{si} var{k}, {config.IMAGE_BACKEND})…")
+            imagegen.generate_image(vprompt, img, aspect_ratio="9:16")
         path, is_video = img, False
         if use_video and k == 0 and si < video_scenes:
             try:
