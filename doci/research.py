@@ -20,17 +20,18 @@ _PROMPT = """\
    - 人名・年号・数値・定義・固有の出来事・印象的な具体例を優先。
    - 不確かなものは入れない。各事実に出典URLを付ける。
 
-出力は次の JSON のみ（前後に説明やコードフェンスを付けない）:
+出力は **有効な JSON オブジェクトのみ**（前後に説明やコードフェンスを付けない）。文字列内の引用符・改行は必ずエスケープし、各 claim は1文に収める:
 {{"topic": "きょうの題材（短い日本語）",
   "angle": "視聴者がハッとする切り口（1文）",
   "facts": [{{"claim": "検証済みの具体事実（日本語・1文）", "source_url": "...", "source_title": "..."}}]}}
 """
 
 
-def web_research(corner: corners.Corner, past_topics: list[str]) -> dict | None:
-    """題材選定＋Web裏取り。失敗時は None（呼び出し側はリサーチ無しで続行）。"""
-    past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
-    prompt = _PROMPT.format(label=corner.label, past=past)
+def _log(msg: str) -> None:
+    print(f"[doci] {msg}", flush=True)
+
+
+def _attempt(prompt: str) -> dict:
     raw = llm.run_claude(
         prompt,
         config.RESEARCH_MODEL,
@@ -46,6 +47,21 @@ def web_research(corner: corners.Corner, past_topics: list[str]) -> dict | None:
     if not data["facts"]:
         raise ValueError("出典付きの事実がありませんでした")
     return data
+
+
+def web_research(corner: corners.Corner, past_topics: list[str]) -> dict | None:
+    """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
+    past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
+    prompt = _PROMPT.format(label=corner.label, past=past)
+    last_err: Exception | None = None
+    for attempt in range(1, config.SCRIPT_RESEARCH_RETRIES + 1):
+        try:
+            return _attempt(prompt)
+        except (ValueError, RuntimeError) as e:  # JSON不正/不十分/CLI失敗を再試行
+            last_err = e
+            if attempt < config.SCRIPT_RESEARCH_RETRIES:
+                _log(f"リサーチ不良(試行{attempt}/{config.SCRIPT_RESEARCH_RETRIES})→再試行: {str(e)[:120]}")
+    raise last_err or ValueError("リサーチに失敗しました")
 
 
 def brief_for_prompt(research: dict) -> str:

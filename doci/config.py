@@ -74,6 +74,8 @@ FACTCHECK_MODEL = get("FACTCHECK_MODEL", "claude-opus-4-8")
 SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 300)
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
+# リサーチの再試行回数。claude+Web が稀に不正JSONを返すため。高価なので控えめ。
+SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)
 
 # --- 画像/動画バックエンド選択 ---
 # IMAGE_BACKEND: gemini (既定) | openrouter | minimax  ← 素材が無い時のAI生成フォールバック
