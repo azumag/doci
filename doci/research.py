@@ -74,7 +74,8 @@ def brief_for_prompt(research: dict) -> str:
         lines.append(f"切り口: {research['angle']}")
     lines.append(
         "\n## 参考事実（Webで裏取り済み。最低2つを具体として自然に本文へ織り込む。"
-        "年・数値・固有名は正確に。これらは検証済みなので事実として述べてよい。出典は本文に書かない）:"
+        "年・数値・固有名は正確に。これらは検証済みなので事実として述べてよい。出典は本文に書かない）。"
+        "確かな具体が多いので、薄める必要はなく、内容に見合う自然な長さ（やや長めも可）で構わない:"
     )
     for f in research.get("facts", []):
         lines.append(f"- {f.get('claim', '')}")
