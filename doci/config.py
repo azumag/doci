@@ -89,6 +89,9 @@ VIDEO_BACKEND = get("VIDEO_BACKEND", "none")
 ASSET_BACKEND = get("ASSET_BACKEND", "pexels")
 PEXELS_API_KEY = get("PEXELS_API_KEY", "")
 PEXELS_ORIENTATION = get("PEXELS_ORIENTATION", "portrait")
+# 素材の種別: photo(既定) | video(全シーン動画優先) | mix(シーン主画は動画・使い回しは写真)。
+# 動画が無ければ写真へ、写真も無ければAI生成へフォールバック。動画は Pexsels Videos。
+ASSET_MEDIA = get("ASSET_MEDIA", "photo")
 # 検索1回で取る候補数。同一シーンのバリエーション(使い回し回避)はこの中から別候補を選ぶ。
 ASSET_PER_PAGE = get_int("ASSET_PER_PAGE", 30)
 

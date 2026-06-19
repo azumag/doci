@@ -22,6 +22,7 @@ from . import config, imagery
 
 _UA = "doci/0.1 (+https://github.com/azumag/doci)"
 PEXELS_SEARCH = "https://api.pexels.com/v1/search"
+PEXELS_VIDEO_SEARCH = "https://api.pexels.com/videos/search"
 
 
 class AssetError(RuntimeError):
@@ -93,6 +94,68 @@ def fetch_image(
         return None
     if backend == "pexels":
         return _pexels_fetch(query, out_path, aspect_ratio, variant)
+    raise AssetError(f"unknown ASSET_BACKEND: {backend}")
+
+
+# ---------------- Pexels Videos（動画素材） ----------------
+def _pexels_video_search(query: str, key: str, per_page: int, orientation: str) -> list[dict]:
+    qs = urllib.parse.urlencode(
+        {"query": query[:400], "orientation": orientation, "per_page": per_page}
+    )
+    req = urllib.request.Request(
+        f"{PEXELS_VIDEO_SEARCH}?{qs}",
+        headers={"Authorization": key, "User-Agent": _UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise AssetError(f"Pexels動画検索 HTTP {e.code}: {e.read().decode()[:200]}")
+    return d.get("videos") or []
+
+
+def _best_portrait_file(video: dict, max_h: int) -> dict | None:
+    """縦長(高さ≧幅)の動画ファイルから、高さ≦max_h の最大を選ぶ。無ければ最小（DL抑制）。"""
+    files = [f for f in (video.get("video_files") or []) if f.get("link")]
+    port = [f for f in files if (f.get("height") or 0) >= (f.get("width") or 1)] or files
+    if not port:
+        return None
+    le = [f for f in port if (f.get("height") or 0) <= max_h]
+    if le:
+        return max(le, key=lambda f: f.get("height") or 0)
+    return min(port, key=lambda f: f.get("height") or 0)
+
+
+def _pexels_video_fetch(query: str, out_path: Path, variant: int) -> Path | None:
+    key = config.PEXELS_API_KEY
+    if not key:
+        raise AssetError("PEXELS_API_KEY が未設定です (ASSET_BACKEND=pexels)")
+    query = imagery.strip_brands(query)
+    videos = _pexels_video_search(query, key, config.ASSET_PER_PAGE, config.PEXELS_ORIENTATION)
+    if not videos:
+        return None
+    video = videos[variant % len(videos)]
+    f = _best_portrait_file(video, config.VIDEO_HEIGHT)
+    if not f:
+        return None
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(f["link"], headers={"User-Agent": _UA})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            out_path.write_bytes(r.read())
+    except urllib.error.HTTPError as e:
+        raise AssetError(f"Pexels動画DL HTTP {e.code}")
+    return out_path
+
+
+def fetch_video(query: str, out_path: Path, variant: int = 0) -> Path | None:
+    """動画素材を取得して out_path(mp4) に保存。該当無しは None。compose側で9:16クロップ＆尺ループ。"""
+    backend = config.ASSET_BACKEND
+    if backend in ("", "none"):
+        return None
+    if backend == "pexels":
+        return _pexels_video_fetch(query, out_path, variant)
     raise AssetError(f"unknown ASSET_BACKEND: {backend}")
 
 
