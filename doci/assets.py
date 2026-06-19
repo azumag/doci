@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import config
+from . import config, imagery
 
 _UA = "doci/0.1 (+https://github.com/azumag/doci)"
 PEXELS_SEARCH = "https://api.pexels.com/v1/search"
@@ -61,6 +61,8 @@ def _pexels_fetch(query: str, out_path: Path, aspect_ratio: str, variant: int) -
     if not key:
         raise AssetError("PEXELS_API_KEY が未設定です (ASSET_BACKEND=pexels)")
     w, h = _dims(aspect_ratio)
+    # 権利回避: 検索語からブランド/製品名を除く（generic語でも実機ロゴ混入は完全には防げない）。
+    query = imagery.strip_brands(query)
     photos = _pexels_search(query, key, config.ASSET_PER_PAGE, config.PEXELS_ORIENTATION)
     if not photos:
         return None
