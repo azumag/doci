@@ -30,10 +30,15 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
 
-    # 2) 音声
+    # 2) 音声（voices.json の話者＋速度/ピッチ/抑揚/音量を適用: issue #1）
     _log("音声合成 (VOICEVOX)…")
-    tts = voicevox.synthesize(script["narration"], corner.speaker, workdir / "narration.wav")
-    _log(f"narration {tts.duration:.1f}s")
+    v = corner.voice
+    tts = voicevox.synthesize(
+        script["narration"], corner.speaker, workdir / "narration.wav",
+        speed=v.speed, pitch=v.pitch, intonation=v.intonation,
+        intonation_vary=v.intonation_vary, volume=v.volume,
+    )
+    _log(f"narration {tts.duration:.1f}s (spk{corner.speaker} speed{v.speed} into{v.intonation})")
 
     # 3) 映像（尺連動で画像枚数を増やす: issue #4）
     #    短尺は台本のシーン数のまま。長尺はシーンのプロンプトを順序保存で使い回し、

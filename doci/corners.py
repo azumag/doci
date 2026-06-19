@@ -19,11 +19,14 @@ class Corner:
     voice_key: str  # "chinese_ai" | "american_ai"
 
     @property
+    def voice(self):  # -> voices.VoiceCfg（話者＋速度/ピッチ/抑揚/音量）
+        from . import voices
+
+        return voices.get(self.voice_key)
+
+    @property
     def speaker(self) -> int:
-        return {
-            "chinese_ai": config.VOICE_CHINESE_AI,
-            "american_ai": config.VOICE_AMERICAN_AI,
-        }[self.voice_key]
+        return self.voice.speaker
 
 
 CORNERS: dict[str, Corner] = {

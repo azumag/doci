@@ -85,7 +85,46 @@ def _synthesis(base: str, query: dict, speaker: int) -> bytes:
         return r.read()
 
 
-def synthesize(text: str, speaker: int, out_path: Path) -> TtsResult:
+def _sentence_intonation(sentence: str, base: float, vary: bool) -> float:
+    """文末・長さから、その文の抑揚倍率を内容連動で微調整（issue #1）。
+
+    vary=False なら base のまま。疑問・感嘆は少し豊かに、長い説明文は少し
+    落ち着かせる。揺れは控えめ（±約12%）でクランプする。
+    """
+    if not vary:
+        return base
+    s = sentence.rstrip()
+    if s.endswith(("？", "?", "！", "!")):
+        f = 1.12
+    elif len(s) >= 40:  # 長い説明文は抑揚を抑えて落ち着かせる
+        f = 0.92
+    else:
+        f = 1.0
+    return max(0.9, min(1.4, round(base * f, 3)))
+
+
+def _apply_params(
+    q: dict, speed: float, pitch: float, intonation: float, volume: float
+) -> dict:
+    """audio_query に話速/ピッチ/抑揚/音量を反映（issue #1）。"""
+    q["speedScale"] = speed
+    q["pitchScale"] = pitch
+    q["intonationScale"] = intonation
+    q["volumeScale"] = volume
+    return q
+
+
+def synthesize(
+    text: str,
+    speaker: int,
+    out_path: Path,
+    *,
+    speed: float = 1.0,
+    pitch: float = 0.0,
+    intonation: float = 1.0,
+    intonation_vary: bool = False,
+    volume: float = 1.0,
+) -> TtsResult:
     base = active_base()
     sentences = split_sentences(text)
     if not sentences:
@@ -98,6 +137,8 @@ def synthesize(text: str, speaker: int, out_path: Path) -> TtsResult:
 
     for s in sentences:
         q = _audio_query(base, s, speaker)
+        into = _sentence_intonation(s, intonation, intonation_vary)
+        _apply_params(q, speed, pitch, into, volume)
         wav = _synthesis(base, q, speaker)
         with wave.open(io.BytesIO(wav), "rb") as w:
             fr, sw, ch = w.getframerate(), w.getsampwidth(), w.getnchannels()
@@ -128,8 +169,17 @@ def main() -> None:
     ap.add_argument("--text", required=True)
     ap.add_argument("--speaker", type=int, default=config.VOICE_CHINESE_AI)
     ap.add_argument("--out", default=str(config.OUTPUT / "tts_test.wav"))
+    ap.add_argument("--speed", type=float, default=1.0)
+    ap.add_argument("--pitch", type=float, default=0.0)
+    ap.add_argument("--intonation", type=float, default=1.0)
+    ap.add_argument("--intonation-vary", action="store_true")
+    ap.add_argument("--volume", type=float, default=1.0)
     args = ap.parse_args()
-    res = synthesize(args.text, args.speaker, Path(args.out))
+    res = synthesize(
+        args.text, args.speaker, Path(args.out),
+        speed=args.speed, pitch=args.pitch, intonation=args.intonation,
+        intonation_vary=args.intonation_vary, volume=args.volume,
+    )
     print(f"wav={res.wav_path} duration={res.duration:.2f}s segments={len(res.segments)}")
     for seg in res.segments:
         print(f"  [{seg.start:5.2f}-{seg.end:5.2f}] {seg.text}")

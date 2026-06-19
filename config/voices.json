@@ -1,12 +1,22 @@
 {
   "chinese_ai": {
-    "voicevox_speaker": 3,
-    "label": "中華AI (ずんだもん/ノーマル)",
-    "note": "共産主義者ペルソナ。communismコーナーで使用。"
+    "voicevox_speaker": 109,
+    "label": "中華AI (東北イタコ/ノーマル)",
+    "speed": 1.0,
+    "pitch": 0.0,
+    "intonation": 1.0,
+    "intonation_vary": false,
+    "volume": 1.0,
+    "note": "共産主義者ペルソナ。communismコーナー。FINAL_cn_itako_spk109 で確定。抑揚は揺らさずフラット。"
   },
   "american_ai": {
     "voicevox_speaker": 14,
-    "label": "メリケンAI (冥鳴ひまり/ノーマル)",
-    "note": "資本主義者ペルソナ。capitalismコーナーで使用。"
+    "label": "メリケンAI (冥鳴ひまり/energetic)",
+    "speed": 1.16,
+    "pitch": 0.0,
+    "intonation": 1.2,
+    "intonation_vary": true,
+    "volume": 1.0,
+    "note": "資本主義者ペルソナ。capitalismコーナー。FINAL_us_himari_spk14 = us_02_energetic 相当。speedはbaseline比6.87/5.93≒1.16から算出。intonationは基準1.2＋文ごとに微変動(疑問/感嘆↑・長い説明文↓)。"
   }
 }
