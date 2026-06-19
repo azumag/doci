@@ -48,12 +48,32 @@ def get_float(key: str, default: float) -> float:
         return default
 
 
+def get_bool(key: str, default: bool = False) -> bool:
+    v = os.environ.get(key)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
 # --- text ---
 TEXT_BACKEND = get("TEXT_BACKEND", "claude_cli")
 TEXT_MODEL = get("TEXT_MODEL", "claude-opus-4-8")
 OPENCODE_AGENT = get("OPENCODE_AGENT", "")
 # provider/model 形式（例: opencode-go/minimax-m3）。指定時は --agent より優先。
 OPENCODE_MODEL = get("OPENCODE_MODEL", "")
+
+# --- 台本品質: 前段リサーチ＋後段ファクトチェック (issue #6) ---
+# SCRIPT_RESEARCH: 下書き前に claude CLI(Webツール)で題材を選び実ソースで裏取りした
+#   「参考事実」を作り、下書きに具体を織り込ませる。SCRIPT_FACTCHECK: 下書き後に
+#   別モデル(opus)で事実主張を検証し narration を自動修正する。いずれも既定OFF。
+SCRIPT_RESEARCH = get_bool("SCRIPT_RESEARCH", False)
+SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
+RESEARCH_MODEL = get("RESEARCH_MODEL", "claude-sonnet-4-6")
+FACTCHECK_MODEL = get("FACTCHECK_MODEL", "claude-opus-4-8")
+# リサーチ/チェックは Web検索が走り時間がかかるため長めの上限。
+SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 300)
+# 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
+SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 
 # --- 画像/動画バックエンド選択 ---
 # IMAGE_BACKEND: gemini (既定) | openrouter | minimax  ← 素材が無い時のAI生成フォールバック

@@ -14,60 +14,16 @@ import subprocess
 import sys
 from datetime import date as _date
 
-from . import config, corners
+from . import config, corners, llm
 
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
 
-
-def _extract_json(text: str) -> dict:
-    """モデル出力から最初の JSON オブジェクトを取り出す。"""
-    text = text.strip()
-    # コードフェンス除去
-    if text.startswith("```"):
-        text = text.split("```", 2)[1]
-        if text.lstrip().lower().startswith("json"):
-            text = text.lstrip()[4:]
-    start = text.find("{")
-    if start < 0:
-        raise ValueError(f"JSON object not found in output:\n{text[:500]}")
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return json.loads(text[start : i + 1])
-    raise ValueError("Unbalanced JSON braces in model output")
+# 互換用エイリアス（JSON抽出/CLI実行は共通モジュール llm に集約）
+_extract_json = llm.extract_json
 
 
 def _run_claude_cli(prompt: str, model: str) -> str:
-    cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {proc.stderr[:500]}")
-    out = proc.stdout.strip()
-    # --output-format json は {"type":"result","result":"...",...} を返す
-    try:
-        env = json.loads(out)
-        if isinstance(env, dict) and "result" in env:
-            return env["result"]
-    except json.JSONDecodeError:
-        pass
-    return out
+    return llm.run_claude(prompt, model, timeout=240)
 
 
 def _run_anthropic(prompt: str, model: str) -> str:
@@ -145,13 +101,61 @@ def _validate(script: dict) -> dict:
     return script
 
 
+def _log(msg: str) -> None:
+    print(f"[doci] {msg}", flush=True)
+
+
 def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
-    prompt = corners.build_prompt(corner, day, past_topics)
-    raw = _dispatch(prompt)
-    script = _validate(_extract_json(raw))
+    # 1) 前段リサーチ（issue #6）: 題材選定＋Web裏取り。失敗してもリサーチ無しで続行。
+    research = None
+    if config.SCRIPT_RESEARCH:
+        from . import research as research_mod
+
+        _log("前段リサーチ (claude+Web)…")
+        try:
+            research = research_mod.web_research(corner, past_topics)
+            if research:
+                _log(f"題材: {research.get('topic', '')} / 裏取り事実 {len(research.get('facts', []))}件")
+        except Exception as e:  # noqa: BLE001
+            _log(f"リサーチ失敗→リサーチ無しで続行: {e}")
+            research = None
+
+    # 2) 下書き（minimax-m3 等）。リサーチがあれば具体を織り込ませる。
+    #    minimax は稀に不完全JSON（narration/scenes 欠落・分割）を返すため再生成で吸収。
+    prompt = corners.build_prompt(corner, day, past_topics, research=research)
+    script = None
+    last_err: Exception | None = None
+    for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
+        try:
+            script = _validate(_extract_json(_dispatch(prompt)))
+            break
+        except ValueError as e:  # JSON抽出/必須キー不足（JSONDecodeError含む）
+            last_err = e
+            _log(f"下書きJSON不良(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: {e}")
+    if script is None:
+        raise RuntimeError(f"下書きが規定回数で揃いませんでした: {last_err}")
+
+    # 3) 後段ファクトチェック（issue #6）: 別モデル(opus)＋Web検証で narration を自動修正。
+    if config.SCRIPT_FACTCHECK:
+        from . import factcheck
+
+        _log("後段ファクトチェック (opus+Web)…")
+        try:
+            fc = factcheck.verify_and_correct(script["narration"], research)
+            if fc and fc.get("narration", "").strip():
+                issues = fc.get("issues") or []
+                if fc.get("changed") and issues:
+                    _log(f"ファクトチェック: {len(issues)}件修正")
+                script["narration"] = fc["narration"].strip()
+                script["_factcheck"] = issues
+        except Exception as e:  # noqa: BLE001
+            _log(f"ファクトチェック失敗→修正なしで続行: {e}")
+
     script["_corner"] = corner.key
     script["_speaker"] = corner.speaker
     script["_date"] = day
+    if research:
+        script["_research"] = research
     return script
 
 

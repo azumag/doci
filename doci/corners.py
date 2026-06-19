@@ -59,11 +59,22 @@ def _read_prompt(name: str) -> str:
     return (config.PROMPTS / name).read_text(encoding="utf-8")
 
 
-def build_prompt(corner: Corner, date: str, past_topics: list[str]) -> str:
-    """persona + output_rules + corner を結合した最終プロンプトを返す。"""
+def build_prompt(
+    corner: Corner, date: str, past_topics: list[str], research: dict | None = None
+) -> str:
+    """persona + output_rules + corner を結合した最終プロンプトを返す。
+
+    research(issue #6)が渡された場合は、リサーチ済みの題材＋検証済み事実ブロックを
+    末尾に足し、題材選定をせずその具体を織り込ませる。
+    """
     persona = _read_prompt(corner.persona_file)
     rules = _read_prompt("output_rules.md")
     corner_tpl = _read_prompt(corner.corner_file)
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
     corner_body = corner_tpl.replace("{date}", date).replace("{past_topics}", past)
-    return f"{persona}\n\n{rules}\n\n{corner_body}\n"
+    prompt = f"{persona}\n\n{rules}\n\n{corner_body}\n"
+    if research:
+        from . import research as research_mod
+
+        prompt += "\n" + research_mod.brief_for_prompt(research) + "\n"
+    return prompt
