@@ -120,11 +120,13 @@ YOUTUBE_CLIENT_SECRET_FILE = get("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.js
 YOUTUBE_TOKEN_FILE = get("YOUTUBE_TOKEN_FILE", "youtube_token.json")
 YOUTUBE_PRIVACY = get("YOUTUBE_PRIVACY", "unlisted")
 
-# --- visual density (issue #4): 長尺で画像枚数を尺連動で増やす ---
-# 画像1枚あたりの目安表示秒。短いほど画が増えて間延びしにくいがコスト増。
+# --- visual density (issue #4): 画像枚数を尺連動で増やす ---
+# 画像1枚あたりの目安表示秒。これが密度の実ノブ（小さいほど画が増え間延びしにくい）。
+# 実枚数は ceil(尺/SECONDS_PER_IMAGE) で尺に連動する。
 SECONDS_PER_IMAGE = get_float("SECONDS_PER_IMAGE", 11.0)
-# 1本あたりの画像枚数上限（生成コスト/時間の歯止め）。
-MAX_IMAGES = get_int("MAX_IMAGES", 16)
+# 1本あたりの画像枚数の絶対上限（暴走防止のバックストップ）。素材はPexsels(無料)なので
+# 旧16から引上げ、長尺(最大~600秒)でも尺連動の枚数が活きるようにする。600/11≒55 を覆う。
+MAX_IMAGES = get_int("MAX_IMAGES", 60)
 
 # --- video ---
 VIDEO_WIDTH = get_int("VIDEO_WIDTH", 1080)
