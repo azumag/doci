@@ -275,7 +275,11 @@ def compose(
                 f"[{vlabel}][{idx}:v]overlay=0:0:enable='between(t,{s:.3f},{e:.3f})'[{out_lbl}]"
             )
             vlabel = out_lbl
-        vmap = f"[{vlabel}]" if vfilters else "0:v"
+        # 末尾途切れ防止: 連結動画はクリップのフレーム量子化で total より僅かに短くなり得る。
+        # -shortest だと短い動画長に合わせて音声(ナレーション)末尾が切れるため、最終フレームを
+        # 複製(tpad)して total を必ず超える長さにし、-t total で正確に切る（-shortest は使わない）。
+        vfilters.append(f"[{vlabel}]tpad=stop_mode=clone:stop_duration=3[vout]")
+        vmap = "[vout]"
 
         afilters: list[str] = []
         if bgm:
@@ -295,7 +299,7 @@ def compose(
             "-map", vmap, "-map", amap,
             "-r", str(fps), "-c:v", "libx264", "-preset", "medium", "-crf", "20",
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-            "-t", f"{total}", "-shortest", "-movflags", "+faststart", str(out_path),
+            "-t", f"{total}", "-movflags", "+faststart", str(out_path),
         ]
         _run(cmd)
     return out_path
