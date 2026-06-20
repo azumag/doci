@@ -29,6 +29,11 @@ class AssetError(RuntimeError):
     pass
 
 
+# 同一プロセス(=1本の生成)内で検索結果をキャッシュ。長尺で同じシーンの query を
+# 変種ごとに何度も叩いてレート制限(403)に当たるのを防ぐ。キーは (種別, query)。
+_search_cache: dict[tuple[str, str], list[dict]] = {}
+
+
 def _dims(aspect_ratio: str) -> tuple[int, int]:
     """'9:16' 等 → 動画の縦(VIDEO_HEIGHT)基準で (w, h) を返す。"""
     try:
@@ -42,6 +47,9 @@ def _dims(aspect_ratio: str) -> tuple[int, int]:
 
 # ---------------- Pexels ----------------
 def _pexels_search(query: str, key: str, per_page: int, orientation: str) -> list[dict]:
+    ck = ("photo", query)
+    if ck in _search_cache:
+        return _search_cache[ck]
     qs = urllib.parse.urlencode(
         {"query": query[:400], "orientation": orientation, "per_page": per_page}
     )
@@ -54,7 +62,9 @@ def _pexels_search(query: str, key: str, per_page: int, orientation: str) -> lis
             d = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raise AssetError(f"Pexels HTTP {e.code}: {e.read().decode()[:200]}")
-    return d.get("photos") or []
+    photos = d.get("photos") or []
+    _search_cache[ck] = photos
+    return photos
 
 
 def _pexels_fetch(query: str, out_path: Path, aspect_ratio: str, variant: int) -> Path | None:
@@ -99,6 +109,9 @@ def fetch_image(
 
 # ---------------- Pexels Videos（動画素材） ----------------
 def _pexels_video_search(query: str, key: str, per_page: int, orientation: str) -> list[dict]:
+    ck = ("video", query)
+    if ck in _search_cache:
+        return _search_cache[ck]
     qs = urllib.parse.urlencode(
         {"query": query[:400], "orientation": orientation, "per_page": per_page}
     )
@@ -111,7 +124,9 @@ def _pexels_video_search(query: str, key: str, per_page: int, orientation: str) 
             d = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raise AssetError(f"Pexels動画検索 HTTP {e.code}: {e.read().decode()[:200]}")
-    return d.get("videos") or []
+    videos = d.get("videos") or []
+    _search_cache[ck] = videos
+    return videos
 
 
 def _best_portrait_file(video: dict, max_h: int) -> dict | None:

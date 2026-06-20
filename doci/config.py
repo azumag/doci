@@ -70,8 +70,8 @@ SCRIPT_RESEARCH = get_bool("SCRIPT_RESEARCH", False)
 SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
 RESEARCH_MODEL = get("RESEARCH_MODEL", "claude-sonnet-4-6")
 FACTCHECK_MODEL = get("FACTCHECK_MODEL", "claude-opus-4-8")
-# リサーチ/チェックは Web検索が走り時間がかかるため長めの上限。
-SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 300)
+# リサーチ/チェックは Web検索＋長尺narrationで時間がかかるため長めの上限（長尺で300sは不足）。
+SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # リサーチの再試行回数。claude+Web が稀に不正JSONを返すため。高価なので控えめ。

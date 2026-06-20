@@ -61,31 +61,43 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         base_prompt = sm["visual_prompt"]
         # 1) まず実フリー素材を当てる（issue #9）。variant=k で同一シーンは別候補を選ぶ。
         #    ASSET_MEDIA=mix はシーン主画(k=0)を動画、使い回し(k>0)を写真に。video は全て動画優先。
+        #    動画→写真→AI生成 の順に、各段が独立に劣化フォールバックする。
         got_path, is_video = None, False
         if config.ASSET_BACKEND not in ("", "none"):
             want_video = config.ASSET_MEDIA == "video" or (config.ASSET_MEDIA == "mix" and k == 0)
-            try:
-                if want_video:
+            if want_video:
+                try:
                     vid = workdir / f"scene_{si:02d}_{k}.mp4"
                     got = assets.fetch_video(base_prompt, vid, variant=k)
                     if got is not None:
                         got_path, is_video = got, True
                         _log(f"素材取得(動画) {j + 1}/{n_images} (scene{si} var{k}, pexels)")
-                if got_path is None:  # 写真モード or 動画が無かった
+                except Exception as e:  # 動画失敗は写真へ
+                    _log(f"動画取得失敗: {e} → 写真へ")
+            if got_path is None:  # 写真モード or 動画が無かった/失敗
+                try:
                     got = assets.fetch_image(base_prompt, img, aspect_ratio="9:16", variant=k)
                     if got is not None:
                         got_path = got
                         _log(f"素材取得(写真) {j + 1}/{n_images} (scene{si} var{k}, pexels)")
-            except Exception as e:  # 素材失敗時はAI生成へフォールバック
-                _log(f"素材取得失敗({config.ASSET_BACKEND}): {e} → AI生成にフォールバック")
+                except Exception as e:  # 写真失敗はAI生成へ
+                    _log(f"写真取得失敗: {e} → AI生成へ")
         # 2) 素材が無ければAI生成（構図変化語を足して使い回しの単調を避ける）。
         if got_path is None:
             vprompt = base_prompt
             if k > 0:
                 vprompt = f"{base_prompt}, alternate camera angle and composition, variation {k + 1}"
             _log(f"画像生成 {j + 1}/{n_images} (scene{si} var{k}, {config.IMAGE_BACKEND})…")
-            imagegen.generate_image(vprompt, img, aspect_ratio="9:16")
-            got_path = img
+            try:
+                imagegen.generate_image(vprompt, img, aspect_ratio="9:16")
+                got_path = img
+            except Exception as e:  # AI生成も不可(例: Gemini課金停止)→直前の素材を流用して継続
+                if scene_objs:
+                    _log(f"AI生成失敗: {e} → 直前の素材を流用")
+                    prev = scene_objs[-1]
+                    got_path, is_video = prev.path, prev.is_video
+                else:
+                    raise
         path = got_path
         # Minimax動画化は、既にPexsels動画でない静止画(is_video=False)に対してのみ。
         if use_video and not is_video and k == 0 and si < video_scenes:
