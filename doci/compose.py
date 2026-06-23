@@ -145,7 +145,7 @@ def _wrap(text: str, width: int = SUB_LINE_CHARS, max_lines: int = SUB_MAX_LINES
     return "\n".join(lines[:max_lines])
 
 
-def _render_caption_png(text: str, out_png: Path) -> bool:
+def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
     """字幕を透過PNGに描画。成功時 True。フォント/Pillow 不在なら False。"""
     font_path = _font_path()
     if not font_path:
@@ -155,8 +155,8 @@ def _render_caption_png(text: str, out_png: Path) -> bool:
     except Exception:
         return False
 
-    W, H = config.VIDEO_WIDTH, config.VIDEO_HEIGHT
-    size = int(W * 0.060)
+    # フォントは短辺基準（横16:9でも縦9:16でも見た目の文字サイズを一定に保つ）。
+    size = int(min(W, H) * 0.060)
     try:
         font = ImageFont.truetype(font_path, size, index=0)
     except Exception:
@@ -188,8 +188,8 @@ def _render_caption_png(text: str, out_png: Path) -> bool:
     return True
 
 
-def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path) -> Path:
-    W, H, fps = config.VIDEO_WIDTH, config.VIDEO_HEIGHT, config.VIDEO_FPS
+def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: int) -> Path:
+    fps = config.VIDEO_FPS
     out = tmp / f"scene_{idx:02d}.mp4"
     frames = max(1, round(dur * fps))
     tail = ["-r", str(fps), "-c:v", "libx264", "-preset", "veryfast",
@@ -225,18 +225,22 @@ def compose(
     out_path: Path,
     bgm: Path | None = None,
     segments=None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> Path:
     if not scenes:
         raise ValueError("scenes が空です")
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    W = width or config.VIDEO_WIDTH
+    H = height or config.VIDEO_HEIGHT
     fps = config.VIDEO_FPS
     total = narration_dur + 0.4
     durs = _scene_durations(total, len(scenes))
 
     with tempfile.TemporaryDirectory(prefix="doci_compose_") as td:
         tmp = Path(td)
-        clips = [_build_scene_clip(s, d, i, tmp) for i, (s, d) in enumerate(zip(scenes, durs))]
+        clips = [_build_scene_clip(s, d, i, tmp, W, H) for i, (s, d) in enumerate(zip(scenes, durs))]
         silent = _concat(clips, tmp)
 
         # 字幕PNG。segments があれば「発話フル字幕」（チャンク窓に同期: issue #5）、
@@ -245,7 +249,7 @@ def compose(
         if segments:
             for text, s, e in build_subtitles(segments):
                 png = tmp / f"cap_{len(caps):03d}.png"
-                if _render_caption_png(text, png):
+                if _render_caption_png(text, png, W, H):
                     caps.append((png, s, e))
         else:
             t = 0.0
@@ -254,7 +258,7 @@ def compose(
                 t = e
                 if sc.caption:
                     png = tmp / f"cap_{len(caps):03d}.png"
-                    if _render_caption_png(sc.caption, png):
+                    if _render_caption_png(sc.caption, png, W, H):
                         caps.append((png, s, e))
 
         inputs = ["-i", str(silent), "-i", str(narration_wav)]

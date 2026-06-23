@@ -40,6 +40,13 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     )
     _log(f"narration {tts.duration:.1f}s (spk{corner.speaker} speed{v.speed} into{v.intonation})")
 
+    # 2.5) 尺が決まったので向き・サイズを決める。longform(>180s=YouTube通常動画)は横16:9、
+    #      ショートは縦9:16。以降の素材取得・合成・AI生成へ同じ寸法/向きを流す。
+    route = routing.classify(tts.duration)
+    out_w, out_h, orientation = routing.output_spec(route, config.VIDEO_WIDTH, config.VIDEO_HEIGHT)
+    aspect = "16:9" if route.landscape else "9:16"
+    _log(f"出力: {orientation} {out_w}x{out_h} (tier={route.tier})")
+
     # 3) 映像（尺連動で画像枚数を増やす: issue #4）
     #    短尺は台本のシーン数のまま。長尺はシーンのプロンプトを順序保存で使い回し、
     #    1枚あたり約 SECONDS_PER_IMAGE 秒になるよう枚数を増やして間延びを防ぐ。
@@ -68,7 +75,9 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
             if want_video:
                 try:
                     vid = workdir / f"scene_{si:02d}_{k}.mp4"
-                    got = assets.fetch_video(base_prompt, vid, variant=k)
+                    got = assets.fetch_video(
+                        base_prompt, vid, width=out_w, height=out_h, orientation=orientation, variant=k
+                    )
                     if got is not None:
                         got_path, is_video = got, True
                         _log(f"素材取得(動画) {j + 1}/{n_images} (scene{si} var{k}, pexels)")
@@ -76,7 +85,9 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
                     _log(f"動画取得失敗: {e} → 写真へ")
             if got_path is None:  # 写真モード or 動画が無かった/失敗
                 try:
-                    got = assets.fetch_image(base_prompt, img, aspect_ratio="9:16", variant=k)
+                    got = assets.fetch_image(
+                        base_prompt, img, width=out_w, height=out_h, orientation=orientation, variant=k
+                    )
                     if got is not None:
                         got_path = got
                         _log(f"素材取得(写真) {j + 1}/{n_images} (scene{si} var{k}, pexels)")
@@ -89,7 +100,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
                 vprompt = f"{base_prompt}, alternate camera angle and composition, variation {k + 1}"
             _log(f"画像生成 {j + 1}/{n_images} (scene{si} var{k}, {config.IMAGE_BACKEND})…")
             try:
-                imagegen.generate_image(vprompt, img, aspect_ratio="9:16")
+                imagegen.generate_image(vprompt, img, aspect_ratio=aspect)
                 got_path = img
             except Exception as e:  # AI生成も不可(例: Gemini課金停止)→直前の素材を流用して継続
                 if scene_objs:
@@ -112,19 +123,19 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
                 _log(f"動画生成失敗→静止画にフォールバック: {e}")
         scene_objs.append(compose.Scene(path=path, is_video=is_video, caption=sm.get("caption", "")))
 
-    # 4) 合成
+    # 4) 合成（2.5で決めた向き・サイズで）
     _log("合成 (ffmpeg)…")
     out_mp4 = workdir / "video.mp4"
     compose.compose(
         scene_objs, tts.wav_path, tts.duration, out_mp4,
         bgm=config.bgm_path(), segments=tts.segments,
+        width=out_w, height=out_h,
     )
     _log(f"動画完成: {out_mp4} ({out_mp4.stat().st_size} bytes)")
 
-    # 4.5) 尺→配信ルーティング（issue #3）
-    route = routing.classify(tts.duration)
+    # 4.5) 配信ルーティング（route は 2.5 で算出済み: issue #3）
     _log(
-        f"ルート: {route.tier} ({tts.duration:.0f}s) "
+        f"ルート: {route.tier} ({tts.duration:.0f}s) {orientation} "
         f"youtube_short={route.is_youtube_short} 推奨={'/'.join(route.platforms)}"
     )
 

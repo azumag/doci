@@ -34,15 +34,14 @@ class AssetError(RuntimeError):
 _search_cache: dict[tuple[str, str], list[dict]] = {}
 
 
-def _dims(aspect_ratio: str) -> tuple[int, int]:
-    """'9:16' 等 → 動画の縦(VIDEO_HEIGHT)基準で (w, h) を返す。"""
-    try:
-        aw, ah = (int(x) for x in aspect_ratio.split(":"))
-        h = config.VIDEO_HEIGHT
-        w = round(h * aw / ah)
-        return w, h
-    except Exception:  # noqa: BLE001
-        return config.VIDEO_WIDTH, config.VIDEO_HEIGHT
+def _resolve(
+    width: int | None, height: int | None, orientation: str | None
+) -> tuple[int, int, str]:
+    """未指定なら config 既定（縦）で補完して (w, h, orientation) を返す。"""
+    w = width or config.VIDEO_WIDTH
+    h = height or config.VIDEO_HEIGHT
+    o = orientation or config.PEXELS_ORIENTATION
+    return w, h, o
 
 
 # ---------------- Pexels ----------------
@@ -67,14 +66,15 @@ def _pexels_search(query: str, key: str, per_page: int, orientation: str) -> lis
     return photos
 
 
-def _pexels_fetch(query: str, out_path: Path, aspect_ratio: str, variant: int) -> Path | None:
+def _pexels_fetch(
+    query: str, out_path: Path, width: int, height: int, orientation: str, variant: int
+) -> Path | None:
     key = config.PEXELS_API_KEY
     if not key:
         raise AssetError("PEXELS_API_KEY が未設定です (ASSET_BACKEND=pexels)")
-    w, h = _dims(aspect_ratio)
     # 権利回避: 検索語からブランド/製品名を除く（generic語でも実機ロゴ混入は完全には防げない）。
     query = imagery.strip_brands(query)
-    photos = _pexels_search(query, key, config.ASSET_PER_PAGE, config.PEXELS_ORIENTATION)
+    photos = _pexels_search(query, key, config.ASSET_PER_PAGE, orientation)
     if not photos:
         return None
     # 同一シーンの2枚目以降(variant>0)は別候補を選んで使い回しの単調を避ける。
@@ -82,8 +82,8 @@ def _pexels_fetch(query: str, out_path: Path, aspect_ratio: str, variant: int) -
     base = (photo.get("src") or {}).get("original") or ""
     if not base:
         return None
-    # 画像URLパラメータでサーバ側に直接9:16クロップさせる（合成側のクロップ不要）。
-    url = f"{base}?auto=compress&cs=tinysrgb&fit=crop&w={w}&h={h}"
+    # 画像URLパラメータでサーバ側に直接 width×height へクロップさせる（合成側のクロップ不要）。
+    url = f"{base}?auto=compress&cs=tinysrgb&fit=crop&w={width}&h={height}"
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
@@ -96,14 +96,21 @@ def _pexels_fetch(query: str, out_path: Path, aspect_ratio: str, variant: int) -
 
 
 def fetch_image(
-    query: str, out_path: Path, aspect_ratio: str = "9:16", variant: int = 0
+    query: str,
+    out_path: Path,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    orientation: str | None = None,
+    variant: int = 0,
 ) -> Path | None:
-    """素材を1枚取得して out_path に保存。該当無しは None、設定不備等は AssetError。"""
+    """素材を1枚取得して out_path に保存。寸法/向き未指定は config 既定(縦)。該当無しは None。"""
     backend = config.ASSET_BACKEND
     if backend in ("", "none"):
         return None
     if backend == "pexels":
-        return _pexels_fetch(query, out_path, aspect_ratio, variant)
+        w, h, o = _resolve(width, height, orientation)
+        return _pexels_fetch(query, out_path, w, h, o, variant)
     raise AssetError(f"unknown ASSET_BACKEND: {backend}")
 
 
@@ -129,28 +136,39 @@ def _pexels_video_search(query: str, key: str, per_page: int, orientation: str) 
     return videos
 
 
-def _best_portrait_file(video: dict, max_h: int) -> dict | None:
-    """縦長(高さ≧幅)の動画ファイルから、高さ≦max_h の最大を選ぶ。無ければ最小（DL抑制）。"""
+def _best_file(video: dict, max_long_edge: int, landscape: bool) -> dict | None:
+    """向き(landscape=横)に合う動画ファイルから、長辺≦max_long_edge の最大を選ぶ。
+    無ければ最小（DL抑制）。"""
     files = [f for f in (video.get("video_files") or []) if f.get("link")]
-    port = [f for f in files if (f.get("height") or 0) >= (f.get("width") or 1)] or files
-    if not port:
+
+    def match(f: dict) -> bool:
+        w, h = f.get("width") or 0, f.get("height") or 1
+        return (w >= h) if landscape else (h >= w)
+
+    def long_edge(f: dict) -> int:
+        return max(f.get("width") or 0, f.get("height") or 0)
+
+    cand = [f for f in files if match(f)] or files
+    if not cand:
         return None
-    le = [f for f in port if (f.get("height") or 0) <= max_h]
+    le = [f for f in cand if long_edge(f) <= max_long_edge]
     if le:
-        return max(le, key=lambda f: f.get("height") or 0)
-    return min(port, key=lambda f: f.get("height") or 0)
+        return max(le, key=long_edge)
+    return min(cand, key=long_edge)
 
 
-def _pexels_video_fetch(query: str, out_path: Path, variant: int) -> Path | None:
+def _pexels_video_fetch(
+    query: str, out_path: Path, width: int, height: int, orientation: str, variant: int
+) -> Path | None:
     key = config.PEXELS_API_KEY
     if not key:
         raise AssetError("PEXELS_API_KEY が未設定です (ASSET_BACKEND=pexels)")
     query = imagery.strip_brands(query)
-    videos = _pexels_video_search(query, key, config.ASSET_PER_PAGE, config.PEXELS_ORIENTATION)
+    videos = _pexels_video_search(query, key, config.ASSET_PER_PAGE, orientation)
     if not videos:
         return None
     video = videos[variant % len(videos)]
-    f = _best_portrait_file(video, config.VIDEO_HEIGHT)
+    f = _best_file(video, max(width, height), orientation == "landscape")
     if not f:
         return None
     out_path = Path(out_path)
@@ -164,24 +182,38 @@ def _pexels_video_fetch(query: str, out_path: Path, variant: int) -> Path | None
     return out_path
 
 
-def fetch_video(query: str, out_path: Path, variant: int = 0) -> Path | None:
-    """動画素材を取得して out_path(mp4) に保存。該当無しは None。compose側で9:16クロップ＆尺ループ。"""
+def fetch_video(
+    query: str,
+    out_path: Path,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    orientation: str | None = None,
+    variant: int = 0,
+) -> Path | None:
+    """動画素材を取得して out_path(mp4) に保存。該当無しは None。compose側で width×height クロップ＆尺ループ。"""
     backend = config.ASSET_BACKEND
     if backend in ("", "none"):
         return None
     if backend == "pexels":
-        return _pexels_video_fetch(query, out_path, variant)
+        w, h, o = _resolve(width, height, orientation)
+        return _pexels_video_fetch(query, out_path, w, h, o, variant)
     raise AssetError(f"unknown ASSET_BACKEND: {backend}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="素材取得テスト")
     ap.add_argument("--query", required=True)
-    ap.add_argument("--aspect", default="9:16")
+    ap.add_argument("--orientation", default="portrait", choices=["portrait", "landscape"])
+    ap.add_argument("--video", action="store_true", help="動画素材を取得")
     ap.add_argument("--variant", type=int, default=0)
     ap.add_argument("--out", default=str(config.OUTPUT / "asset_test.jpg"))
     args = ap.parse_args()
-    p = fetch_image(args.query, Path(args.out), args.aspect, args.variant)
+    # 向きに応じて width/height（長辺1920・短辺1080）を決める。
+    long_e, short_e = max(config.VIDEO_WIDTH, config.VIDEO_HEIGHT), min(config.VIDEO_WIDTH, config.VIDEO_HEIGHT)
+    w, h = (long_e, short_e) if args.orientation == "landscape" else (short_e, long_e)
+    fn = fetch_video if args.video else fetch_image
+    p = fn(args.query, Path(args.out), width=w, height=h, orientation=args.orientation, variant=args.variant)
     if p is None:
         print(f"[{config.ASSET_BACKEND}] 該当素材なし: {args.query!r}")
     else:

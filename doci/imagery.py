@@ -36,6 +36,16 @@ def add_avoid(prompt: str) -> str:
     return f"{p}. {AVOID_SUFFIX}"
 
 
+def orient_prompt(prompt: str, aspect_ratio: str) -> str:
+    """visual_prompt は縦9:16前提で書かれるため、横(16:9)生成時は向きの語を入替える。"""
+    if aspect_ratio != "16:9":
+        return prompt
+    p = re.sub(r"9\s*:\s*16", "16:9", prompt)
+    p = re.sub(r"\bvertical\b", "horizontal", p, flags=re.IGNORECASE)
+    p = re.sub(r"\bportrait\b", "landscape", p, flags=re.IGNORECASE)
+    return p
+
+
 def strip_brands(query: str) -> str:
     """検索語からブランド/製品名を除去（残りで検索する）。空になれば元を返す。"""
     out = query

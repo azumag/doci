@@ -108,6 +108,8 @@ def _openrouter_image(prompt: str, out_path: Path, aspect_ratio: str) -> Path:
 
 
 def generate_image(prompt: str, out_path: Path, aspect_ratio: str = "9:16") -> Path:
+    # 横(16:9)生成時は visual_prompt 内の縦向きの語を入替える。
+    prompt = imagery.orient_prompt(prompt, aspect_ratio)
     # 権利回避: ロゴ/商標/実在人物/文字を避ける否定制約を付与（issue #9 派生）。
     prompt = imagery.add_avoid(prompt)
     backend = config.IMAGE_BACKEND

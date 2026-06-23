@@ -21,15 +21,28 @@ class Route:
     is_youtube_short: bool  # YouTube で Short として出すか
     platforms: list[str]  # 推奨投稿先（将来のマルチ投稿用メタ）
     hashtag: str  # タイトル/概要に付すタグ（Short のとき "#Shorts"、長尺は ""）
+    landscape: bool  # 出力の向き。通常動画(longform)は横16:9、ショートは縦9:16
 
 
 def classify(duration_sec: float) -> Route:
     """ナレーション（≒動画）の尺から配信ルートを決める。"""
     if duration_sec <= 60:
         # どのショート枠にも好適。最も拡散しやすい帯。
-        return Route("short", True, ["youtube_short", "tiktok", "reels"], "#Shorts")
+        return Route("short", True, ["youtube_short", "tiktok", "reels"], "#Shorts", False)
     if duration_sec <= SHORTS_MAX_SEC:
         # まだ Short/Reels の上限内。やや長めなので TikTok 寄り。
-        return Route("long_short", True, ["youtube_short", "reels", "tiktok"], "#Shorts")
-    # 180秒超は Short にならない → 通常の YouTube 動画として扱う。
-    return Route("longform", False, ["youtube"], "")
+        return Route("long_short", True, ["youtube_short", "reels", "tiktok"], "#Shorts", False)
+    # 180秒超は Short にならない → 通常の YouTube 動画（横16:9）として扱う。
+    return Route("longform", False, ["youtube"], "", True)
+
+
+def output_spec(route: Route, base_w: int, base_h: int) -> tuple[int, int, str]:
+    """route と基準寸法(縦想定)から (width, height, orientation) を返す。
+
+    longform は横（長辺×短辺を入替）、それ以外は縦のまま。base は config の
+    VIDEO_WIDTH/HEIGHT を想定（縦 1080x1920）。
+    """
+    long_e, short_e = max(base_w, base_h), min(base_w, base_h)
+    if route.landscape:
+        return long_e, short_e, "landscape"   # 1920x1080
+    return short_e, long_e, "portrait"          # 1080x1920
