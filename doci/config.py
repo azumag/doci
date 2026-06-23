@@ -118,10 +118,32 @@ VOICEVOX_URL_FALLBACK = get("VOICEVOX_URL_FALLBACK", "http://127.0.0.1:50021").r
 VOICE_CHINESE_AI = get_int("VOICE_CHINESE_AI", 3)
 VOICE_AMERICAN_AI = get_int("VOICE_AMERICAN_AI", 14)
 
+# --- 配信投稿 (issue #3): route.platforms と各 PUBLISH_* で出し分け ---
+# do_upload(--no-upload で無効) が大元のスイッチ。その上で各プラットフォームを個別に有効化。
+PUBLISH_DRY_RUN = get_bool("PUBLISH_DRY_RUN", False)   # 実投稿せずログのみ（安全確認用）
+PUBLISH_YOUTUBE = get_bool("PUBLISH_YOUTUBE", True)    # 既存。既定ON
+PUBLISH_TIKTOK = get_bool("PUBLISH_TIKTOK", False)     # 新規。資格情報を入れてON
+PUBLISH_INSTAGRAM = get_bool("PUBLISH_INSTAGRAM", False)  # 後回し（公開ホスト方針未定）
+
 # --- youtube ---
 YOUTUBE_CLIENT_SECRET_FILE = get("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json")
 YOUTUBE_TOKEN_FILE = get("YOUTUBE_TOKEN_FILE", "youtube_token.json")
 YOUTUBE_PRIVACY = get("YOUTUBE_PRIVACY", "unlisted")
+
+# --- tiktok (Content Posting API) ---
+# 開発者アプリ: https://developers.tiktok.com/ 。scope=video.publish。
+# 審査前アプリは privacy=SELF_ONLY(非公開)のみ可。審査後に PUBLIC_TO_EVERYONE。
+TIKTOK_CLIENT_KEY = get("TIKTOK_CLIENT_KEY", "")
+TIKTOK_CLIENT_SECRET = get("TIKTOK_CLIENT_SECRET", "")
+TIKTOK_TOKEN_FILE = get("TIKTOK_TOKEN_FILE", "tiktok_token.json")
+TIKTOK_PRIVACY = get("TIKTOK_PRIVACY", "SELF_ONLY")
+TIKTOK_REDIRECT_URI = get("TIKTOK_REDIRECT_URI", "http://127.0.0.1:8723/callback")
+
+# --- instagram (Graph API・後回し) ---
+# 動画は公開URLから取得される仕様。INSTAGRAM_HOST_BASE は公開ホストの基底URL（未定）。
+INSTAGRAM_USER_ID = get("INSTAGRAM_USER_ID", "")
+INSTAGRAM_ACCESS_TOKEN = get("INSTAGRAM_ACCESS_TOKEN", "")
+INSTAGRAM_HOST_BASE = get("INSTAGRAM_HOST_BASE", "")
 
 # --- visual density (issue #4): 画像枚数を尺連動で増やす ---
 # 画像1枚あたりの目安表示秒。これが密度の実ノブ（小さいほど画が増え間延びしにくい）。

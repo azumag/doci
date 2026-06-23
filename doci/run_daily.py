@@ -139,16 +139,23 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         f"youtube_short={route.is_youtube_short} 推奨={'/'.join(route.platforms)}"
     )
 
-    # 5) アップロード（現状 YouTube のみ実投稿。tier で Short/長尺を出し分け）
+    # 5) アップロード（route.platforms と各 PUBLISH_* で出し分け: issue #3）
     video_id = None
+    pub_results: list = []
     if do_upload:
-        from . import youtube
-        _log("YouTube アップロード…")
-        desc = script["description"] + (f"\n\n{route.hashtag}" if route.hashtag else "")
-        tags = script.get("tags", [])
-        if route.is_youtube_short and "Shorts" not in tags:
-            tags = tags + ["Shorts"]
-        video_id = youtube.upload(out_mp4, script["title"], desc, tags)
+        from . import publish
+        _log(f"投稿 (route={route.tier} → {'/'.join(route.platforms)})…")
+        pub_results = publish.publish(
+            out_mp4,
+            title=script["title"],
+            description=script["description"],
+            tags=script.get("tags", []),
+            route=route,
+        )
+        for r in pub_results:
+            _log(f"  {r.platform}: {r.status}{(' ' + (r.url or r.detail)) if (r.url or r.detail) else ''}")
+            if r.platform == "youtube" and r.status == "ok":
+                video_id = r.id
     else:
         _log("アップロードはスキップ (--no-upload)")
 
@@ -162,6 +169,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
             "duration_sec": round(tts.duration, 1),
             "tier": route.tier,
             "platforms": route.platforms,
+            "publish": [{"platform": r.platform, "status": r.status, "id": r.id} for r in pub_results],
         },
     )
     return {
@@ -172,6 +180,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         "duration_sec": round(tts.duration, 1),
         "tier": route.tier,
         "platforms": route.platforms,
+        "publish": [{"platform": r.platform, "status": r.status} for r in pub_results],
     }
 
 
