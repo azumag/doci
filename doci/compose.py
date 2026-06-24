@@ -218,6 +218,42 @@ def _concat(clips: list[Path], tmp: Path) -> Path:
     return out
 
 
+def _build_subtitle_track(
+    caps: list[tuple[Path, float, float]], total: float, tmp: Path, W: int, H: int, fps: int
+) -> Path:
+    """全字幕PNGを1本の透過動画(qtrle)に連結。各字幕は時間窓に、隙間は透過で埋める。
+    これを最終合成で1回 overlay するだけにし、字幕本数に依らずO(1)の合成にする（長尺高速化）。
+    この環境の ffmpeg は libass 非対応のため、ASSではなく透過トラック方式を採る。
+    """
+    from PIL import Image
+
+    blank = tmp / "cap_blank.png"
+    Image.new("RGBA", (W, H), (0, 0, 0, 0)).save(blank)
+    segs: list[tuple[Path, float]] = []
+    t = 0.0
+    for png, s, e in sorted(caps, key=lambda c: c[1]):
+        if s > t + 1e-3:
+            segs.append((blank, s - t))  # 隙間=透過
+        segs.append((png, max(e - s, 1.0 / fps)))
+        t = max(t, e)
+    if total > t + 1e-3:
+        segs.append((blank, total - t))
+    lines = ["ffconcat version 1.0"]
+    for png, dur in segs:
+        lines.append(f"file '{Path(png).resolve().as_posix()}'")
+        lines.append(f"duration {dur:.3f}")
+    if segs:  # concat demuxer は最後の file の duration を効かせるため末尾を1回繰り返す
+        lines.append(f"file '{Path(segs[-1][0]).resolve().as_posix()}'")
+    listf = tmp / "subs_concat.txt"
+    listf.write_text("\n".join(lines), encoding="utf-8")
+    out = tmp / "subtrack.mov"
+    _run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listf),
+        "-vf", f"fps={fps},format=rgba", "-c:v", "qtrle", str(out),
+    ])
+    return out
+
+
 def compose(
     scenes: list[Scene],
     narration_wav: Path,
@@ -261,28 +297,24 @@ def compose(
                     if _render_caption_png(sc.caption, png, W, H):
                         caps.append((png, s, e))
 
+        # 字幕は単一の透過トラックに連結して1回だけ overlay（字幕本数に依らずO(1)・長尺高速）。
         inputs = ["-i", str(silent), "-i", str(narration_wav)]
         bgm_idx = None
         if bgm:
             inputs += ["-stream_loop", "-1", "-i", str(bgm)]
             bgm_idx = 2
-        base = 2 + (1 if bgm else 0)
-        for png, _, _ in caps:
-            inputs += ["-loop", "1", "-i", str(png)]
-
-        vfilters: list[str] = []
-        vlabel = "0:v"
-        for k, (png, s, e) in enumerate(caps):
-            idx = base + k
-            out_lbl = f"v{k}"
-            vfilters.append(
-                f"[{vlabel}][{idx}:v]overlay=0:0:enable='between(t,{s:.3f},{e:.3f})'[{out_lbl}]"
-            )
-            vlabel = out_lbl
+        vparts: list[str] = []
+        if caps:
+            subtrack = _build_subtitle_track(caps, total, tmp, W, H, fps)
+            sub_idx = 2 + (1 if bgm else 0)
+            inputs += ["-i", str(subtrack)]
+            vparts.append(f"[0:v][{sub_idx}:v]overlay=0:0[vov]")
+            pad_src = "vov"
+        else:
+            pad_src = "0:v"
         # 末尾途切れ防止: 連結動画はクリップのフレーム量子化で total より僅かに短くなり得る。
-        # -shortest だと短い動画長に合わせて音声(ナレーション)末尾が切れるため、最終フレームを
-        # 複製(tpad)して total を必ず超える長さにし、-t total で正確に切る（-shortest は使わない）。
-        vfilters.append(f"[{vlabel}]tpad=stop_mode=clone:stop_duration=3[vout]")
+        # 最終フレームを複製(tpad)して total を必ず超える長さにし、-t total で正確に切る（-shortest不使用）。
+        vparts.append(f"[{pad_src}]tpad=stop_mode=clone:stop_duration=3[vout]")
         vmap = "[vout]"
 
         afilters: list[str] = []
@@ -295,10 +327,9 @@ def compose(
         else:
             amap = "1:a"
 
-        filt = ";".join(vfilters + afilters)
+        filt = ";".join(vparts + afilters)
         cmd = ["ffmpeg", "-y", *inputs]
-        if filt:
-            cmd += ["-filter_complex", filt]
+        cmd += ["-filter_complex", filt]
         cmd += [
             "-map", vmap, "-map", amap,
             "-r", str(fps), "-c:v", "libx264", "-preset", "medium", "-crf", "20",
