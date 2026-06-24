@@ -27,6 +27,7 @@ class Scene:
     path: Path
     is_video: bool
     caption: str = ""
+    static: bool = False  # 図表など：Ken Burns を掛けず静止表示（可読性優先）
 
 
 # --- 字幕（発話フルテロップ: issue #5） ---
@@ -221,6 +222,13 @@ def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: 
               f"crop={W}:{H},fps={fps},setsar=1,format=yuv420p")
         cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(scene.path),
                "-t", f"{dur}", "-vf", vf, *tail]
+    elif scene.static:
+        # 図表など: Ken Burns を掛けず静止。枠に収め、はみ出しは暗色でパッド（文字を切らない）。
+        vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0a0a0c,"
+              f"fps={fps},setsar=1,format=yuv420p")
+        cmd = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur}", "-i", str(scene.path),
+               "-vf", vf, *tail]
     else:
         vf = (f"scale={W * 2}:-1,"
               f"zoompan=z='min(zoom+0.0010,1.18)':d={frames}:"

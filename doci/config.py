@@ -76,6 +76,9 @@ SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # リサーチの再試行回数。claude+Web が稀に不正JSONを返すため。高価なので控えめ。
 SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)
+# --- 構成プラン: 起承転結＋図表策定（issue #2）。minimax が設計し qwen が執筆 ---
+SCRIPT_PLAN = get_bool("SCRIPT_PLAN", True)
+PLAN_MODEL = get("PLAN_MODEL", "opencode-go/minimax-m3")
 
 # --- 画像/動画バックエンド選択 ---
 # IMAGE_BACKEND: gemini (既定) | openrouter | minimax  ← 素材が無い時のAI生成フォールバック

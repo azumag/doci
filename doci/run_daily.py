@@ -59,13 +59,31 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     use_video = config.VIDEO_BACKEND == "minimax" and video_scenes > 0
     scene_objs: list[compose.Scene] = []
     occ: dict[int, int] = {}
+    chart_cache: dict[int, Path] = {}  # 図表は si ごとに1回だけ描画して使い回す
     for j in range(n_images):
         si = j * n_scenes // n_images  # スロット→元シーンへ順序保存でマップ
         k = occ.get(si, 0)
         occ[si] = k + 1
         sm = scenes_meta[si]
+        # 図表シーン（issue #2）: Pexsels/AIを使わず HTML→画像で描画し、静止表示する。
+        if sm.get("chart"):
+            cpath = chart_cache.get(si)
+            if cpath is None:
+                cpath = workdir / f"scene_{si:02d}_chart.png"
+                from . import charts
+                try:
+                    charts.render_chart(sm["chart"], cpath, width=out_w, height=out_h)
+                    _log(f"図表描画 {j + 1}/{n_images} (scene{si}, {sm['chart'].get('type')})")
+                except Exception as e:  # 図表失敗時は素材取得にフォールバック
+                    _log(f"図表描画失敗: {e} → 素材へ")
+                    cpath = None
+                chart_cache[si] = cpath
+            if cpath is not None:
+                scene_objs.append(compose.Scene(path=cpath, is_video=False, static=True,
+                                                caption=sm.get("caption", "")))
+                continue
         img = workdir / f"scene_{si:02d}_{k}.png"
-        base_prompt = sm["visual_prompt"]
+        base_prompt = sm.get("visual_prompt") or sm.get("caption") or "abstract background"
         # 1) まず実フリー素材を当てる（issue #9）。variant=k で同一シーンは別候補を選ぶ。
         #    ASSET_MEDIA=mix はシーン主画(k=0)を動画、使い回し(k>0)を写真に。video は全て動画優先。
         #    動画→写真→AI生成 の順に、各段が独立に劣化フォールバックする。

@@ -63,12 +63,16 @@ def _read_prompt(name: str) -> str:
 
 
 def build_prompt(
-    corner: Corner, date: str, past_topics: list[str], research: dict | None = None
+    corner: Corner,
+    date: str,
+    past_topics: list[str],
+    research: dict | None = None,
+    plan: dict | None = None,
 ) -> str:
     """persona + output_rules + corner を結合した最終プロンプトを返す。
 
-    research(issue #6)が渡された場合は、リサーチ済みの題材＋検証済み事実ブロックを
-    末尾に足し、題材選定をせずその具体を織り込ませる。
+    research(issue #6)があれば検証済み事実を、plan(issue #2)があれば起承転結＋図表の
+    構成プランを末尾に足す（題材選定はせず、その具体・構成に沿わせる）。
     """
     persona = _read_prompt(corner.persona_file)
     rules = _read_prompt("output_rules.md")
@@ -80,4 +84,8 @@ def build_prompt(
         from . import research as research_mod
 
         prompt += "\n" + research_mod.brief_for_prompt(research) + "\n"
+    if plan:
+        from . import plan as plan_mod
+
+        prompt += "\n" + plan_mod.brief_for_prompt(plan) + "\n"
     return prompt

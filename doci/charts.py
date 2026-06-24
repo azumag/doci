@@ -26,13 +26,14 @@ _BASE_CSS = """
 html,body{width:100%;height:100%;overflow:hidden}
 body{background:linear-gradient(135deg,#1d1711 0%,#0a0a0c 100%);
   font-family:'Hiragino Sans','Hiragino Kaku Gothic ProN',sans-serif;color:#f4efe6}
+/* 下部は字幕帯(約64%〜)を避けるため本体を上側に寄せる */
 .wrap{width:100%;height:100%;display:flex;flex-direction:column;
-  padding:7vh 8vw;position:relative}
+  padding:6vh 8vw 26vh 8vw;position:relative}
 .title{font-size:5.4vh;font-weight:800;line-height:1.25;letter-spacing:.01em;
   color:#fbf6ec;border-left:.7vh solid #f0b450;padding-left:1.6vw;margin-bottom:1vh}
 .unit{font-size:2.6vh;color:#9a9486;margin-bottom:3.5vh}
 .body{flex:1;display:flex;flex-direction:column;justify-content:center}
-.source{position:absolute;right:8vw;bottom:3.2vh;font-size:2vh;color:#7a7468}
+.source{position:absolute;right:8vw;bottom:27vh;font-size:2vh;color:#7a7468}
 /* 棒グラフ */
 .bars{display:flex;flex-direction:column;gap:3.2vh}
 .bar-row{display:flex;align-items:center;gap:1.6vw}

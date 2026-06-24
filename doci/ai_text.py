@@ -120,9 +120,23 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
             _log(f"リサーチ失敗→リサーチ無しで続行: {e}")
             research = None
 
-    # 2) 下書き（minimax-m3 等）。リサーチがあれば具体を織り込ませる。
-    #    minimax は稀に不完全JSON（narration/scenes 欠落・分割）を返すため再生成で吸収。
-    prompt = corners.build_prompt(corner, day, past_topics, research=research)
+    # 1.5) 構成プラン（issue #2）: minimax で起承転結＋図表を設計。失敗してもプラン無しで続行。
+    plan = None
+    if config.SCRIPT_PLAN:
+        from . import plan as plan_mod
+
+        _log(f"構成プラン (minimax) …")
+        try:
+            plan = plan_mod.make_plan(corner, research)
+            if plan:
+                _log(f"構成: 起承転結{len(plan.get('beats', []))}ビート / 図表 {len(plan.get('charts', []))}個")
+        except Exception as e:  # noqa: BLE001
+            _log(f"プラン失敗→プラン無しで続行: {e}")
+            plan = None
+
+    # 2) 執筆（qwen3.7-plus 等）。リサーチの具体＋プランの構成/図表に沿わせる。
+    #    稀に不完全JSONを返すため再生成で吸収。
+    prompt = corners.build_prompt(corner, day, past_topics, research=research, plan=plan)
     script = None
     last_err: Exception | None = None
     for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
@@ -131,9 +145,22 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
             break
         except ValueError as e:  # JSON抽出/必須キー不足（JSONDecodeError含む）
             last_err = e
-            _log(f"下書きJSON不良(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: {e}")
+            _log(f"執筆JSON不良(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: {e}")
     if script is None:
-        raise RuntimeError(f"下書きが規定回数で揃いませんでした: {last_err}")
+        raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
+
+    # 2.5) chart_id を実図表仕様に解決（データはプラン＝minimax由来を正とし取り違えを防ぐ）。
+    if plan and plan.get("charts"):
+        by_id = {c["id"]: c for c in plan["charts"]}
+        used = 0
+        for s in script["scenes"]:
+            cid = s.get("chart_id")
+            if cid is not None and int(cid) in by_id:
+                s["chart"] = by_id[int(cid)]
+                s.pop("chart_id", None)
+                used += 1
+        if used:
+            _log(f"図表を {used} シーンに配置")
 
     # 3) 後段ファクトチェック（issue #6）: 別モデル(opus)＋Web検証で narration を自動修正。
     if config.SCRIPT_FACTCHECK:
