@@ -349,9 +349,15 @@ def compose(
 
         afilters: list[str] = []
         if bgm:
+            # ナレーションを主役に保つミックス。
+            # 旧実装は amix(normalize=既定1) でナレーションが半減し、BGM(ピアノ)の強打で声が
+            # マスクされて「途切れ」て聞こえた。normalize=0 で声を等倍に保ち、さらに
+            # サイドチェインで「声がある間だけ BGM を自動で下げる」(放送のダッキング)。
             afilters.append(
-                f"[{bgm_idx}:a]volume={config.BGM_VOLUME}[bg];"
-                f"[1:a][bg]amix=inputs=2:duration=first:dropout_transition=3[a]"
+                f"[{bgm_idx}:a]volume={config.BGM_VOLUME},aformat=channel_layouts=mono[bgv];"
+                f"[1:a]aformat=channel_layouts=mono,asplit=2[n1][n2];"
+                f"[bgv][n1]sidechaincompress=threshold=0.03:ratio=10:attack=20:release=400[bgd];"
+                f"[n2][bgd]amix=inputs=2:normalize=0:duration=first[a]"
             )
             amap = "[a]"
         else:
