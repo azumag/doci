@@ -23,7 +23,7 @@ _extract_json = llm.extract_json
 
 
 def _run_claude_cli(prompt: str, model: str) -> str:
-    return llm.run_claude(prompt, model, timeout=240)
+    return llm.run_claude(prompt, model, timeout=config.SCRIPT_LLM_TIMEOUT)
 
 
 def _run_anthropic(prompt: str, model: str) -> str:
@@ -48,7 +48,7 @@ def _run_anthropic(prompt: str, model: str) -> str:
             "content-type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=240) as resp:
+    with urllib.request.urlopen(req, timeout=config.SCRIPT_LLM_TIMEOUT) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return "".join(b.get("text", "") for b in data.get("content", []))
 
@@ -68,7 +68,9 @@ def _run_opencode(prompt: str, model: str, agent: str) -> str:
     scratch = config.OUTPUT / ".opencode_scratch"
     scratch.mkdir(parents=True, exist_ok=True)
     cmd += ["--dir", str(scratch), prompt]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=config.SCRIPT_LLM_TIMEOUT
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"opencode failed (rc={proc.returncode}): {proc.stderr[:500]}")
     return proc.stdout

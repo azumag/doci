@@ -33,7 +33,8 @@ body{background:linear-gradient(135deg,#1d1711 0%,#0a0a0c 100%);
   color:#fbf6ec;border-left:.7vh solid #f0b450;padding-left:1.6vw;margin-bottom:1vh}
 .unit{font-size:2.6vh;color:#9a9486;margin-bottom:3.5vh}
 .body{flex:1;display:flex;flex-direction:column;justify-content:center}
-.source{position:absolute;right:8vw;bottom:27vh;font-size:2vh;color:#7a7468}
+.source{position:absolute;left:8vw;right:8vw;bottom:26.5vh;font-size:1.9vh;color:#7a7468;
+  text-align:right;line-height:1.35}
 /* 棒グラフ */
 .bars{display:flex;flex-direction:column;gap:3.2vh}
 .bar-row{display:flex;align-items:center;gap:1.6vw}
@@ -42,33 +43,41 @@ body{background:linear-gradient(135deg,#1d1711 0%,#0a0a0c 100%);
 .bar-fill{height:100%;background:linear-gradient(90deg,#e8862f,#f4c25c);border-radius:1vh;
   display:flex;align-items:center;justify-content:flex-end}
 .bar-val{font-size:3.8vh;font-weight:800;color:#fff;padding:0 1.4vw;white-space:nowrap}
-/* 大数字 */
-.stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2vh}
-.stat-num{font-size:24vh;font-weight:900;line-height:1;
+/* 大数字（font-size は内容長に応じ Python 側で算出しインライン指定） */
+.stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2.4vh}
+.stat-num{font-weight:900;line-height:1.05;white-space:nowrap;max-width:94vw;
   background:linear-gradient(90deg,#f0b450,#f4d98a);-webkit-background-clip:text;
   -webkit-text-fill-color:transparent;letter-spacing:-.01em}
-.stat-cap{font-size:4.4vh;color:#d8d2c4;text-align:center;max-width:70vw;line-height:1.4}
+.stat-cap{font-size:4.2vh;color:#d8d2c4;text-align:center;max-width:78vw;line-height:1.4}
 /* 比較（左→右） */
-.compare{flex:1;display:flex;align-items:center;justify-content:center;gap:3vw}
-.cmp-item{display:flex;flex-direction:column;align-items:center;gap:1.6vh;
-  background:#1a140d;border:.3vh solid #3a2f20;border-radius:2vh;padding:5vh 4vw;min-width:24vw}
-.cmp-val{font-size:11vh;font-weight:900;color:#f4c25c;line-height:1}
-.cmp-label{font-size:3.4vh;color:#cfc8ba}
-.cmp-arrow{font-size:9vh;color:#e8862f}
+.compare{flex:1;display:flex;align-items:center;justify-content:center;gap:2.5vw}
+.cmp-item{display:flex;flex-direction:column;align-items:center;gap:1.6vh;flex:1;min-width:0;max-width:40vw;
+  background:#1a140d;border:.3vh solid #3a2f20;border-radius:2vh;padding:4vh 2.5vw}
+.cmp-val{font-weight:900;color:#f4c25c;line-height:1;white-space:nowrap}
+.cmp-label{font-size:3.2vh;color:#cfc8ba;text-align:center;line-height:1.35}
+.cmp-arrow{font-size:8vh;color:#e8862f;flex-shrink:0}
 /* 年表 */
 .timeline{flex:1;display:flex;flex-direction:column;justify-content:center;gap:0}
-.tl-event{display:flex;align-items:flex-start;gap:2vw;position:relative;padding-bottom:4.5vh}
+.tl-event{display:flex;align-items:flex-start;gap:2.5vw;position:relative;padding-bottom:4.5vh}
 .tl-event:not(:last-child)::before{content:'';position:absolute;left:1.05vw;top:3.4vh;bottom:0;
   width:.35vh;background:#3a2f20}
 .tl-dot{width:2.1vw;height:2.1vw;border-radius:50%;background:#f0b450;flex-shrink:0;margin-top:1.4vh;
   box-shadow:0 0 0 .8vh rgba(240,180,80,.18)}
-.tl-year{font-size:4.4vh;font-weight:800;color:#f4c25c;width:13vw;flex-shrink:0}
-.tl-label{font-size:3.4vh;color:#e7e1d4;line-height:1.4;padding-top:.6vh}
+.tl-year{font-size:4vh;font-weight:800;color:#f4c25c;flex-shrink:0;white-space:nowrap;padding-right:3vw}
+.tl-label{font-size:3.3vh;color:#e7e1d4;line-height:1.4;padding-top:.4vh}
 """
 
 
 def _esc(s) -> str:
     return html.escape(str(s if s is not None else ""))
+
+
+def _fit_vw(text, budget_vw: float, cap_vw: float) -> float:
+    """1行表示の大きな文字を幅 budget_vw に収めるフォントサイズ(vw)を算出。
+    全角≈1em、半角(ASCII)≈0.6em として概算し、cap_vw を上限にする。
+    内容が長いほど自動で小さくなり、はみ出し・1文字折返しを防ぐ。"""
+    units = sum(0.6 if ord(c) < 128 else 1.0 for c in str(text or "")) or 1.0
+    return round(min(cap_vw, budget_vw / units), 2)
 
 
 def _page(title: str, unit: str, body: str, source: str) -> str:
@@ -101,8 +110,11 @@ def _bar(spec: dict) -> str:
 
 
 def _stat(spec: dict) -> str:
+    val = spec.get("value")
+    # 実フォント(weight900)は概算より約2割太いため予算を絞り、はみ出しを確実に防ぐ。
+    fs = _fit_vw(val, 74.0, 22.0)
     return (
-        f'<div class="stat"><div class="stat-num">{_esc(spec.get("value"))}</div>'
+        f'<div class="stat"><div class="stat-num" style="font-size:{fs}vw">{_esc(val)}</div>'
         f'<div class="stat-cap">{_esc(spec.get("caption"))}</div></div>'
     )
 
@@ -113,8 +125,9 @@ def _compare(spec: dict) -> str:
     for i, it in enumerate(items):
         if i:
             parts.append('<div class="cmp-arrow">→</div>')
+        fs = _fit_vw(it.get("value"), 26.0, 13.0)
         parts.append(
-            f'<div class="cmp-item"><div class="cmp-val">{_esc(it.get("value"))}</div>'
+            f'<div class="cmp-item"><div class="cmp-val" style="font-size:{fs}vw">{_esc(it.get("value"))}</div>'
             f'<div class="cmp-label">{_esc(it.get("label"))}</div></div>'
         )
     return f'<div class="compare">{"".join(parts)}</div>'
