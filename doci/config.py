@@ -117,6 +117,10 @@ VOICEVOX_URL = get("VOICEVOX_URL", "http://192.168.11.13:50021").rstrip("/")
 VOICEVOX_URL_FALLBACK = get("VOICEVOX_URL_FALLBACK", "http://127.0.0.1:50021").rstrip("/")
 VOICE_CHINESE_AI = get_int("VOICE_CHINESE_AI", 3)
 VOICE_AMERICAN_AI = get_int("VOICE_AMERICAN_AI", 14)
+# 文・句ごとに合成して連結するため継ぎ目の無音を詰める（既定 pre=0.0/post=0.1。
+# VOICEVOX既定は各0.1）。詰めすぎると窮屈になるので post で最小限のポーズを残す。
+VOICE_PRE_PHONEME = get_float("VOICE_PRE_PHONEME", 0.0)
+VOICE_POST_PHONEME = get_float("VOICE_POST_PHONEME", 0.1)
 
 # --- 配信投稿 (issue #3): route.platforms と各 PUBLISH_* で出し分け ---
 # do_upload(--no-upload で無効) が大元のスイッチ。その上で各プラットフォームを個別に有効化。

@@ -111,6 +111,11 @@ def _apply_params(
     q["pitchScale"] = pitch
     q["intonationScale"] = intonation
     q["volumeScale"] = volume
+    # 文・句ごとに合成して連結するため、前後パディングが継ぎ目ごとに無音を生む。
+    # 語頭パディングを除き文末を控えめにして、発話を連続的に（シーンのカットと無音の
+    # 重なりで「音声が途切れた」と感じる問題への対策）。
+    q["prePhonemeLength"] = config.VOICE_PRE_PHONEME
+    q["postPhonemeLength"] = config.VOICE_POST_PHONEME
     return q
 
 
