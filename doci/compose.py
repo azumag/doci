@@ -353,10 +353,13 @@ def compose(
             # 旧実装は amix(normalize=既定1) でナレーションが半減し、BGM(ピアノ)の強打で声が
             # マスクされて「途切れ」て聞こえた。normalize=0 で声を等倍に保ち、さらに
             # サイドチェインで「声がある間だけ BGM を自動で下げる」(放送のダッキング)。
+            # 戻り(release)を遅く・深くして、文末の語尾を BGM が覆わないようにする
+            # （release が速いと文末で BGM が急に膨らみ、減衰中の語尾をマスクして
+            # 「末尾が切れた」ように聞こえる。A=ナレ単体は切れず B=BGM込みだけ切れる事象）。
             afilters.append(
                 f"[{bgm_idx}:a]volume={config.BGM_VOLUME},aformat=channel_layouts=mono[bgv];"
                 f"[1:a]aformat=channel_layouts=mono,asplit=2[n1][n2];"
-                f"[bgv][n1]sidechaincompress=threshold=0.03:ratio=10:attack=20:release=400[bgd];"
+                f"[bgv][n1]sidechaincompress=threshold=0.02:ratio=20:attack=5:release=1000[bgd];"
                 f"[n2][bgd]amix=inputs=2:normalize=0:duration=first[a]"
             )
             amap = "[a]"

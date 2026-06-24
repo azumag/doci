@@ -164,7 +164,7 @@ MAX_IMAGES = get_int("MAX_IMAGES", 60)
 VIDEO_WIDTH = get_int("VIDEO_WIDTH", 1080)
 VIDEO_HEIGHT = get_int("VIDEO_HEIGHT", 1920)
 VIDEO_FPS = get_int("VIDEO_FPS", 30)
-BGM_VOLUME = get_float("BGM_VOLUME", 0.12)
+BGM_VOLUME = get_float("BGM_VOLUME", 0.08)
 
 
 def bgm_path() -> Path | None:
