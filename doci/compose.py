@@ -30,11 +30,44 @@ class Scene:
 
 
 # --- 字幕（発話フルテロップ: issue #5） ---
-SUB_LINE_CHARS = 13          # 1行あたり文字数
+SUB_LINE_CHARS = 13          # 1行あたり文字数（縦9:16基準。横16:9は幅比で自動拡張）
 SUB_MAX_LINES = 2            # 最大行数
 SUB_MAX_CHARS = SUB_LINE_CHARS * SUB_MAX_LINES  # 1チャンク最大文字数(=26)
 SUB_MIN_DUR = 0.7           # 最小表示秒（短すぎるチャンクは結合してチラつき防止）
 SUB_Y_RATIO = 0.64         # 縦位置（中央やや下。下部UIを避ける）
+
+# 折り返しの自然さ用（日本語の禁則・区切り）
+_NO_LINE_START = set(  # 行頭に置かない（小書き仮名・長音・閉じ括弧・句読点）
+    "ぁぃぅぇぉっゃゅょゎヵヶァィゥェォッャュョヮ・ーｰ〜、。，．！？…）」』】〕〉》”’!?,.)]}"
+)
+_NO_LINE_END = set("（「『【〈《“‘([{")  # 行末に置かない（開き括弧）
+_BREAK_AFTER_STRONG = set("、。，．！？…")  # この直後で折ると自然（強）
+_BREAK_AFTER_SOFT = set("はがをにへでともやのね")  # 助詞の直後（弱）
+
+
+def _wrap(text: str, width: int = SUB_LINE_CHARS, max_lines: int = SUB_MAX_LINES) -> str:
+    """1チャンクを最大 max_lines 行に。語の途中で割れないよう、2行は中央付近で均等に、
+    かつ読点・助詞の後／禁則を避けた位置で折る。"""
+    text = (text or "").replace("\n", "").strip().strip("、")
+    n = len(text)
+    if n <= width:
+        return text
+    target = (n + 1) // 2  # 中央で均等に割る
+    best_i, best_score = None, None
+    for i in range(2, n - 1):  # 各行2字以上（孤立を避ける）
+        if text[i] in _NO_LINE_START:        # 行頭禁止文字の前では折らない
+            continue
+        if text[i - 1] in _NO_LINE_END:      # 開き括弧の直後では折らない
+            continue
+        score = abs(i - target)
+        if text[i - 1] in _BREAK_AFTER_STRONG:
+            score -= 6                        # 読点・句点の後を最優先
+        elif text[i - 1] in _BREAK_AFTER_SOFT:
+            score -= 3                        # 助詞の後を優遇
+        if best_score is None or score < best_score:
+            best_score, best_i = score, i
+    i = best_i if best_i is not None else min(target, n - 1)
+    return text[:i] + "\n" + text[i:]
 
 
 def _segment_chunks(text: str) -> list[str]:
@@ -132,19 +165,6 @@ def _scene_durations(total: float, n: int, min_each: float = 1.5) -> list[float]
     return durs
 
 
-def _wrap(text: str, width: int = SUB_LINE_CHARS, max_lines: int = SUB_MAX_LINES) -> str:
-    text = (text or "").strip().replace("\n", "")
-    lines, cur = [], ""
-    for ch in text:
-        cur += ch
-        if len(cur) >= width:
-            lines.append(cur)
-            cur = ""
-    if cur:
-        lines.append(cur)
-    return "\n".join(lines[:max_lines])
-
-
 def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
     """字幕を透過PNGに描画。成功時 True。フォント/Pillow 不在なら False。"""
     font_path = _font_path()
@@ -162,7 +182,9 @@ def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
     except Exception:
         return False
 
-    lines = _wrap(text).split("\n")
+    # 横16:9は横幅が広いので1行の文字数を幅比で広げ、無駄な折り返しを減らす。
+    per_line = SUB_LINE_CHARS if W <= H else max(SUB_LINE_CHARS, round(SUB_LINE_CHARS * W / H))
+    lines = _wrap(text, width=per_line).split("\n")
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     line_h = int(size * 1.35)
