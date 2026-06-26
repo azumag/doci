@@ -166,6 +166,51 @@ def _scene_durations(total: float, n: int, min_each: float = 1.5) -> list[float]
     return durs
 
 
+def _scene_boundaries(total: float, n: int, segments, *,
+                      min_each: float = 1.5, max_shift: float = 2.5) -> list[float]:
+    """シーン境界（累積秒）のリストを返す。
+
+    segments がある場合は各均等割位置(target) の前後 max_shift 秒以内にある
+    「文末(end)」にスナップする。これによりシーン切替と VOICEVOX の post-phoneme
+    (0.1s)＋文中の自然なポーズが偶然重なり、「動画の切り替わりで音声がブツッと切れる」
+    と感じる問題を消す（境界＝文末ポーズになり "次の話題へ" と脳が解釈する）。
+
+    segments がない／適切な文末が見つからない場合は均等割にフォールバック。
+    戻り値は長さ n+1（先頭 0.0、末尾 total）。
+    """
+    boundaries = [0.0]
+    if not segments or n < 2:
+        base = max(total / n, min_each)
+        for i in range(1, n):
+            boundaries.append(round(min(i * base, total), 3))
+        boundaries.append(total)
+        return boundaries
+
+    seg_ends = sorted(s.end for s in segments if 0 < s.end <= total)
+    if not seg_ends:
+        base = max(total / n, min_each)
+        for i in range(1, n):
+            boundaries.append(round(min(i * base, total), 3))
+        boundaries.append(total)
+        return boundaries
+
+    for i in range(1, n):
+        target = total * i / n
+        min_time = boundaries[-1] + min_each
+        # 候補: target から max_shift 以内 & 前シーン末尾+min_each 以上 の文末
+        cands = [e for e in seg_ends
+                 if abs(e - target) <= max_shift and e >= min_time]
+        if cands:
+            snap = min(cands, key=lambda e: abs(e - target))
+        else:
+            # 該当なし: target か min_time のどちらか遅い方（ただし total を超えない）
+            snap = min(max(target, min_time), total)
+        boundaries.append(round(snap, 3))
+    if boundaries[-1] < total:
+        boundaries.append(total)
+    return boundaries
+
+
 def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
     """字幕を透過PNGに描画。成功時 True。フォント/Pillow 不在なら False。"""
     font_path = _font_path()
@@ -302,7 +347,15 @@ def compose(
     H = height or config.VIDEO_HEIGHT
     fps = config.VIDEO_FPS
     total = narration_dur + 0.4
-    durs = _scene_durations(total, len(scenes))
+    # segments がある場合、各シーン境界を「直前の文末」にスナップさせる。
+    # 均等割だと境界が文の途中に来て、VOICEVOXの post-phoneme(0.1s)＋文中ポーズと
+    # 重なりシーン切替と同期して「ブツッ」と無音が入って聞こえる（issue: 切り替わりで
+    # 音声途切れ）。境界＝文末ポーズになると "次の話題へ" の切れ目として認識される。
+    if segments:
+        boundaries = _scene_boundaries(total, len(scenes), segments)
+        durs = [round(boundaries[i + 1] - boundaries[i], 3) for i in range(len(scenes))]
+    else:
+        durs = _scene_durations(total, len(scenes))
 
     with tempfile.TemporaryDirectory(prefix="doci_compose_") as td:
         tmp = Path(td)
@@ -348,6 +401,10 @@ def compose(
         vmap = "[vout]"
 
         afilters: list[str] = []
+        # 末尾を afade で滑らかに絞り、最終文の語尾直後に BGM がハードカットして
+        # 「ブツッ」と切れる感じを消す（narration 末尾に足した余韻無音の間にフェードアウト）。
+        fade = min(0.5, config.VOICE_TAIL_SILENCE)
+        afade = f"afade=t=out:st={max(0.0, narration_dur - fade):.3f}:d={fade:.3f}"
         if bgm:
             # ナレーションを主役に保つミックス。
             # 旧実装は amix(normalize=既定1) でナレーションが半減し、BGM(ピアノ)の強打で声が
@@ -356,15 +413,20 @@ def compose(
             # 戻り(release)を遅く・深くして、文末の語尾を BGM が覆わないようにする
             # （release が速いと文末で BGM が急に膨らみ、減衰中の語尾をマスクして
             # 「末尾が切れた」ように聞こえる。A=ナレ単体は切れず B=BGM込みだけ切れる事象）。
+            # さらに BGM を LOOKAHEAD だけ遅延させ、サイドチェイン検知(遅延しないナレ)が
+            # BGM の少し先を見る形にする＝語頭の手前で先に絞る「先読みダッキング」。
+            # 文間ポーズで膨らんだ BGM が次フレーズ語頭（例「1900年」の"せん"）を
+            # スペクトル的にマスクして「百年」に聞こえる事象への対策（耳で確認済）。
+            la = config.BGM_DUCK_LOOKAHEAD_MS
             afilters.append(
-                f"[{bgm_idx}:a]volume={config.BGM_VOLUME},aformat=channel_layouts=mono[bgv];"
+                f"[{bgm_idx}:a]volume={config.BGM_VOLUME},aformat=channel_layouts=mono,adelay={la}|{la}[bgv];"
                 f"[1:a]aformat=channel_layouts=mono,asplit=2[n1][n2];"
-                f"[bgv][n1]sidechaincompress=threshold=0.02:ratio=20:attack=5:release=1000[bgd];"
-                f"[n2][bgd]amix=inputs=2:normalize=0:duration=first[a]"
+                f"[bgv][n1]sidechaincompress=threshold={config.BGM_DUCK_THRESHOLD}:ratio={config.BGM_DUCK_RATIO}:attack=5:release={config.BGM_DUCK_RELEASE}[bgd];"
+                f"[n2][bgd]amix=inputs=2:normalize=0:duration=first,{afade}[a]"
             )
-            amap = "[a]"
         else:
-            amap = "1:a"
+            afilters.append(f"[1:a]{afade}[a]")
+        amap = "[a]"
 
         filt = ";".join(vparts + afilters)
         cmd = ["ffmpeg", "-y", *inputs]

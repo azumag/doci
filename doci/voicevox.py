@@ -159,14 +159,20 @@ def synthesize(
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fr, sw, ch = params
+    # 最終文の語尾直後に音声と BGM が同時に止まる「末尾途切れ」感を防ぐため、
+    # ナレーション末尾に余韻の無音を足す（継ぎ目の post=0.1 とは別に、最後だけ確保）。
+    tail_frames = int(config.VOICE_TAIL_SILENCE * fr)
+    tail = b"\x00" * (tail_frames * sw * ch)
     with wave.open(str(out_path), "wb") as out:
         out.setnchannels(ch)
         out.setsampwidth(sw)
         out.setframerate(fr)
         for f in frames_list:
             out.writeframes(f)
+        if tail:
+            out.writeframes(tail)
 
-    return TtsResult(wav_path=out_path, duration=cursor, segments=segments)
+    return TtsResult(wav_path=out_path, duration=cursor + tail_frames / float(fr), segments=segments)
 
 
 def main() -> None:

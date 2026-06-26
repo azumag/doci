@@ -63,7 +63,7 @@ body{background:linear-gradient(135deg,#1d1711 0%,#0a0a0c 100%);
 .title{font-size:4.8vh;font-weight:800;line-height:1.2;letter-spacing:.01em;
   color:#fbf6ec;border-left:.7vh solid #f0b450;padding-left:1.6vw;margin-bottom:.6vh}
 .unit{font-size:2.6vh;color:#9a9486;margin-bottom:3.5vh}
-.body{flex:1;display:flex;flex-direction:column;justify-content:center}
+.body{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;justify-content:center}
 /* 出典は本体の下(通常フロー)に置き、内容長に依らず必ずコンテンツの直下に来るようにする。
    下40vhは字幕帯として空けてあるので、ここでも字幕とは重ならない。 */
 .source{font-size:1.9vh;color:#7a7468;text-align:right;line-height:1.35;margin-top:1.4vh;flex-shrink:0}
@@ -247,10 +247,19 @@ def _compare(spec: dict) -> str:
 
 def _timeline(spec: dict) -> str:
     evs = spec.get("events") or []
+    # 件数が多いと年表本体が上60vhを超え、下40vhの字幕帯へはみ出す（実走で6件が字幕と重なった）。
+    # 既定(≤4件)は等倍、5件以上は件数に反比例で年号/説明/行間/ドットを縮小して上側に収める。
+    n = len(evs) or 1
+    scale = max(0.5, min(1.0, 4.0 / n))
+    year_fs = round(3.4 * scale, 2)
+    label_fs = round(2.9 * scale, 2)
+    pad = round(1.4 * scale, 2)
+    dot_mt = round(1.0 * scale, 2)
     rows = [
-        f'<div class="tl-event"><div class="tl-dot"></div>'
-        f'<div class="tl-year">{_esc(e.get("year"))}</div>'
-        f'<div class="tl-label">{_esc(e.get("label"))}</div></div>'
+        f'<div class="tl-event" style="padding-bottom:{pad}vh">'
+        f'<div class="tl-dot" style="margin-top:{dot_mt}vh"></div>'
+        f'<div class="tl-year" style="font-size:{year_fs}vh">{_esc(e.get("year"))}</div>'
+        f'<div class="tl-label" style="font-size:{label_fs}vh">{_esc(e.get("label"))}</div></div>'
         for e in evs
     ]
     return f'<div class="timeline">{"".join(rows)}</div>'

@@ -124,6 +124,9 @@ VOICE_AMERICAN_AI = get_int("VOICE_AMERICAN_AI", 14)
 # VOICEVOX既定は各0.1）。詰めすぎると窮屈になるので post で最小限のポーズを残す。
 VOICE_PRE_PHONEME = get_float("VOICE_PRE_PHONEME", 0.0)
 VOICE_POST_PHONEME = get_float("VOICE_POST_PHONEME", 0.1)
+# ナレーション全体の末尾に足す無音（秒）。最終文の post=0.1 だけでは語尾直後に音声と
+# BGM が同時にブツッと止まり「末尾が途切れた」と聞こえるため、最後だけ余韻を確保する。
+VOICE_TAIL_SILENCE = get_float("VOICE_TAIL_SILENCE", 0.6)
 
 # --- 配信投稿 (issue #3): route.platforms と各 PUBLISH_* で出し分け ---
 # do_upload(--no-upload で無効) が大元のスイッチ。その上で各プラットフォームを個別に有効化。
@@ -164,7 +167,24 @@ MAX_IMAGES = get_int("MAX_IMAGES", 60)
 VIDEO_WIDTH = get_int("VIDEO_WIDTH", 1080)
 VIDEO_HEIGHT = get_int("VIDEO_HEIGHT", 1920)
 VIDEO_FPS = get_int("VIDEO_FPS", 30)
-BGM_VOLUME = get_float("BGM_VOLUME", 0.08)
+BGM_VOLUME = get_float("BGM_VOLUME", 0.22)
+# BGMダッキング(サイドチェイン)。文間ポーズで BGM(ピアノ)が膨らみ、次フレーズの語頭
+# （例「1900年」の"せん"）をスペクトル的にマスクして「百年」に聞こえる事象への対策
+# （E=BGM込み実音声で再現・耳で確認済）:
+# (1) 音量を声優先に下げる、(2) 先読み=BGM を LOOKAHEAD_MS 遅延させ、サイドチェインの
+#     検知（遅延しないナレ）が BGM の少し先を見る形にして語頭の手前で先に絞る。
+# (3) release を長めに取り、フレーズ間ギャップで BGM がピークまで戻りにくくする。
+# 末尾の絞りは compose の afade が別途担当。
+BGM_DUCK_THRESHOLD = get_float("BGM_DUCK_THRESHOLD", 0.03)
+# ratio=15: 声がある間 BGM を ~24dB 絞る（敷物として残しつつ語頭マスクは十分抑える）。
+# ratio=20 は深すぎて BGM がほぼ無音化、ratio=8 は浅すぎて「せん」頭が食われる（実走A/Bで確定）。
+BGM_DUCK_RATIO = get_int("BGM_DUCK_RATIO", 15)
+# release=800ms: フレーズ間ポーズ(~200-500ms)で BGM が戻り切る前に次フレーズの語頭が来る
+# → 結果として「フレーズ間もやや引っ込んだまま」になり、語頭がスペクトルマスクされにくい。
+BGM_DUCK_RELEASE = get_int("BGM_DUCK_RELEASE", 800)
+# lookahead=280ms: サイドチェイン検知(遅延しないナレ)が BGM の少し先を見る＝語頭の手前で
+# 先に絞る。150ms だと長めのポーズで BGM がピークに戻り切るため不十分だった。
+BGM_DUCK_LOOKAHEAD_MS = get_int("BGM_DUCK_LOOKAHEAD_MS", 280)
 
 
 def bgm_path() -> Path | None:
