@@ -15,7 +15,7 @@ import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config
+from . import config, voices
 
 
 @dataclass
@@ -178,20 +178,32 @@ def synthesize(
 def main() -> None:
     ap = argparse.ArgumentParser(description="VOICEVOX 合成")
     ap.add_argument("--text", required=True)
-    ap.add_argument("--speaker", type=int, default=config.VOICE_CHINESE_AI)
+    ap.add_argument("--voice-key", choices=sorted(voices.VOICES), default="chinese_ai")
+    ap.add_argument("--speaker", type=int)
     ap.add_argument("--out", default=str(config.OUTPUT / "tts_test.wav"))
-    ap.add_argument("--speed", type=float, default=1.0)
-    ap.add_argument("--pitch", type=float, default=0.0)
-    ap.add_argument("--intonation", type=float, default=1.0)
+    ap.add_argument("--speed", type=float)
+    ap.add_argument("--pitch", type=float)
+    ap.add_argument("--intonation", type=float)
     ap.add_argument("--intonation-vary", action="store_true")
-    ap.add_argument("--volume", type=float, default=1.0)
+    ap.add_argument("--volume", type=float)
     args = ap.parse_args()
+    v = voices.get(args.voice_key)
+    speaker = args.speaker if args.speaker is not None else v.speaker
+    speed = args.speed if args.speed is not None else v.speed
+    pitch = args.pitch if args.pitch is not None else v.pitch
+    intonation = args.intonation if args.intonation is not None else v.intonation
+    intonation_vary = args.intonation_vary or v.intonation_vary
+    volume = args.volume if args.volume is not None else v.volume
     res = synthesize(
-        args.text, args.speaker, Path(args.out),
-        speed=args.speed, pitch=args.pitch, intonation=args.intonation,
-        intonation_vary=args.intonation_vary, volume=args.volume,
+        args.text, speaker, Path(args.out),
+        speed=speed, pitch=pitch, intonation=intonation,
+        intonation_vary=intonation_vary, volume=volume,
     )
-    print(f"wav={res.wav_path} duration={res.duration:.2f}s segments={len(res.segments)}")
+    print(
+        f"wav={res.wav_path} duration={res.duration:.2f}s segments={len(res.segments)} "
+        f"voice={args.voice_key} speaker={speaker} speed={speed} pitch={pitch} "
+        f"intonation={intonation} volume={volume}"
+    )
     for seg in res.segments:
         print(f"  [{seg.start:5.2f}-{seg.end:5.2f}] {seg.text}")
 

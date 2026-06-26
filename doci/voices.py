@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 
 from . import config
@@ -28,6 +29,18 @@ _FALLBACK = {
     "american_ai": VoiceCfg(config.VOICE_AMERICAN_AI),
 }
 
+_ENV_SPEAKER = {
+    "chinese_ai": "VOICE_CHINESE_AI",
+    "american_ai": "VOICE_AMERICAN_AI",
+}
+
+
+def _speaker(key: str, data: dict, fallback: VoiceCfg) -> int:
+    env_key = _ENV_SPEAKER[key]
+    if env_key in os.environ:
+        return config.get_int(env_key, fallback.speaker)
+    return int(data.get("voicevox_speaker", fallback.speaker))
+
 
 def _load() -> dict[str, VoiceCfg]:
     path = config.CONFIG_DIR / "voices.json"
@@ -41,7 +54,7 @@ def _load() -> dict[str, VoiceCfg]:
     for key, fb in _FALLBACK.items():
         d = data.get(key, {}) if isinstance(data, dict) else {}
         out[key] = VoiceCfg(
-            speaker=int(d.get("voicevox_speaker", fb.speaker)),
+            speaker=_speaker(key, d, fb),
             speed=float(d.get("speed", 1.0)),
             pitch=float(d.get("pitch", 0.0)),
             intonation=float(d.get("intonation", 1.0)),
