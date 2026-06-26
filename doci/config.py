@@ -167,7 +167,7 @@ MAX_IMAGES = get_int("MAX_IMAGES", 60)
 VIDEO_WIDTH = get_int("VIDEO_WIDTH", 1080)
 VIDEO_HEIGHT = get_int("VIDEO_HEIGHT", 1920)
 VIDEO_FPS = get_int("VIDEO_FPS", 30)
-BGM_VOLUME = get_float("BGM_VOLUME", 0.22)
+BGM_VOLUME = get_float("BGM_VOLUME", 0.18)
 # BGMダッキング(サイドチェイン)。文間ポーズで BGM(ピアノ)が膨らみ、次フレーズの語頭
 # （例「1900年」の"せん"）をスペクトル的にマスクして「百年」に聞こえる事象への対策
 # （E=BGM込み実音声で再現・耳で確認済）:
@@ -179,9 +179,11 @@ BGM_DUCK_THRESHOLD = get_float("BGM_DUCK_THRESHOLD", 0.03)
 # ratio=15: 声がある間 BGM を ~24dB 絞る（敷物として残しつつ語頭マスクは十分抑える）。
 # ratio=20 は深すぎて BGM がほぼ無音化、ratio=8 は浅すぎて「せん」頭が食われる（実走A/Bで確定）。
 BGM_DUCK_RATIO = get_int("BGM_DUCK_RATIO", 15)
-# release=800ms: フレーズ間ポーズ(~200-500ms)で BGM が戻り切る前に次フレーズの語頭が来る
-# → 結果として「フレーズ間もやや引っ込んだまま」になり、語頭がスペクトルマスクされにくい。
-BGM_DUCK_RELEASE = get_int("BGM_DUCK_RELEASE", 800)
+# release=1500ms: 文末の post-phoneme(100ms)＋短ポーズ(~300ms)の合計400ms中では
+# BGM がほぼ復帰せず、復帰しきるのは1s以上の長いポーズ(段落間)に限られる。
+# → 短い無音中にBGMが戻って次文頭と重なり「次が被って聞こえる」事象への対策
+# （release=800ms では post-phoneme 100ms 中に BGM が半分近くまで復帰していた実測あり）。
+BGM_DUCK_RELEASE = get_int("BGM_DUCK_RELEASE", 1500)
 # lookahead=280ms: サイドチェイン検知(遅延しないナレ)が BGM の少し先を見る＝語頭の手前で
 # 先に絞る。150ms だと長めのポーズで BGM がピークに戻り切るため不十分だった。
 BGM_DUCK_LOOKAHEAD_MS = get_int("BGM_DUCK_LOOKAHEAD_MS", 280)
