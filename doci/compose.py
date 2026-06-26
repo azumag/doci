@@ -150,12 +150,13 @@ def _font_path() -> str | None:
     return None
 
 
-def _run(cmd: list[str]) -> None:
+def _run(cmd: list[str], capture: bool = False) -> str | None:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(
             "ffmpeg failed:\n" + " ".join(cmd[:8]) + " ...\n" + proc.stderr[-1500:]
         )
+    return proc.stdout if capture else None
 
 
 def _scene_durations(total: float, n: int, min_each: float = 1.5) -> list[float]:
@@ -286,10 +287,62 @@ def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: 
 
 
 def _concat(clips: list[Path], tmp: Path) -> Path:
-    listf = tmp / "concat.txt"
-    listf.write_text("".join(f"file '{c}'\n" for c in clips), encoding="utf-8")
+    """シーンmp4を連結。複数シーンは境界で視覚クロスフェード（xfade）を入れて、
+    突然のカットによる知覚的「音声途切れ/打つっ」問題の発生を抑える。
+    音声は -an で完全に切り、視覚だけの合成。
+    """
+    if len(clips) == 1:
+        listf = tmp / "concat.txt"
+        listf.write_text(f"file '{clips[0]}'\n", encoding="utf-8")
+        out = tmp / "silent.mp4"
+        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listf),
+              "-c", "copy", str(out)])
+        return out
+
+    # 各シーンの長さを取得して xfade フィルタを構築
+    # xfade は「2入力→1出力」。N個のシーンをチェーンするため、N-1 個の xfade を多段適用。
+    # duration='0.25' = 250ms のクロスフェード（黒一瞬挟まず滑らかに溶け込む）。
+    xfade_dur = 0.25
+    # 各シーンの尺を ffprobe で取得
+    import json as _json
+    durations = []
+    for c in clips:
+        out_probe = _run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "format=duration", "-of", "json", str(c)
+        ], capture=True)
+        d = _json.loads(out_probe)["format"]["duration"]
+        durations.append(float(d))
+
+    # xfade フィルタグラフ: 先頭から累積で offset を計算
+    # offset[i] = クリップ0..i の合計尺 - xfade_dur
+    inputs = []
+    for c in clips:
+        inputs.extend(["-i", str(c)])
+    n = len(clips)
+    parts = []
+    # まず全入力をラベル付け
+    for i in range(n):
+        parts.append(f"[{i}:v]format=yuv420p,setsar=1[v{i}]")
+    # xfade を順次適用
+    cur = "v0"
+    cum = durations[0]
+    for i in range(1, n):
+        nxt = f"v{i}"
+        out_label = f"vx{i}" if i < n - 1 else "vout"
+        # xfade は cur と nxt を offset=cum-xfade_dur でブレンド
+        offset = max(0.0, cum - xfade_dur)
+        parts.append(
+            f"[{cur}][{nxt}]xfade=transition=fade:duration={xfade_dur}:offset={offset:.3f}[{out_label}]"
+        )
+        cur = out_label
+        cum += durations[i] - xfade_dur  # xfade で重なった分は短く
+    filt = ";".join(parts)
     out = tmp / "silent.mp4"
-    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listf), "-c", "copy", str(out)])
+    cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", filt,
+           "-map", "[vout]", "-c:v", "libx264", "-preset", "veryfast",
+           "-crf", "20", "-pix_fmt", "yuv420p", "-an", str(out)]
+    _run(cmd)
     return out
 
 
