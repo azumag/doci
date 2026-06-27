@@ -27,7 +27,9 @@ class Scene:
     path: Path
     is_video: bool
     caption: str = ""
-    static: bool = False  # 図表など：Ken Burns を掛けず静止表示（可読性優先）
+    static: bool = False  # 図表(静止PNG)など：Ken Burns を掛けず静止表示（可読性優先）
+    freeze_tail: bool = False  # 図表アニメ動画：入場を1回再生→最終フレームを静止保持して尺を埋める
+    chart_spec: dict | None = None  # 図表アニメをシーン尺に合わせて compose 側で描画する仕様
 
 
 # --- 字幕（発話フルテロップ: issue #5） ---
@@ -222,16 +224,29 @@ def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
     except Exception:
         return False
 
-    # フォントは短辺基準（横16:9でも縦9:16でも見た目の文字サイズを一定に保つ）。
-    size = int(min(W, H) * 0.060)
-    try:
-        font = ImageFont.truetype(font_path, size, index=0)
-    except Exception:
-        return False
-
     # 横16:9は横幅が広いので1行の文字数を幅比で広げ、無駄な折り返しを減らす。
     per_line = SUB_LINE_CHARS if W <= H else max(SUB_LINE_CHARS, round(SUB_LINE_CHARS * W / H))
     lines = _wrap(text, width=per_line).split("\n")
+
+    # フォントは短辺基準（横16:9でも縦9:16でも見た目の文字サイズを一定に保つ）。
+    # ただし読点の後で折る等で1行が文字数budgetを超えると枠幅をオーバーして左右が
+    # 見切れる（例: 18字行が幅1148px>枠1080px → 中央寄せで x0<0）。最長行が枠内
+    # （左右マージン込み）に収まるまでフォントを段階縮小して見切れを防ぐ。
+    base_size = int(min(W, H) * 0.060)
+    min_size = max(12, int(min(W, H) * 0.036))
+    avail_w = W * 0.94  # 左右に3%ずつのマージン
+    measure = ImageDraw.Draw(Image.new("RGBA", (W, H)))
+    size = base_size
+    while True:
+        try:
+            font = ImageFont.truetype(font_path, size, index=0)
+        except Exception:
+            return False
+        line_w = max((measure.textlength(ln, font=font) for ln in lines), default=0)
+        if line_w + int(size * 0.7) * 2 <= avail_w or size <= min_size:
+            break
+        size -= 2
+
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     line_h = int(size * 1.35)
@@ -239,7 +254,8 @@ def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
     text_w = max((draw.textlength(ln, font=font) for ln in lines), default=0)
     pad_x, pad_y = int(size * 0.7), int(size * 0.45)
     box_w, box_h = int(text_w + pad_x * 2), int(text_h + pad_y * 2)
-    x0 = (W - box_w) // 2
+    box_w = min(box_w, W)  # 念のため枠内にクランプ
+    x0 = max(0, (W - box_w) // 2)
     y0 = int(H * SUB_Y_RATIO)
     draw.rounded_rectangle(
         [x0, y0, x0 + box_w, y0 + box_h], radius=int(size * 0.35), fill=(0, 0, 0, 150)
@@ -257,17 +273,78 @@ def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
     return True
 
 
+def _probe_dur(path: Path) -> float:
+    """動画の尺(秒)を ffprobe で取得。失敗時は 0.0。"""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        return float(out)
+    except Exception:
+        return 0.0
+
+
 def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: int) -> Path:
     fps = config.VIDEO_FPS
     out = tmp / f"scene_{idx:02d}.mp4"
     frames = max(1, round(dur * fps))
     tail = ["-r", str(fps), "-c:v", "libx264", "-preset", "veryfast",
             "-crf", "20", "-pix_fmt", "yuv420p", "-an", str(out)]
-    if scene.is_video:
-        vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-              f"crop={W}:{H},fps={fps},setsar=1,format=yuv420p")
-        cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(scene.path),
-               "-t", f"{dur}", "-vf", vf, *tail]
+    if scene.chart_spec is not None:
+        # 図表アニメを「このシーンの尺 dur に合わせて」描画する（切替の少し前にアニメ完了）。
+        # render_chart_video が p:0→1 を (dur - lead) 秒かけて描き、残り lead 秒は下の
+        # tpad(clone) が最終フレームを静止保持して dur をぴたりと満たす。
+        from . import charts
+        lead = getattr(charts, "_VID_LEAD", 0.6)
+        anim = charts.render_chart_video(
+            scene.chart_spec, tmp / f"chart_{idx:02d}.mp4",
+            duration=max(1.0, dur - lead), width=W, height=H,
+        )
+        vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0a0a0c,"
+              f"fps={fps},setsar=1,format=yuv420p,"
+              f"tpad=stop_mode=clone:stop_duration={dur:.3f}")
+        cmd = ["ffmpeg", "-y", "-i", str(anim), "-t", f"{dur}", "-vf", vf, *tail]
+        _run(cmd)
+        return out
+    if scene.is_video and scene.freeze_tail:
+        # 図表アニメ(事前描画 mp4): 入場を1回再生し、最終フレームを clone で静止保持して尺を埋める。
+        # 図表は既に W×H なので scale/pad は基本ノーオペ（安全のため枠に収める）。
+        # tpad の stop_duration を dur にしておけば（入場 < dur の限り）最後の状態で必ず満たされ、
+        # -t dur で正確に切る（ループ再生＝入場の再発を防ぐ）。
+        vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0a0a0c,"
+              f"fps={fps},setsar=1,format=yuv420p,"
+              f"tpad=stop_mode=clone:stop_duration={dur:.3f}")
+        cmd = ["ffmpeg", "-y", "-i", str(scene.path), "-t", f"{dur}", "-vf", vf, *tail]
+    elif scene.is_video:
+        # 背景動画: 「同じクリップが何度も切り替わる」感を避ける（issue: ループ目立ち）。
+        #  - 十分長い      → 等速で先頭 dur を使う（ループ無し）
+        #  - やや短い      → 最大 MAX_SLOW 倍まで減速して1回で尺を満たす（ループ無し）
+        #  - かなり短い    → MAX_SLOW まで減速＋ピンポン(往復)で継ぎ目なく充填
+        #                   （往復は末尾フレーム同士・先頭フレーム同士で繋がり、ハードカットが出ない）
+        MAX_SLOW = 1.8
+        clip = _probe_dur(scene.path)
+        fill = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}"
+        otail = f"fps={fps},setsar=1,format=yuv420p"
+        if clip <= 0 or clip >= dur * 0.98:
+            vf = f"{fill},{otail}"
+            cmd = ["ffmpeg", "-y", "-i", str(scene.path), "-t", f"{dur}", "-vf", vf, *tail]
+        elif clip * MAX_SLOW >= dur * 0.98:
+            slow = dur / clip  # >1：PTS を slow 倍に伸ばして減速（ループ無しで尺を満たす）
+            vf = f"{fill},setpts={slow:.4f}*PTS,{otail}"
+            cmd = ["ffmpeg", "-y", "-i", str(scene.path), "-t", f"{dur}", "-vf", vf, *tail]
+        else:
+            boom = tmp / f"boomerang_{idx:02d}.mp4"
+            _run(["ffmpeg", "-y", "-i", str(scene.path), "-an", "-vf",
+                  f"{fill},setpts={MAX_SLOW:.3f}*PTS,split[a][b];[b]reverse[r];"
+                  f"[a][r]concat=n=2:v=1,{otail}",
+                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                  "-pix_fmt", "yuv420p", str(boom)])
+            cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(boom),
+                   "-t", f"{dur}", "-vf", otail, *tail]
     elif scene.static:
         # 図表など: Ken Burns を掛けず静止。枠に収め、はみ出しは暗色でパッド（文字を切らない）。
         vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"

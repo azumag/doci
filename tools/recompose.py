@@ -39,9 +39,10 @@ def _build_scene_objs(workdir: Path, script: dict) -> list[compose.Scene]:
     objs: list[compose.Scene] = []
     for si, sm in enumerate(script["scenes"]):
         caption = sm.get("caption", "")
-        chart_path = workdir / f"scene_{si:02d}_chart.png"
-        if sm.get("chart") and chart_path.exists():
-            objs.append(compose.Scene(path=chart_path, is_video=False, static=True, caption=caption))
+        if sm.get("chart"):
+            # 図表アニメはシーン尺に合わせて compose 側で描画する（spec を渡すだけ）。
+            objs.append(compose.Scene(path=workdir, is_video=False, caption=caption,
+                                      chart_spec=sm["chart"]))
             continue
         # 最初の variant (k=0) を探す（.mp4 → .png の優先順）
         for ext, is_v in ((".mp4", True), (".png", False), (".jpg", False)):

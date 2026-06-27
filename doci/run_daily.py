@@ -59,7 +59,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     use_video = config.VIDEO_BACKEND == "minimax" and video_scenes > 0
     scene_objs: list[compose.Scene] = []
     occ: dict[int, int] = {}
-    chart_cache: dict[int, Path] = {}  # 図表は si ごとに1回だけ描画して使い回す
+    chart_cache: dict[int, bool] = {}  # 図表は si ごとに1シーンに統合（重複スロットをスキップ）
     for j in range(n_images):
         si = j * n_scenes // n_images  # スロット→元シーンへ順序保存でマップ
         k = occ.get(si, 0)
@@ -67,21 +67,15 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         sm = scenes_meta[si]
         # 図表シーン（issue #2）: Pexsels/AIを使わず HTML→画像で描画し、静止表示する。
         if sm.get("chart"):
-            cpath = chart_cache.get(si)
-            if cpath is None:
-                cpath = workdir / f"scene_{si:02d}_chart.png"
-                from . import charts
-                try:
-                    charts.render_chart(sm["chart"], cpath, width=out_w, height=out_h)
-                    _log(f"図表描画 {j + 1}/{n_images} (scene{si}, {sm['chart'].get('type')})")
-                except Exception as e:  # 図表失敗時は素材取得にフォールバック
-                    _log(f"図表描画失敗: {e} → 素材へ")
-                    cpath = None
-                chart_cache[si] = cpath
-            if cpath is not None:
-                scene_objs.append(compose.Scene(path=cpath, is_video=False, static=True,
-                                                caption=sm.get("caption", "")))
+            # 図表アニメはシーン尺に合わせて compose 側で描画（spec を渡すだけ）。
+            # 同一図表が複数スロットに割り当たっても1シーンに統合し、再アニメを防ぐ。
+            if si in chart_cache:
                 continue
+            chart_cache[si] = True
+            scene_objs.append(compose.Scene(path=workdir, is_video=False,
+                                            caption=sm.get("caption", ""), chart_spec=sm["chart"]))
+            _log(f"図表シーン (scene{si}, {sm['chart'].get('type')}) ← compose 側で尺合わせ描画")
+            continue
         img = workdir / f"scene_{si:02d}_{k}.png"
         base_prompt = sm.get("visual_prompt") or sm.get("caption") or "abstract background"
         # 1) まず実フリー素材を当てる（issue #9）。variant=k で同一シーンは別候補を選ぶ。
