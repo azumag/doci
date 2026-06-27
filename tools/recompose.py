@@ -40,9 +40,16 @@ def _build_scene_objs(workdir: Path, script: dict) -> list[compose.Scene]:
     for si, sm in enumerate(script["scenes"]):
         caption = sm.get("caption", "")
         if sm.get("chart"):
-            # 図表アニメはシーン尺に合わせて compose 側で描画する（spec を渡すだけ）。
-            objs.append(compose.Scene(path=workdir, is_video=False, caption=caption,
-                                      chart_spec=sm["chart"]))
+            # 図表の背景を「テーマ＋内容」から都度選定・取得（キャッシュあり）。
+            # 図表アニメ自体はシーン尺に合わせて compose 側で描画する（spec を渡すだけ）。
+            from doci import chart_bg
+            theme = f"{script.get('title', '')} / {script.get('description', '')}"[:180]
+            try:
+                spec = chart_bg.ensure(sm["chart"], theme, workdir, si)
+            except Exception as e:
+                _log(f"図表背景の選定/取得に失敗（背景なしで継続）: {e}")
+                spec = sm["chart"]
+            objs.append(compose.Scene(path=workdir, is_video=False, caption=caption, chart_spec=spec))
             continue
         # 最初の variant (k=0) を探す（.mp4 → .png の優先順）
         for ext, is_v in ((".mp4", True), (".png", False), (".jpg", False)):

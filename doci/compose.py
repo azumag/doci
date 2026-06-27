@@ -294,14 +294,21 @@ def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: 
             "-crf", "20", "-pix_fmt", "yuv420p", "-an", str(out)]
     if scene.chart_spec is not None:
         # 図表アニメを「このシーンの尺 dur に合わせて」描画する（切替の少し前にアニメ完了）。
-        # render_chart_video が p:0→1 を (dur - lead) 秒かけて描き、残り lead 秒は下の
-        # tpad(clone) が最終フレームを静止保持して dur をぴたりと満たす。
+        # timeline は背景切替の順次フロー(chart_seq)、その他は背景付きの図表アニメ。
+        # p:0→1 を (dur - lead) 秒かけて描き、残り lead 秒は下の tpad(clone) が最終フレームを
+        # 静止保持して dur をぴたりと満たす。
         from . import charts
+        spec = scene.chart_spec
         lead = getattr(charts, "_VID_LEAD", 0.6)
-        anim = charts.render_chart_video(
-            scene.chart_spec, tmp / f"chart_{idx:02d}.mp4",
-            duration=max(1.0, dur - lead), width=W, height=H,
-        )
+        adur = max(1.0, dur - lead)
+        anim_path = tmp / f"chart_{idx:02d}.mp4"
+        if spec.get("type") == "timeline" and spec.get("_bgs"):
+            from . import chart_seq
+            anim = chart_seq.render(spec, anim_path, duration=adur, width=W, height=H)
+        else:
+            anim = charts.render_chart_video(
+                spec, anim_path, duration=adur, width=W, height=H, bg=spec.get("_bg")
+            )
         vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0a0a0c,"
               f"fps={fps},setsar=1,format=yuv420p,"

@@ -144,6 +144,9 @@ body{background:radial-gradient(120% 90% at 50% 28%,#17120b 0%,#0b0a0c 55%,#0706
   border-radius:.4vh}
 .vig{position:fixed;inset:0;pointer-events:none;
   background:radial-gradient(120% 80% at 50% 38%,transparent 55%,rgba(0,0,0,.55) 100%)}
+/* 背景写真/動画の上に敷く暗幕（文字可読性を確保しつつ背景は透かす） */
+.scrim{position:fixed;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,rgba(8,7,9,.74) 0%,rgba(8,7,9,.5) 38%,rgba(8,7,9,.7) 70%,rgba(8,7,9,.86) 100%)}
 /* 下40vhは字幕帯として確実に空ける */
 .wrap{position:relative;width:100%;height:100%;padding:7vh 9vw 40vh 9vw;
   display:flex;flex-direction:column}
@@ -170,11 +173,13 @@ body{background:radial-gradient(120% 90% at 50% 28%,#17120b 0%,#0b0a0c 55%,#0706
 /* 出典は画面最下部に小さく（字幕帯より下）。本体レイアウトからは外して常に一番下に固定。 */
 .source{position:absolute;left:9vw;right:9vw;bottom:2.4vh;font-size:1.7vh;color:#6f6657;
   text-align:center;line-height:1.35}
-/* ---- stat（大数字＋星 / リングゲージ） ---- */
-.stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
-  position:relative;gap:2.2vh}
-.star-bg{position:absolute;width:30vh;height:30vh;top:50%;left:50%;
-  transform:translate(-50%,-52%);filter:drop-shadow(0 0 3vh rgba(232,182,90,.18))}
+/* ---- stat（文脈リード→数字がドンと出るステートメント / 割合はリングゲージ） ---- */
+.stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2.8vh}
+.stat-lead{font-size:3.1vh;line-height:1.5;color:#e9e1d2;text-align:center;max-width:80vw;
+  margin:0 auto;font-feature-settings:"palt";text-shadow:0 .2vh 1.2vh rgba(0,0,0,.85)}
+.stat-hero{position:relative;display:flex;align-items:center;justify-content:center;align-self:stretch}
+.star-bg{position:absolute;width:32vh;height:32vh;top:50%;left:50%;
+  transform:translate(-50%,-50%);filter:drop-shadow(0 0 3vh rgba(232,182,90,.2))}
 .num{position:relative;display:flex;align-items:baseline;gap:1.0vw;line-height:.9;z-index:1}
 .num .v{font-weight:900;letter-spacing:-.02em;
   background:linear-gradient(180deg,#fbeec6 0%,#f0c674 45%,#d99a3c 100%);
@@ -215,14 +220,20 @@ body{background:radial-gradient(120% 90% at 50% 28%,#17120b 0%,#0b0a0c 55%,#0706
 .cmp-val{font-weight:900;color:#f4c25c;line-height:1;white-space:nowrap;flex-shrink:0}
 .cmp-label{font-size:2.9vh;color:#cfc8ba;text-align:right;line-height:1.3}
 .cmp-arrow{align-self:center;font-size:3.8vh;color:#d8503a;line-height:1;margin:.2vh 0}
-/* ---- timeline（年表：線が下に伸び、出来事が順に出る） ---- */
-.timeline{flex:1;display:flex;flex-direction:column;justify-content:space-evenly;position:relative}
-.tl-line{position:absolute;left:1.15vw;top:1.5vh;bottom:1.5vh;width:.32vh;
-  background:linear-gradient(180deg,#e8b65a,#6e5a3a);transform-origin:top;border-radius:.3vh}
-.tl-event{display:flex;align-items:flex-start;gap:2.4vw;position:relative;z-index:1}
-.tl-dot{flex-shrink:0;margin-top:.9vh;filter:drop-shadow(0 0 .8vh rgba(240,180,80,.5))}
-.tl-year{font-weight:800;color:#f4c25c;flex-shrink:0;white-space:nowrap;padding-right:2.6vw}
-.tl-label{color:#e7e1d4;line-height:1.3;padding-top:.2vh}
+/* ---- timeline（出来事カード＋「ぐーん」と伸びる矢印で次へ繋ぐ） ---- */
+.timeline{flex:1;display:flex;flex-direction:column;justify-content:center;gap:0}
+.tl-card{display:flex;align-items:baseline;gap:2.6vw;
+  background:linear-gradient(135deg,#241b11,#16110a);border:.14vh solid #3d3122;
+  border-left:.7vh solid #e8b65a;border-radius:1.3vh;padding:1.5vh 4vw;
+  box-shadow:0 1vh 2.4vh rgba(0,0,0,.45);transform-origin:left center}
+.tl-card .y{font-family:'Hiragino Mincho ProN',serif;font-weight:700;color:#f4c25c;
+  flex-shrink:0;white-space:nowrap}
+.tl-card .t{color:#ece6d8;line-height:1.3}
+.tl-arrow{display:flex;flex-direction:column;align-items:center;align-self:flex-start;margin-left:5.5vw}
+.tl-stem{width:.55vh;background:linear-gradient(180deg,#f0b450,#caa05a);transform-origin:top;
+  border-radius:.55vh;box-shadow:0 0 1vh rgba(240,180,80,.45)}
+.tl-head{width:0;height:0;border-left:1.2vh solid transparent;border-right:1.2vh solid transparent;
+  border-top:1.5vh solid #f0b450;margin-top:-.1vh}
 """
 
 # window.__apply(p) で進捗 p(0..1)時点の状態を全要素へ反映。
@@ -255,6 +266,8 @@ window.__apply=function(P){
     let str=el.dataset.comma==='1'?v.toLocaleString('en-US'):(''+v);
     el.textContent=(el.dataset.pre||'')+str+(el.dataset.suf||'');
     el.style.display='inline-block';el.style.transform=`scale(${1+(1-eo(s))*0.08})`});
+  document.querySelectorAll('[data-stamp]').forEach(el=>{const s=seg(el,'stamp');
+    el.style.opacity=eo(s);el.style.transform=`scale(${1.34-eo(s)*0.34})`});
   void document.body.offsetHeight;
 };
 (function(){const u=new URLSearchParams(location.search).get('p');
@@ -314,25 +327,36 @@ def _bar(spec: dict) -> str:
     return f'<div class="bars">{"".join(rows)}</div>'
 
 
+def _num_inner(val) -> str:
+    """値を「数値＋接尾辞(単位)」の span に。カウントしない最終表示用。"""
+    ca = _count_attrs(val)
+    if ca and ca["suf"]:
+        num = f'{ca["target"]:,}' if ca["comma"] else str(ca["target"])
+        return f'<span class="v">{_esc(ca["pre"])}{num}</span><span class="u">{_esc(ca["suf"])}</span>'
+    return f'<span class="v">{_esc(val)}</span>'
+
+
 def _stat(spec: dict) -> str:
     val = spec.get("value")
     cap = spec.get("caption")
-    # キャプションは長文になりがちなので文節ごとに順次表示（一気に読ませない）。
-    cap_html = f'<div class="stat-cap">{_reveal_words(cap, 0.5, 0.95)}</div>' if cap else ""
     pct = _percent(val)
+    # 割合(%)はリングゲージで視覚化する価値がある（量の比較）。文脈を先に、ゲージは後で満ちる。
     if pct is not None and 0 <= pct <= 100:
+        lead = f'<div class="stat-lead">{_reveal_words(cap, 0.12, 0.55)}</div>' if cap else ""
         gauge = (
-            f'<div class="gauge" data-gauge=".18,.9" data-pct="{pct:.1f}" '
+            f'<div class="gauge" data-gauge=".5,.9" data-pct="{pct:.1f}" '
             f'style="background:conic-gradient(#f4c25c 0 0%,#2a2218 0% 100%)">'
             f'<div class="gauge-hole"></div>'
-            f'<div class="gauge-val" data-count=".18,.9" data-target="{int(pct)}" '
+            f'<div class="gauge-val" data-count=".5,.9" data-target="{int(pct)}" '
             f'data-suf="%" data-comma="0">0</div></div>'
         )
-        return f'<div class="stat">{gauge}{cap_html}</div>'
+        return f'<div class="stat">{lead}<div class="stat-hero">{gauge}</div></div>'
+    # 単一の事実(例: 7フラン)はカウントせず、「文脈(キャプション)→数字がドンと出る」ステートメントに。
     fs = _fit_vw(val, 70.0, 22.0)
-    star = _star_svg("star-bg", 'data-star=".18,.66" data-op="0.55"')
-    num = _count_or_text(val, "v", a=0.18, b=0.9, style=f"font-size:{fs}vw", unit_cls="u")
-    return f'<div class="stat">{star}<div class="num">{num}</div>{cap_html}</div>'
+    lead = f'<div class="stat-lead">{_reveal_words(cap, 0.12, 0.62)}</div>' if cap else ""
+    star = _star_svg("star-bg", 'data-star=".6,.92" data-op="0.5"')
+    num = f'<div class="num" data-stamp=".62,.84" style="font-size:{fs}vw">{_num_inner(val)}</div>'
+    return f'<div class="stat">{lead}<div class="stat-hero">{star}{num}</div></div>'
 
 
 def _compare(spec: dict) -> str:
@@ -376,29 +400,31 @@ def _compare(spec: dict) -> str:
 def _timeline(spec: dict) -> str:
     evs = spec.get("events") or []
     n = len(evs) or 1
-    scale = max(0.5, min(1.0, 4.0 / n))
-    year_fs = round(3.4 * scale, 2)
-    label_fs = round(2.9 * scale, 2)
-    dot = round(2.4 * scale, 2)
-    rows = []
+    scale = max(0.46, min(1.0, 3.6 / n))
+    year_fs = round(3.0 * scale, 2)
+    label_fs = round(2.55 * scale, 2)
+    stem_h = round(1.9 * scale, 2)      # 矢印(stem)の長さ(vh)
+    cardpad = round(1.1 * scale, 2)
+    parts = []
     for i, e in enumerate(evs):
-        # 各出来事を尺いっぱいに割り振り（slot）。ドット→年号→ラベルは文節ごとに順次表示。
-        a = 0.12 + i * (0.8 / n)
-        slot = (0.8 / n)
-        b = min(0.98, a + slot * 0.96)
-        star = _star_svg(
-            "tl-dot", f'data-pop="{a:.3f},{a + 0.06:.3f}"', fill="#f0c674", stroke="none", sw="0",
-            style=f"width:{dot}vw;height:{dot}vw",
+        # 各出来事を尺いっぱいに割り振り。カードがぐっと出る→矢印が次カードへ「ぐーん」と伸びる。
+        a = 0.1 + i * (0.82 / n)
+        slot = 0.82 / n
+        label = _reveal_words(e.get("label"), a + 0.02, min(0.98, a + slot * 0.82))
+        parts.append(
+            f'<div class="tl-card" data-rev="{a:.3f},{a + slot * 0.4:.3f}" style="padding:{cardpad}vh 4vw">'
+            f'<span class="y" style="font-size:{year_fs}vh">{_esc(e.get("year"))}</span>'
+            f'<span class="t" style="font-size:{label_fs}vh">{label}</span></div>'
         )
-        label = _reveal_words(e.get("label"), a + 0.05, b)
-        rows.append(
-            f'<div class="tl-event">{star}'
-            f'<div class="tl-year" data-rev="{a:.3f},{a + 0.1:.3f}" style="font-size:{year_fs}vh">'
-            f'{_esc(e.get("year"))}</div>'
-            f'<div class="tl-label" style="font-size:{label_fs}vh">{label}</div></div>'
-        )
-    line = '<div class="tl-line" data-drawy=".1,.92"></div>'
-    return f'<div class="timeline">{line}{"".join(rows)}</div>'
+        if i < len(evs) - 1:
+            ar_a = a + slot * 0.45
+            ar_b = min(0.99, a + slot * 0.95)
+            parts.append(
+                f'<div class="tl-arrow">'
+                f'<div class="tl-stem" data-drawy="{ar_a:.3f},{ar_b:.3f}" style="height:{stem_h}vh"></div>'
+                f'<div class="tl-head" data-pop="{max(0, ar_b - 0.03):.3f},{ar_b + 0.03:.3f}"></div></div>'
+            )
+    return f'<div class="timeline">{"".join(parts)}</div>'
 
 
 _BUILDERS = {"bar": _bar, "stat": _stat, "compare": _compare, "timeline": _timeline}
@@ -483,8 +509,11 @@ def _reveal_words(text, a: float, b: float) -> str:
     )
 
 
-def _page(spec: dict, body: str, duration=None) -> str:
+def _page(spec: dict, body: str, duration=None, bg=None) -> str:
     css = _BASE_CSS.replace("__GRAIN__", _GRAIN)
+    # 背景画像があれば body 背景に敷き、暗幕(scrim)で文字可読性を確保する。
+    body_attr = f" style=\"background:#0a0a0c url('file://{bg}') center/cover no-repeat\"" if bg else ""
+    scrim = "<div class='scrim'></div>" if bg else ""
     unit = spec.get("unit", "")
     source = _clean_source(spec.get("source", ""))
     # 構造要素(アイブロウ/見出し/罫/単位)は尺に依らず冒頭で素早く出す（固定秒→p分率）。
@@ -493,8 +522,10 @@ def _page(spec: dict, body: str, duration=None) -> str:
     src_html = (f'<div class="source" data-rev=".88,1">出典: {_esc(source)}</div>'
                 if source else "")
     return (
-        "<!doctype html><html><head><meta charset='utf-8'><style>" + css + "</style></head><body>"
-        "<div class='grain'></div><div class='vig'></div><div class='frame'></div>"
+        "<!doctype html><html><head><meta charset='utf-8'><style>" + css + "</style></head>"
+        "<body" + body_attr + ">"
+        + scrim
+        + "<div class='grain'></div><div class='vig'></div><div class='frame'></div>"
         "<div class='wrap'>"
         + _eyebrow(spec, _wsec(0.0, 0.7, duration))
         + f'<div class="title" data-rev="{_wsec(0.25, 1.7, duration)}" '
@@ -508,11 +539,11 @@ def _page(spec: dict, body: str, duration=None) -> str:
     )
 
 
-def chart_html(spec: dict, duration=None) -> str:
+def chart_html(spec: dict, duration=None, bg=None) -> str:
     builder = _BUILDERS.get(spec.get("type", ""))
     if not builder:
         raise ValueError(f"未対応の chart type: {spec.get('type')}")
-    return _page(spec, builder(spec), duration)
+    return _page(spec, builder(spec), duration, bg)
 
 
 # ===== 描画 =====
@@ -612,7 +643,7 @@ class _CDP:
 
 def render_chart_video(
     spec: dict, out_mp4: Path, duration: float,
-    width: int | None = None, height: int | None = None, fps: int = _VID_FPS,
+    width: int | None = None, height: int | None = None, fps: int = _VID_FPS, bg=None,
 ) -> Path:
     """入場アニメ(p:0→1)を `duration` 秒かけて描く mp4 を返す。
     CDP で1セッション・毎フレーム window.__apply(p) を評価して撮影（尺いっぱいの緩やかなビルド）。
@@ -627,7 +658,7 @@ def render_chart_video(
     with tempfile.TemporaryDirectory(prefix="doci_chartvid_") as td:
         td = Path(td)
         hp = td / "chart.html"
-        hp.write_text(chart_html(spec, duration=duration), encoding="utf-8")
+        hp.write_text(chart_html(spec, duration=duration, bg=bg), encoding="utf-8")
         fdir = td / "frames"
         fdir.mkdir()
         cdp = _CDP(W, H)

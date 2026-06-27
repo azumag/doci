@@ -68,13 +68,21 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         # 図表シーン（issue #2）: Pexsels/AIを使わず HTML→画像で描画し、静止表示する。
         if sm.get("chart"):
             # 図表アニメはシーン尺に合わせて compose 側で描画（spec を渡すだけ）。
+            # 背景は「テーマ＋内容」から都度選定・取得（キャッシュあり）。
             # 同一図表が複数スロットに割り当たっても1シーンに統合し、再アニメを防ぐ。
             if si in chart_cache:
                 continue
             chart_cache[si] = True
+            from . import chart_bg
+            theme = f"{script.get('title', '')} / {script.get('description', '')}"[:180]
+            try:
+                spec = chart_bg.ensure(sm["chart"], theme, workdir, si)
+            except Exception as e:
+                _log(f"図表背景の選定/取得に失敗（背景なしで継続）: {e}")
+                spec = sm["chart"]
             scene_objs.append(compose.Scene(path=workdir, is_video=False,
-                                            caption=sm.get("caption", ""), chart_spec=sm["chart"]))
-            _log(f"図表シーン (scene{si}, {sm['chart'].get('type')}) ← compose 側で尺合わせ描画")
+                                            caption=sm.get("caption", ""), chart_spec=spec))
+            _log(f"図表シーン (scene{si}, {sm['chart'].get('type')}) ← 背景付き・尺合わせ描画")
             continue
         img = workdir / f"scene_{si:02d}_{k}.png"
         base_prompt = sm.get("visual_prompt") or sm.get("caption") or "abstract background"
