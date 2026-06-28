@@ -22,3 +22,6 @@ venv/
 !assets/bgm/*.mp3
 !assets/bgm/*.ogg
 !assets/bgm/*.wav
+.venv-cron/
+tools/ffbin/
+*.egg-info/

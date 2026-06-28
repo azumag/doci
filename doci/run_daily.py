@@ -18,6 +18,23 @@ def _log(msg: str) -> None:
     print(f"[doci] {msg}", flush=True)
 
 
+def _credits(corner) -> str:
+    """概要欄に付ける素材クレジット。VOICEVOX はキャラ名込みで表記必須（利用規約）。
+    Pexels は必須ではないが明記する。"""
+    import re as _re
+
+    label = getattr(getattr(corner, "voice", None), "label", "") or ""
+    m = _re.search(r"[（(]\s*([^/／）)]+)", label)  # 「メリケンAI (冥鳴ひまり/ノーマル)」→ 冥鳴ひまり
+    char = m.group(1).strip() if m else ""
+    vv = f"VOICEVOX:{char}" if char else "VOICEVOX"
+    return (
+        "\n\n──────────\n"
+        "■ クレジット / Credits\n"
+        f"音声合成: {vv}（https://voicevox.hiroshiba.jp/）\n"
+        "背景・映像素材: Pexels（https://www.pexels.com/）"
+    )
+
+
 def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) -> dict:
     corner = corners.CORNERS[corner_key] if corner_key else corners.pick_corner(history.last_corner())
     workdir = config.OUTPUT / f"{day}_{corner.key}"
@@ -168,7 +185,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         pub_results = publish.publish(
             out_mp4,
             title=script["title"],
-            description=script["description"],
+            description=script["description"] + _credits(corner),
             tags=script.get("tags", []),
             route=route,
         )
