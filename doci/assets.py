@@ -20,7 +20,10 @@ from pathlib import Path
 
 from . import config, imagery
 
-_UA = "doci/0.1 (+https://github.com/azumag/doci)"
+# Pexels は Cloudflare 配下で、ボット的 UA(例 "doci/...")を error 1010(403)で弾くようになった。
+# ブラウザ風 UA にすると通る（2026-06-29 実測。429のレート制限ではなくブラウザ署名ブロック）。
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 PEXELS_SEARCH = "https://api.pexels.com/v1/search"
 PEXELS_VIDEO_SEARCH = "https://api.pexels.com/videos/search"
 
