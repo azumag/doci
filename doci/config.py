@@ -72,6 +72,9 @@ RESEARCH_MODEL = get("RESEARCH_MODEL", "claude-sonnet-4-6")
 FACTCHECK_MODEL = get("FACTCHECK_MODEL", "claude-opus-4-8")
 # リサーチ/チェックは Web検索＋長尺narrationで時間がかかるため長めの上限（長尺で300sは不足）。
 SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
+# 執筆(opencode/qwen 等)専用の上限。健全な執筆は実測 ~70秒。qwen がヘッドレスで稀に
+# ハングしても 600秒待たず素早く打ち切り、リトライ/claudeフォールバックで復帰するため短め。
+WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 240)
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # リサーチの再試行回数。claude+Web が稀に不正JSONを返すため。高価なので控えめ。

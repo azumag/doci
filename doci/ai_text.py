@@ -24,7 +24,7 @@ _extract_json = llm.extract_json
 
 
 def _run_claude_cli(prompt: str, model: str) -> str:
-    return llm.run_claude(prompt, model, timeout=config.SCRIPT_LLM_TIMEOUT)
+    return llm.run_claude(prompt, model, timeout=config.WRITE_LLM_TIMEOUT)
 
 
 def _run_anthropic(prompt: str, model: str) -> str:
@@ -49,7 +49,7 @@ def _run_anthropic(prompt: str, model: str) -> str:
             "content-type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=config.SCRIPT_LLM_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=config.WRITE_LLM_TIMEOUT) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return "".join(b.get("text", "") for b in data.get("content", []))
 
@@ -68,9 +68,17 @@ def _run_opencode(prompt: str, model: str, agent: str) -> str:
     # 使い捨ての作業ディレクトリに隔離する（生成物の repo 汚染を防ぐ）。
     scratch = config.OUTPUT / ".opencode_scratch"
     scratch.mkdir(parents=True, exist_ok=True)
+    # ヘッドレス(無人)実行では build エージェントの "ask" 権限(doom_loop /
+    # external_directory 等)が応答待ちでブロックし、タイムアウトまでハングすることがある。
+    # この使い捨て scratch にスコープ限定の設定を置き、権限を all-allow にして
+    # 権限プロンプトで止まらないようにする（ユーザーのグローバル opencode 設定は変更しない）。
+    (scratch / "opencode.json").write_text(
+        '{"$schema":"https://opencode.ai/config.json","permission":{"*":"allow"}}',
+        encoding="utf-8",
+    )
     cmd += ["--dir", str(scratch), prompt]
     proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=config.SCRIPT_LLM_TIMEOUT
+        cmd, capture_output=True, text=True, timeout=config.WRITE_LLM_TIMEOUT
     )
     if proc.returncode != 0:
         raise RuntimeError(f"opencode failed (rc={proc.returncode}): {proc.stderr[:500]}")
@@ -202,6 +210,22 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
                 f"執筆失敗(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: "
                 f"{type(e).__name__}: {str(e)[:160]}"
             )
+    # フォールバック: 主バックエンド(例 opencode/qwen)が規定回数で揃わなかった場合、
+    # 稼働実績のある claude_cli で執筆をやり直す。qwen のハング/不調で通し全体が
+    # 「執筆失敗」で終わるのを防ぐ安全網（qwen はあくまで主のまま）。
+    if script is None and config.TEXT_BACKEND != "claude_cli":
+        _log(f"執筆({config.TEXT_BACKEND})が揃わず→claude_cli にフォールバック")
+        for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
+            try:
+                script = _validate(_extract_json(_run_claude_cli(prompt, config.TEXT_MODEL)))
+                break
+            except (ValueError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+                last_err = e
+                _log(
+                    f"claudeフォールバック失敗(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再試行: "
+                    f"{type(e).__name__}: {str(e)[:160]}"
+                )
+
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
 
