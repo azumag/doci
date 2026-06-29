@@ -192,9 +192,16 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
         try:
             script = _validate(_extract_json(_dispatch(prompt)))
             break
-        except ValueError as e:  # JSON抽出/必須キー不足（JSONDecodeError含む）
+        except (ValueError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+            # JSON不良/必須キー不足（ValueError）だけでなく、執筆バックエンドのタイムアウト
+            # (TimeoutExpired)・異常終了(RuntimeError)・ネットワーク失敗(OSError)も一過性とみなし
+            # 再試行する（qwen 等が稀に固まり、1回の失敗で通し全体が即死するのを防ぐ）。
             last_err = e
-            _log(f"執筆JSON不良(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: {e}")
+            # 例外メッセージにプロンプト全文が載ることがあるため要約のみログする。
+            _log(
+                f"執筆失敗(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: "
+                f"{type(e).__name__}: {str(e)[:160]}"
+            )
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
 
