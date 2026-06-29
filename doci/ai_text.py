@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import date as _date
@@ -103,6 +104,52 @@ def _validate(script: dict) -> dict:
     return script
 
 
+# 図表は本来 scenes 側の要素として置く設計だが、執筆モデルが稀に図表マーカー
+# {"chart_id":N,"caption":"…"} を narration 本文へインラインしてしまう。放置すると
+# (1) TTS が JSON をそのまま読み上げ (2) scene 側に chart_id が無く図表が出ない、の二重事故になる。
+_INLINE_CHART = re.compile(
+    r'\s*\{\s*"chart_id"\s*:\s*(\d+)\s*,\s*"caption"\s*:\s*"([^"]*)"\s*\}'
+)
+
+
+def _strip_chart_markers(text: str) -> str:
+    """本文中に紛れた図表マーカー JSON を除去し、余分な改行を整える。"""
+    cleaned = _INLINE_CHART.sub("", text or "")
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _recover_inline_charts(script: dict) -> int:
+    """narration にインラインされた図表マーカーを scenes の chart_id へ移し、本文から除去する。
+    戻り値は scene へ移せた図表数。本文順＝シーン順とみなし、マーカーの文字位置から
+    相当する scene を推定して chart_id を載せる（既に scene 側にある番号は重複させない）。"""
+    narration = script.get("narration") or ""
+    scenes = script.get("scenes") or []
+    matches = list(_INLINE_CHART.finditer(narration))
+    if not matches:
+        return 0
+    have = {int(s["chart_id"]) for s in scenes if s.get("chart_id") is not None}
+    moved = 0
+    if scenes:
+        span = max(1, len(narration))
+        for m in matches:
+            cid = int(m.group(1))
+            if cid in have:
+                continue  # 既に scene 側へ正しく置かれている
+            idx = min(len(scenes) - 1, int(m.start() / span * len(scenes)))
+            # 推定位置から後方優先で、図表未割り当ての scene を探して載せる。
+            order = list(range(idx, len(scenes))) + list(range(idx - 1, -1, -1))
+            slot = next((j for j in order if scenes[j].get("chart_id") is None), None)
+            if slot is None:
+                continue
+            scenes[slot]["chart_id"] = cid
+            if m.group(2) and not scenes[slot].get("caption"):
+                scenes[slot]["caption"] = m.group(2)
+            have.add(cid)
+            moved += 1
+    script["narration"] = _strip_chart_markers(narration)
+    return moved
+
+
 def _log(msg: str) -> None:
     print(f"[doci] {msg}", flush=True)
 
@@ -151,6 +198,12 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
 
+    # 2.4) 救済: 執筆モデルが narration に図表マーカーをインラインした場合、本文から除去して
+    #      相当する scene へ chart_id を移す（音声へのJSON混入と図表欠落を同時に防ぐ）。
+    recovered = _recover_inline_charts(script)
+    if recovered:
+        _log(f"本文混入の図表マーカーを {recovered} 件回収（→scene へ移動）")
+
     # 2.5) chart_id を実図表仕様に解決（データはプラン＝minimax由来を正とし取り違えを防ぐ）。
     if plan and plan.get("charts"):
         by_id = {c["id"]: c for c in plan["charts"]}
@@ -175,7 +228,7 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
                 issues = fc.get("issues") or []
                 if fc.get("changed") and issues:
                     _log(f"ファクトチェック: {len(issues)}件修正")
-                script["narration"] = fc["narration"].strip()
+                script["narration"] = _strip_chart_markers(fc["narration"])
                 script["_factcheck"] = issues
         except Exception as e:  # noqa: BLE001
             _log(f"ファクトチェック失敗→修正なしで続行: {e}")

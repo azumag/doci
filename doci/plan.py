@@ -74,9 +74,13 @@ def brief_for_prompt(plan: dict) -> str:
     charts = plan.get("charts") or []
     if charts:
         lines.append(
-            "\n## 図表（下記の図表を、本文がその内容に触れる位置の scene に "
-            "`{\"chart_id\": 番号, \"caption\": \"短い字幕\"}` として差し込む。"
-            "visual_prompt は不要。図表の数値は本文でも正しく言及する。該当ビート付近に置く）:"
+            "\n## 図表（下記の図表を動画に出す。置き方を厳守）:"
+            "\n- 図表は **scenes 配列の独立した要素**として置く。図表を出す scene を "
+            "`{\"chart_id\": 番号, \"caption\": \"短い字幕\", \"visual_prompt\": \"\"}` の形にする"
+            "（chart の scene では visual_prompt は空文字でよい）。本文がその図表に触れるビート付近に置く。"
+            "\n- **narration（読み上げ本文）の中には `{...}` や chart_id を絶対に書かない。** "
+            "本文は普通の文章だけにする。マーカーJSONを本文に混ぜると、そのまま読み上げられて事故になる。"
+            "\n- 図表の数値は本文でも正しく言及する。"
         )
         for c in charts:
             place = c.get("place", "")
