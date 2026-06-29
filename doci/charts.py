@@ -194,9 +194,9 @@ body{background:radial-gradient(120% 90% at 50% 28%,#17120b 0%,#0b0a0c 55%,#0706
   background:radial-gradient(circle,#15110b 0%,#0d0b08 100%)}
 .gauge-val{position:relative;font-size:6.4vh;font-weight:900;color:#f4c25c}
 /* ---- bar（横棒） ---- */
-.bars{display:flex;flex-direction:column;justify-content:center;gap:3.4vh}
-.bar-row{display:flex;align-items:center;gap:2vw}
-.bar-label{width:16vw;font-size:2.8vh;color:#e7e1d4;text-align:right;flex-shrink:0;white-space:nowrap}
+.bars{display:flex;flex-direction:column;justify-content:center;gap:4.6vh}
+.bar-label{font-size:2.9vh;color:#e7e1d4;margin-bottom:1.4vh;line-height:1.3}
+.bar-line{display:flex;align-items:center;gap:2.5vw}
 .bar-track{flex:1;height:6.4vh;background:#1b1610;border-radius:1vh;overflow:hidden;
   box-shadow:inset 0 .3vh .8vh rgba(0,0,0,.6),inset 0 0 0 .12vh rgba(232,182,90,.12)}
 .bar-fill{height:100%;width:0;background:linear-gradient(90deg,#c9772a,#f4c25c);
@@ -321,8 +321,8 @@ def _bar(spec: dict) -> str:
         rows.append(
             f'<div class="bar-row" data-fade="{max(0,a-0.1):.2f},{a+0.08:.2f}">'
             f'<div class="bar-label">{_esc(d.get("label"))}</div>'
-            f'<div class="bar-track"><div class="bar-fill" data-grow="{a:.2f},{b:.2f}" '
-            f'data-w="{pct:.1f}"></div></div>{val}</div>'
+            f'<div class="bar-line"><div class="bar-track"><div class="bar-fill" '
+            f'data-grow="{a:.2f},{b:.2f}" data-w="{pct:.1f}"></div></div>{val}</div></div>'
         )
     return f'<div class="bars">{"".join(rows)}</div>'
 
