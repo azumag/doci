@@ -3,6 +3,7 @@
 minimax-M3 が「構成（起承転結）」と「解説に効く図表」を設計し、qwen が本文を執筆する
 二段構え。図表のデータは裏取り事実に基づく正確な値にし、本文側(qwen)は図表を chart_id で
 配置するだけにして数値の取り違えを防ぐ。
+経路は PLAN_BACKEND で選択（既定 opencode-go 経由、codex で直契約MiniMax APIを利用）。
 """
 from __future__ import annotations
 
@@ -49,7 +50,13 @@ def make_plan(corner: corners.Corner, research: dict | None) -> dict | None:
     last_err: Exception | None = None
     for _ in range(2):
         try:
-            data = llm.extract_json(ai_text._run_opencode(prompt, config.PLAN_MODEL, ""))
+            if config.PLAN_BACKEND == "codex":
+                # Web取得は不要なタスクなので fetch ガードは無効化(min_web_fetches=0)。
+                # プランは chart_bg より出力が大きいため timeout は長めに取る。
+                raw = llm.run_codex(prompt, config.CODEX_MODEL, timeout=240, min_web_fetches=0)
+            else:
+                raw = ai_text._run_opencode(prompt, config.PLAN_MODEL, "")
+            data = llm.extract_json(raw)
             beats = data.get("beats")
             if not isinstance(beats, list) or len(beats) < 3:
                 raise ValueError(f"beats が不十分: {str(data)[:200]}")

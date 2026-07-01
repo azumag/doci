@@ -1,6 +1,7 @@
 """図表シーンの背景素材を「テーマ＋図表内容」に合わせて都度選定・取得する。
 
-LLM(claude)が各項目の英語検索クエリと media(image/video)を返し、Pexels から取得。
+LLM(CHART_BG_BACKEND設定。既定 claude、または codex exec+MiniMax-M3)が各項目の
+英語検索クエリと media(image/video)を返し、Pexels から取得。
 結果は workdir に scene_NN_chart_bg.json としてキャッシュし、再レンダで使い回す。
 timeline は各出来事ごとに1背景（順次切替用）、それ以外は1背景。
 """
@@ -42,7 +43,12 @@ def select(spec: dict, theme: str) -> list[dict]:
         f"背景は {n} 個必要（順番厳守）。JSON のみ出力する:\n"
         '{"backgrounds":[{"query":"...","media":"image"}]}'
     )
-    txt = llm.run_claude(prompt, config.TEXT_MODEL, timeout=120)
+    if config.CHART_BG_BACKEND == "codex":
+        # Web取得は不要なタスクなので fetch ガードは無効化(min_web_fetches=0)。
+        # timeout はサンドボックス起動オーバーヘッド分だけ claude より長めに取る。
+        txt = llm.run_codex(prompt, config.CODEX_MODEL, timeout=180, min_web_fetches=0)
+    else:
+        txt = llm.run_claude(prompt, config.TEXT_MODEL, timeout=120)
     data = llm.extract_json(txt)
     raw = data.get("backgrounds") or []
     out: list[dict] = []

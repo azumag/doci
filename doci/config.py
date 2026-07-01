@@ -11,6 +11,8 @@ ASSETS = ROOT / "assets"
 BGM_DIR = ASSETS / "bgm"
 CONFIG_DIR = ROOT / "config"
 OUTPUT = ROOT / "output"
+# codex CLI 用の隔離ホーム。ユーザーの ~/.codex には一切触れない(ChatGPTログイン破壊事故を避けるため)。
+CODEX_HOME = ROOT / ".codex-doci"
 
 
 def _load_dotenv(path: Path) -> None:
@@ -58,6 +60,9 @@ def get_bool(key: str, default: bool = False) -> bool:
 # --- text ---
 TEXT_BACKEND = get("TEXT_BACKEND", "claude_cli")
 TEXT_MODEL = get("TEXT_MODEL", "claude-opus-4-8")
+# 執筆主バックエンド(opencode/qwen)が規定回数で揃わなかった時の claude_cli フォールバック専用モデル。
+# TEXT_MODEL(opus、chart_bg等の他用途と共有)とは別に、フォールバックは軽量な sonnet を使う。
+FALLBACK_TEXT_MODEL = get("FALLBACK_TEXT_MODEL", "claude-sonnet-5")
 OPENCODE_AGENT = get("OPENCODE_AGENT", "")
 # provider/model 形式（例: opencode-go/minimax-m3）。指定時は --agent より優先。
 OPENCODE_MODEL = get("OPENCODE_MODEL", "")
@@ -70,6 +75,16 @@ SCRIPT_RESEARCH = get_bool("SCRIPT_RESEARCH", False)
 SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
 RESEARCH_MODEL = get("RESEARCH_MODEL", "claude-sonnet-4-6")
 FACTCHECK_MODEL = get("FACTCHECK_MODEL", "claude-opus-4-8")
+# バックエンドを claude CLI から codex exec(+MiniMax-M3)へ切替可能にする。値は claude | codex。
+RESEARCH_BACKEND = get("RESEARCH_BACKEND", "claude")
+FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", "claude")
+CHART_BG_BACKEND = get("CHART_BG_BACKEND", "claude")
+# 構成プラン(plan.make_plan)のバックエンド。値は opencode | codex。直契約MiniMaxを
+# opencode-goゲートウェイ経由でなく codex exec 経由で使えるようにする。
+PLAN_BACKEND = get("PLAN_BACKEND", "opencode")
+CODEX_BIN = get("CODEX_BIN", "codex")
+CODEX_MODEL = get("CODEX_MODEL", "MiniMax-M3")
+CODEX_MINIMAX_BASE_URL = get("CODEX_MINIMAX_BASE_URL", "https://api.minimax.io/v1")
 # リサーチ/チェックは Web検索＋長尺narrationで時間がかかるため長めの上限（長尺で300sは不足）。
 SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
 # 執筆(opencode/qwen 等)専用の上限。健全な執筆は実測 ~70秒。qwen がヘッドレスで稀に
@@ -79,6 +94,8 @@ WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 240)
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # リサーチの再試行回数。claude+Web が稀に不正JSONを返すため。高価なので控えめ。
 SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)
+# ファクトチェックの再試行回数。MiniMax等が長い日本語JSONのエスケープを崩すことがあるため再試行する。
+SCRIPT_FACTCHECK_RETRIES = get_int("SCRIPT_FACTCHECK_RETRIES", 2)
 # --- 構成プラン: 起承転結＋図表策定（issue #2）。minimax が設計し qwen が執筆 ---
 SCRIPT_PLAN = get_bool("SCRIPT_PLAN", True)
 PLAN_MODEL = get("PLAN_MODEL", "opencode-go/minimax-m3")

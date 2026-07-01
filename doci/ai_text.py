@@ -168,7 +168,7 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
     if config.SCRIPT_RESEARCH:
         from . import research as research_mod
 
-        _log("前段リサーチ (claude+Web)…")
+        _log(f"前段リサーチ ({config.RESEARCH_BACKEND}+Web)…")
         try:
             research = research_mod.web_research(corner, past_topics)
             if research:
@@ -217,7 +217,7 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
         _log(f"執筆({config.TEXT_BACKEND})が揃わず→claude_cli にフォールバック")
         for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
             try:
-                script = _validate(_extract_json(_run_claude_cli(prompt, config.TEXT_MODEL)))
+                script = _validate(_extract_json(_run_claude_cli(prompt, config.FALLBACK_TEXT_MODEL)))
                 break
             except (ValueError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
                 last_err = e
@@ -252,7 +252,7 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
     if config.SCRIPT_FACTCHECK:
         from . import factcheck
 
-        _log("後段ファクトチェック (opus+Web)…")
+        _log(f"後段ファクトチェック ({config.FACTCHECK_BACKEND}+Web)…")
         try:
             fc = factcheck.verify_and_correct(script["narration"], research)
             if fc and fc.get("narration", "").strip():

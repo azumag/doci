@@ -1,12 +1,23 @@
 """前段リサーチ (issue #6)。
 
-claude CLI の Web ツールで、コーナーに合う「きょうの題材」を1つ選び、
-検証可能な具体事実（人名・年・数字・定義・具体例）を実ソースで裏取りして返す。
-下書き(minimax-m3)はこの「参考事実」を具体として織り込む。出典は本文には出さない。
+claude CLI の Web ツール、または codex exec(+MiniMax-M3)のシェル経由Web取得で、
+コーナーに合う「きょうの題材」を1つ選び、検証可能な具体事実（人名・年・数字・定義・具体例）を
+実ソースで裏取りして返す。下書き(minimax-m3)はこの「参考事実」を具体として織り込む。
+出典は本文には出さない。
 """
 from __future__ import annotations
 
 from . import config, corners, llm
+
+# バックエンドごとの「Webで確認する」手順の言い回し。claude は従来どおり WebSearch/WebFetch
+# ツールを使わせる。codex はツールを持たないためシェルの curl 等での取得を明示的に指示する。
+_WEB_HOWTO = {
+    "claude": "WebSearch / WebFetch で確認し、",
+    "codex": (
+        "シェルで curl 等を使い、Web検索（例: https://duckduckgo.com/html/?q=... や "
+        "Wikipedia API、ニュースAPI等）と実ページの取得で確認し、"
+    ),
+}
 
 _PROMPT = """\
 あなたは日本語ショート動画の構成リサーチャーです。次のコーナー向けに、きょう扱う題材を1つ選び、Web検索で裏取りした具体的事実を集めてください。
@@ -16,15 +27,22 @@ _PROMPT = """\
 
 やること:
 1. このコーナーに合う、具体的で語り甲斐のある題材を1つ選ぶ（抽象概念そのものでなく、出来事・人物・制度・数字に落ちるもの）。
-2. WebSearch / WebFetch で確認し、台本に織り込める「検証済みの具体事実」を5〜7個集める。
+2. {web_howto}台本に織り込める「検証済みの具体事実」を5〜7個集める。
    - 人名・年号・数値・定義・固有の出来事・印象的な具体例を優先。
    - 不確かなものは入れない。各事実に出典URLを付ける。
-
+{extra_rules}
 出力は **有効な JSON オブジェクトのみ**（前後に説明やコードフェンスを付けない）。文字列内の引用符・改行は必ずエスケープし、各 claim は1文に収める:
 {{"topic": "きょうの題材（短い日本語）",
   "angle": "視聴者がハッとする切り口（1文）",
   "facts": [{{"claim": "検証済みの具体事実（日本語・1文）", "source_url": "...", "source_title": "..."}}]}}
 """
+
+# codex は内部知識だけで済ませがちなため、実際に取得したページに基づけと念押しする一文を足す。
+# claude は従来プロンプトと完全に同一にするため空のまま。
+_EXTRA_RULES = {
+    "claude": "",
+    "codex": "   - 内部知識だけで書いてはいけない。必ず取得したページの内容に基づくこと。\n",
+}
 
 
 def _log(msg: str) -> None:
@@ -32,12 +50,21 @@ def _log(msg: str) -> None:
 
 
 def _attempt(prompt: str) -> dict:
-    raw = llm.run_claude(
-        prompt,
-        config.RESEARCH_MODEL,
-        allowed_tools=["WebSearch", "WebFetch"],
-        timeout=config.SCRIPT_LLM_TIMEOUT,
-    )
+    backend = config.RESEARCH_BACKEND
+    if backend == "codex":
+        raw = llm.run_codex(
+            prompt,
+            config.CODEX_MODEL,
+            timeout=config.SCRIPT_LLM_TIMEOUT,
+            min_web_fetches=2,
+        )
+    else:
+        raw = llm.run_claude(
+            prompt,
+            config.RESEARCH_MODEL,
+            allowed_tools=["WebSearch", "WebFetch"],
+            timeout=config.SCRIPT_LLM_TIMEOUT,
+        )
     data = llm.extract_json(raw)
     facts = data.get("facts")
     if not data.get("topic") or not isinstance(facts, list) or not facts:
@@ -52,7 +79,13 @@ def _attempt(prompt: str) -> dict:
 def web_research(corner: corners.Corner, past_topics: list[str]) -> dict | None:
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
-    prompt = _PROMPT.format(label=corner.label, past=past)
+    backend = config.RESEARCH_BACKEND
+    prompt = _PROMPT.format(
+        label=corner.label,
+        past=past,
+        web_howto=_WEB_HOWTO.get(backend, _WEB_HOWTO["claude"]),
+        extra_rules=_EXTRA_RULES.get(backend, _EXTRA_RULES["claude"]),
+    )
     last_err: Exception | None = None
     for attempt in range(1, config.SCRIPT_RESEARCH_RETRIES + 1):
         try:
