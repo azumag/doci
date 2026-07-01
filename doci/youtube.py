@@ -17,6 +17,7 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
 
 def _load_credentials(interactive: bool):
+    from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
 
@@ -27,9 +28,16 @@ def _load_credentials(interactive: bool):
     if creds and creds.valid:
         return creds
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        token_file.write_text(creds.to_json(), encoding="utf-8")
-        return creds
+        try:
+            creds.refresh(Request())
+            token_file.write_text(creds.to_json(), encoding="utf-8")
+            return creds
+        except RefreshError:
+            # refresh_token 自体が失効/取り消し済み。interactive なら再認証へフォールスルーする。
+            if not interactive:
+                raise RuntimeError(
+                    "YouTube のrefresh_tokenが失効しています。`python -m doci.youtube --auth` で再認証してください。"
+                )
     if not interactive:
         raise RuntimeError(
             "有効な YouTube 認証がありません。先に `python -m doci.youtube --auth` を実行してください。"
