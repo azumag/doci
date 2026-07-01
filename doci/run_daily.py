@@ -9,9 +9,16 @@ import math
 import shutil
 import sys
 from datetime import date as _date
+from datetime import datetime
 from pathlib import Path
 
 from . import ai_text, assets, compose, config, corners, history, imagegen, routing, voicevox
+
+
+def _workdir_name(day: str, corner_key: str, hhmmss: str) -> str:
+    """workdir名を組み立てる。`{day}_{corner_key}` プレフィックスは検索性のため維持しつつ、
+    末尾に実行時刻を足して run ごとに一意にする（同日同コーナーの後続runによる上書き喪失を防ぐ）。"""
+    return f"{day}_{corner_key}_{hhmmss}"
 
 
 def _log(msg: str) -> None:
@@ -37,7 +44,7 @@ def _credits(corner) -> str:
 
 def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) -> dict:
     corner = corners.CORNERS[corner_key] if corner_key else corners.pick_corner(history.last_corner())
-    workdir = config.OUTPUT / f"{day}_{corner.key}"
+    workdir = config.OUTPUT / _workdir_name(day, corner.key, datetime.now().strftime("%H%M%S"))
     workdir.mkdir(parents=True, exist_ok=True)
     _log(f"corner={corner.key} voice={corner.voice_key}(spk{corner.speaker}) workdir={workdir}")
 
