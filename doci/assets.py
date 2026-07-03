@@ -36,6 +36,38 @@ class AssetError(RuntimeError):
 # 変種ごとに何度も叩いてレート制限(403)に当たるのを防ぐ。キーは (種別, query)。
 _search_cache: dict[tuple[str, str], list[dict]] = {}
 
+# 直近使用したPexels素材ID(プロセスをまたいで永続化)。variant=0の決定的選択が
+# 別日・別動画のcron runでも同じ検索1位を返し続け、日をまたいで同じ映像が
+# 再登場するのを避けるため、選定時にここへ載っているIDを避ける（ソフトな優先）。
+_PEXELS_USAGE_FILE = config.OUTPUT / "pexels_usage.jsonl"
+_PEXELS_USAGE_WINDOW = 300  # 直近N件のみ「使用済み」として避ける（枯渇時は自然に忘れて再利用可へ戻る）
+
+
+def _recent_used_ids(kind: str) -> set[str]:
+    if not _PEXELS_USAGE_FILE.exists():
+        return set()
+    ids: list[str] = []
+    for line in _PEXELS_USAGE_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("kind") == kind:
+            ids.append(str(row.get("id")))
+    return set(ids[-_PEXELS_USAGE_WINDOW:])
+
+
+def _record_used(kind: str, asset_id) -> None:
+    if asset_id is None:
+        return
+    _PEXELS_USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    row = {"kind": kind, "id": str(asset_id)}
+    with _PEXELS_USAGE_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
 
 def _resolve(
     width: int | None, height: int | None, orientation: str | None
@@ -80,8 +112,10 @@ def _pexels_fetch(
     photos = _pexels_search(query, key, config.ASSET_PER_PAGE, orientation)
     if not photos:
         return None
+    used = _recent_used_ids("photo")
+    pool = [p for p in photos if str(p.get("id")) not in used] or photos
     # 同一シーンの2枚目以降(variant>0)は別候補を選んで使い回しの単調を避ける。
-    photo = photos[variant % len(photos)]
+    photo = pool[variant % len(pool)]
     base = (photo.get("src") or {}).get("original") or ""
     if not base:
         return None
@@ -95,6 +129,7 @@ def _pexels_fetch(
             out_path.write_bytes(r.read())
     except urllib.error.HTTPError as e:
         raise AssetError(f"Pexels画像DL HTTP {e.code}: {url}")
+    _record_used("photo", photo.get("id"))
     return out_path
 
 
@@ -170,7 +205,9 @@ def _pexels_video_fetch(
     videos = _pexels_video_search(query, key, config.ASSET_PER_PAGE, orientation)
     if not videos:
         return None
-    video = videos[variant % len(videos)]
+    used = _recent_used_ids("video")
+    pool = [v for v in videos if str(v.get("id")) not in used] or videos
+    video = pool[variant % len(pool)]
     f = _best_file(video, max(width, height), orientation == "landscape")
     if not f:
         return None
@@ -182,6 +219,7 @@ def _pexels_video_fetch(
             out_path.write_bytes(r.read())
     except urllib.error.HTTPError as e:
         raise AssetError(f"Pexels動画DL HTTP {e.code}")
+    _record_used("video", video.get("id"))
     return out_path
 
 
