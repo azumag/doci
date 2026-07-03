@@ -32,7 +32,13 @@ def last_corner() -> str | None:
 
 def recent_topics(limit: int = 30) -> list[str]:
     rows = _read_all()
-    topics = [r.get("title", "") for r in rows if r.get("title")]
+    topics: list[str] = []
+    for r in rows:
+        title = r.get("title", "")
+        if not title:
+            continue
+        desc_line = (r.get("description") or "").split("\n", 1)[0].strip()
+        topics.append(f"{title}（{desc_line}）" if desc_line else title)
     return topics[-limit:]
 
 

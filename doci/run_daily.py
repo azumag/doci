@@ -229,6 +229,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         video_id,
         extra={
             "workdir": str(workdir),
+            "description": script.get("description", ""),
             "duration_sec": round(tts.duration, 1),
             "tier": route.tier,
             "platforms": route.platforms,
