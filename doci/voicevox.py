@@ -121,7 +121,8 @@ def _sentence_intonation(sentence: str, base: float, vary: bool) -> float:
     """文末・長さから、その文の抑揚倍率を内容連動で微調整（issue #1）。
 
     vary=False なら base のまま。疑問・感嘆は少し豊かに、長い説明文は少し
-    落ち着かせる。揺れは控えめ（±約12%）でクランプする。
+    落ち着かせる。揺れは控えめ（±約12%）とし、base からの相対範囲でクランプする
+    （base が0.9未満/1.4超でも揺れが潰れないよう、絶対値ではなく base 比で安全弁をかける）。
     """
     if not vary:
         return base
@@ -132,7 +133,7 @@ def _sentence_intonation(sentence: str, base: float, vary: bool) -> float:
         f = 0.92
     else:
         f = 1.0
-    return max(0.9, min(1.4, round(base * f, 3)))
+    return max(base * 0.85, min(base * 1.15, round(base * f, 3)))
 
 
 def _apply_params(

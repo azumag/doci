@@ -5,7 +5,7 @@
     "speed": 1.15,
     "pitch": -0.02,
     "intonation": 0.8,
-    "intonation_vary": false,
+    "intonation_vary": true,
     "volume": 1.0,
     "note": "共産主義者ペルソナ。communismコーナー。soren の話者別マップ(109: tempo1.15/pitch-0.02/intonation0.8)を採用。"
   },
@@ -15,7 +15,7 @@
     "speed": 1.15,
     "pitch": -0.02,
     "intonation": 1.0,
-    "intonation_vary": false,
+    "intonation_vary": true,
     "volume": 1.0,
     "note": "資本主義者ペルソナ。capitalismコーナー。soren の話者別マップ(14: tempo1.15/pitch-0.02、intonation指定なし→1.0)を採用。"
   }
