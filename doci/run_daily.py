@@ -84,8 +84,27 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     scene_objs: list[compose.Scene] = []
     occ: dict[int, int] = {}
     chart_cache: dict[int, bool] = {}  # 図表は si ごとに1シーンに統合（重複スロットをスキップ）
+    # 画像スロットの配分をビート重要度(act: 起承転結)で重み付け（issue: 単純比例だと山場も
+    # 前振りも同じ枚数になり間延びする）。act未指定(空文字)は重み1.0＝現行の均等配分と完全一致。
+    # 図表シーンは1スロットしか実描画されない(chart_cacheで統合)ため重み付けしても無駄なので1.0固定。
+    _ACT_WEIGHT = {"起": 0.85, "承": 1.0, "転": 1.3, "結": 0.95}
+    weights = [
+        1.0 if sm.get("chart") else _ACT_WEIGHT.get(sm.get("act", ""), 1.0)
+        for sm in scenes_meta
+    ]
+    cum_w = [0.0]
+    for w in weights:
+        cum_w.append(cum_w[-1] + w)
+    total_w = cum_w[-1] or float(n_scenes)
     for j in range(n_images):
-        si = j * n_scenes // n_images  # スロット→元シーンへ順序保存でマップ
+        # 左端サンプリング（旧 `j * n_scenes // n_images` と同じ基準点）。中心点(+0.5)サンプリングは
+        # 均等重み時でも旧式と異なる si を選ぶことがある（実測で確認済み）ため使わない。
+        pos = j * total_w / n_images
+        si = n_scenes - 1
+        for i in range(n_scenes):
+            if cum_w[i] <= pos < cum_w[i + 1]:
+                si = i
+                break
         k = occ.get(si, 0)
         occ[si] = k + 1
         sm = scenes_meta[si]

@@ -129,6 +129,7 @@ def _validate(script: dict) -> dict:
         s.setdefault("caption", "")
         s.setdefault("visual_prompt", "")
         s.setdefault("motion", "")
+        s.setdefault("act", "")
     if isinstance(script["tags"], str):
         script["tags"] = [t.strip() for t in script["tags"].split(",") if t.strip()]
     return script
