@@ -78,10 +78,9 @@ def _bg_track(bgs: list[dict], dur: float, W: int, H: int, td: Path) -> Path:
 
 
 def _overlay_html(spec: dict) -> str:
-    """順次フローの透過オーバーレイ HTML（背景は無し・scrim＋見出し＋ラベル＋矢印）。"""
+    """順次フローの透過オーバーレイ HTML（背景は無し・scrim＋見出し＋ラベル＋矢印）。
+    spec の "place"(起承転結) は受け取っても画面には表示しない。"""
     evs = spec.get("events") or []
-    place = str(spec.get("place") or "").strip()
-    kicker = charts._ACT.get(place, "")
     events_json = json.dumps(
         [{"year": charts._esc(e.get("year")), "label": charts._esc(e.get("label"))} for e in evs],
         ensure_ascii=False,
@@ -94,13 +93,6 @@ def _overlay_html(spec: dict) -> str:
         ".scrim{position:fixed;inset:0;background:linear-gradient(180deg,"
         "rgba(8,7,9,.62) 0%,rgba(8,7,9,.34) 42%,rgba(8,7,9,.72) 100%)}"
         ".frame{position:fixed;inset:2.4vh 4.2vw;border:.18vh solid rgba(232,182,90,.3);border-radius:.6vh}"
-        ".eyebrow{position:fixed;top:7vh;left:9vw;right:9vw;display:flex;align-items:center;gap:1.8vw}"
-        ".act{font-family:'Hiragino Mincho ProN',serif;font-size:3vh;font-weight:600;color:#0b0a08;"
-        "background:linear-gradient(135deg,#f8dd97,#e8b65a);width:6.4vh;height:6.4vh;border-radius:50%;"
-        "display:flex;align-items:center;justify-content:center;flex-shrink:0;"
-        "box-shadow:0 .8vh 2.4vh rgba(232,182,90,.3)}"
-        ".krule{height:.18vh;flex:1;background:linear-gradient(90deg,rgba(232,182,90,.6),rgba(232,182,90,0))}"
-        ".kicker{font-family:'Hiragino Mincho ProN',serif;font-size:2.4vh;letter-spacing:.45em;color:#e6c27a}"
         ".stage{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:center;"
         "align-items:center;text-align:center;padding:0 9vw 30vh 9vw}"
         ".year{font-family:'Hiragino Mincho ProN',serif;font-weight:700;font-size:13vh;color:#f4c25c;"
@@ -117,8 +109,6 @@ def _overlay_html(spec: dict) -> str:
         "font-size:2.1vh;letter-spacing:.4em}"
         "</style></head><body>"
         "<div class='scrim'></div><div class='frame'></div>"
-        f"<div class='eyebrow'><span class='act'>{charts._esc(place)}</span>"
-        f"<span class='krule'></span><span class='kicker'>{charts._esc(kicker)}</span></div>"
         "<div class='stage' id='stage'></div>"
         "<div class='arrow' id='arrow'><div class='stem' id='stem'></div><div class='head'></div></div>"
         "<div class='counter' id='counter'></div>"

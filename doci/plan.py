@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from . import ai_text, config, corners, llm
 
-_TYPES = {"bar", "stat", "compare", "timeline"}
+_TYPES = {"bar", "stat", "compare", "timeline", "donut", "line"}
 
 _PROMPT = """\
 あなたは日本語ショート動画の構成作家です。次のコーナーの題材について、起承転結の構成と、解説に効く図表を設計してください（本文は書きません）。
@@ -28,6 +28,13 @@ _PROMPT = """\
 - stat(大数字1つ): {{"place":"起","type":"stat","title":"...","value":"1000時間","caption":"短い補足","source":"..."}}
 - compare(2〜3値の対比): {{"place":"転","type":"compare","title":"...","items":[{{"value":"2500h","label":"作れた寿命"}},{{"value":"1000h","label":"協定の上限"}}],"source":"..."}}
 - timeline(年表): {{"place":"結","type":"timeline","title":"...","events":[{{"year":"1924","label":"..."}}],"source":"..."}}
+- donut(構成比・シェア、2〜5項目): {{"place":"承","type":"donut","title":"...","items":[{{"label":"労働者","value":38.6,"display":"38.6%"}},{{"label":"資本家","value":30.0,"display":"30.0%"}}],"source":"..."}}
+- line(推移・折れ線、3〜8点): {{"place":"転","type":"line","title":"...","unit":"万台","points":[{{"x":"1997","y":85.6,"display":"85.6万台"}},{{"x":"2010","y":42.3,"display":"42.3万台"}}],"source":"..."}}
+
+制約:
+- bar は全項目が同じ単位のときだけ使う(異なる単位の羅列は compare か stat にする)。
+- 項目数の上限: bar≤4, compare 2〜3, timeline 3〜6, donut 2〜5, line 3〜8。
+- place は構成上の配置指定であり画面には表示されない。
 
 出力は次の JSON のみ（前後に説明やコードフェンスを付けない）:
 {{"topic":"きょうの題材（短い日本語）",

@@ -7,20 +7,28 @@ AI画像生成は文字・数値が崩れて図表に不適。HTML/CSS/SVG で�
 - render_chart_video(spec, out_mp4)  … 入場アニメ(0→1)を mp4 化（棒伸び/カウントアップ/順次出現）
 
 デザイン: 墨地＋ヴィネット＋微細グレイン、明朝の見出し、ゴールド(ミシュランの星)＋
-転換のレッド。起承転結(place)をアイブロウに昇格。アニメは ?p=0..1 を JS が読み、その
-進捗時点の1フレームを描く（Chrome を p ごと、または iframe フィルムストリップで撮影）。
+転換のレッド。アニメは ?p=0..1 を JS が読み、その進捗時点の1フレームを描く
+（Chrome を p ごと、または iframe フィルムストリップで撮影）。
+
+レイアウト: `_avail_vh()` が見出し・単位行を差し引いた本体の利用可能な縦領域(vh)を見積もり、
+各ビルダーは項目数から自然高さを算出して `s=min(1, budget/natural)` を行高・フォント・
+gap に掛け、下限フロアで可読性を保つ（項目数が多くてもはみ出さない）。
+spec の "place"（起承転結）フィールドは受け取っても画面には表示しない。
 
 chart 仕様の例:
   {"type":"bar",   "title":..., "unit":..., "data":[{"label":..,"value":N}...], "source":..}
   {"type":"stat",  "title":..., "value":"7フラン", "caption":.., "source":..}
   {"type":"compare","title":.., "items":[{"label":..,"value":".."}...], "source":..}
   {"type":"timeline","title":.., "events":[{"year":"1924","label":..}...], "source":..}
+  {"type":"donut", "title":..., "unit":..., "items":[{"label":..,"value":38.6,"display":"38.6%"}...], "source":..}
+  {"type":"line",  "title":..., "unit":..., "points":[{"x":"1997","y":85.6,"display":"85.6万台"}...], "source":..}
 """
 from __future__ import annotations
 
 import base64
 import html
 import json
+import math
 import os
 import re
 import signal
@@ -120,9 +128,6 @@ def _count_attrs(value):
             "comma": ("," in numstr) or num >= 1000}
 
 
-# 起承転結 → アイブロウのキッカー名（意味ある構造マーカー）
-_ACT = {"起": "発端", "承": "展開", "転": "転換", "結": "結末"}
-
 # ===== デザインシステム（墨地＋ゴールド＋ミシュランレッド、明朝見出し） =====
 _GRAIN = (
     "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' "
@@ -150,15 +155,6 @@ body{background:radial-gradient(120% 90% at 50% 28%,#17120b 0%,#0b0a0c 55%,#0706
 /* 下40vhは字幕帯として確実に空ける */
 .wrap{position:relative;width:100%;height:100%;padding:7vh 9vw 40vh 9vw;
   display:flex;flex-direction:column}
-/* アイブロウ：起承転結を意味ある構造マーカーに昇格 */
-.eyebrow{display:flex;align-items:center;gap:1.8vw;margin-bottom:2.6vh;flex-shrink:0}
-.act{font-family:'Hiragino Mincho ProN',serif;font-size:3.0vh;font-weight:600;color:#0b0a08;
-  background:linear-gradient(135deg,#f8dd97,#e8b65a);width:6.4vh;height:6.4vh;border-radius:50%;
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;
-  box-shadow:0 .8vh 2.4vh rgba(232,182,90,.28),inset 0 .2vh .4vh rgba(255,255,255,.5)}
-.krule{height:.18vh;flex:1;background:linear-gradient(90deg,rgba(232,182,90,.55),rgba(232,182,90,0))}
-.kicker{font-family:'Hiragino Mincho ProN',serif;font-size:2.4vh;letter-spacing:.45em;
-  color:#caa05a;text-indent:.45em;flex-shrink:0}
 /* 見出し：明朝で印刷物の遺産感 */
 .title{font-family:'Hiragino Mincho ProN','Hiragino Mincho Pro',serif;font-weight:600;
   font-size:4.4vh;line-height:1.25;color:#f6efe1;letter-spacing:.02em;flex-shrink:0}
@@ -170,9 +166,10 @@ body{background:radial-gradient(120% 90% at 50% 28%,#17120b 0%,#0b0a0c 55%,#0706
 .body{flex:1;min-height:0;display:flex;flex-direction:column;justify-content:center}
 /* 長文を文節ごとに順次フェード表示する用（不可視でも場所は確保＝出現時に文がずれない） */
 .w{opacity:0}
-/* 出典は画面最下部に小さく（字幕帯より下）。本体レイアウトからは外して常に一番下に固定。 */
+/* 出典は画面最下部に小さく（字幕帯より下）。本体レイアウトからは外して常に一番下に固定。
+   長い出典でも折り返さず常に1行に収める（Python側で40字に切り詰め済み）。 */
 .source{position:absolute;left:9vw;right:9vw;bottom:2.4vh;font-size:1.7vh;color:#6f6657;
-  text-align:center;line-height:1.35}
+  text-align:center;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* ---- stat（文脈リード→数字がドンと出るステートメント / 割合はリングゲージ） ---- */
 .stat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2.8vh}
 .stat-lead{font-size:3.1vh;line-height:1.5;color:#e9e1d2;text-align:center;max-width:80vw;
@@ -234,6 +231,24 @@ body{background:radial-gradient(120% 90% at 50% 28%,#17120b 0%,#0b0a0c 55%,#0706
   border-radius:.55vh;box-shadow:0 0 1vh rgba(240,180,80,.45)}
 .tl-head{width:0;height:0;border-left:1.2vh solid transparent;border-right:1.2vh solid transparent;
   border-top:1.5vh solid #f0b450;margin-top:-.1vh}
+/* ---- donut（構成比・シェア） ---- */
+.donut-block{flex:1;display:flex;align-items:center;justify-content:center;gap:6vw}
+.donut-ringwrap{position:relative;border-radius:50%;flex-shrink:0;
+  box-shadow:0 0 3vh rgba(232,182,90,.15)}
+.donut{position:absolute;inset:0;border-radius:50%;background:conic-gradient(#2a2218 0 100%)}
+.donut-hole{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);border-radius:50%;
+  background:radial-gradient(circle,#15110b 0%,#0d0b08 100%);display:flex;align-items:center;
+  justify-content:center;box-shadow:inset 0 .3vh 1vh rgba(0,0,0,.5)}
+.donut-center{font-family:'Hiragino Mincho ProN',serif;font-weight:800;font-size:4.4vh;
+  color:#f4c25c;text-align:center}
+.donut-legend{display:flex;flex-direction:column;gap:1.8vh}
+.donut-item{display:flex;align-items:center;gap:1.2vw}
+.donut-chip{width:1.8vh;height:1.8vh;border-radius:.4vh;flex-shrink:0}
+.donut-label{font-size:2.5vh;color:#cfc8ba;white-space:nowrap}
+.donut-val{font-size:2.5vh;color:#f4c25c;font-weight:800;margin-left:.6vw;white-space:nowrap}
+/* ---- line（推移・折れ線） ---- */
+.line-block{flex:1;display:flex;align-items:center;justify-content:center}
+.line-block svg{display:block}
 """
 
 # window.__apply(p) で進捗 p(0..1)時点の状態を全要素へ反映。
@@ -268,6 +283,16 @@ window.__apply=function(P){
     el.style.display='inline-block';el.style.transform=`scale(${1+(1-eo(s))*0.08})`});
   document.querySelectorAll('[data-stamp]').forEach(el=>{const s=seg(el,'stamp');
     el.style.opacity=eo(s);el.style.transform=`scale(${1.34-eo(s)*0.34})`});
+  document.querySelectorAll('[data-line]').forEach(el=>{const s=eo(seg(el,'line'));
+    el.style.strokeDasharray='1';el.style.strokeDashoffset=String(1-s)});
+  document.querySelectorAll('[data-donut]').forEach(el=>{
+    const stops=JSON.parse(el.dataset.donut);const s=eo(seg(el,'dwin'));
+    const total=stops.length?stops[stops.length-1][1]:100;const sweep=total*s;
+    const css=[];
+    stops.forEach(([a,b,color])=>{const bb=Math.max(a,Math.min(b,sweep));
+      css.push(`${color} ${(a/total*100).toFixed(3)}% ${(bb/total*100).toFixed(3)}%`)});
+    if(sweep<total)css.push(`#2a2218 ${(sweep/total*100).toFixed(3)}% 100%`);
+    el.style.background=`conic-gradient(${css.join(',')})`});
   void document.body.offsetHeight;
 };
 (function(){const u=new URLSearchParams(location.search).get('p');
@@ -304,6 +329,35 @@ def _count_or_text(value, cls, *, a, b, style="", unit_cls=None):
     return f'<span class="{cls}"{st} data-rev="{a:.2f},{b:.2f}">{_esc(value)}</span>'
 
 
+# 縦9:16での vh→vw 換算係数（100vh = 1920px, 100vw = 1080px → 1vh ≈ 1.778vw）
+_VH2VW = 1.778
+# .wrap の左右 padding 9vw ずつを除いた内容幅(vw)
+_CONTENT_VW = 82.0
+
+
+def _avail_vh(spec: dict) -> float:
+    """本体(.body)が使える縦領域(vh)を見積もる。.wrap は上7vh・下40vh(字幕帯)を確保しており、
+    残りから見出し(タイトル行数×行高＋罫)・単位行・安全マージンを差し引いた分が本体の予算。
+    タイトル行数は 9:16(1vh≈1.778vw)・タイトル幅82vw を前提に概算する。"""
+    title = spec.get("title", "")
+    fs = _title_fs(title)
+    lines = max(1, math.ceil(_units(title) * fs * _VH2VW / _CONTENT_VW))
+    head = lines * fs * 1.25 + 1.4 + 0.32
+    unit_h = (2.3 * 1.4 + 0.8) if spec.get("unit") else 0.0
+    return 100.0 - 7.0 - 40.0 - head - unit_h - 1.5
+
+
+def _fit_scale(natural: float, budget: float, floor: float) -> float:
+    """項目数から算出した自然高さ(natural, vh)を budget(vh) に収める倍率。フロアで可読性を保つ。"""
+    if natural <= 0:
+        return 1.0
+    return round(max(floor, min(1.0, budget / natural)), 4)
+
+
+# 各ビルダーの「自然高さ(scale=1時, vh)」算出に使うCSSの基準値（.bar-label/.bar-track/.bars gap）。
+_BAR_LABEL_FS, _BAR_LABEL_MB, _BAR_TRACK_H, _BAR_GAP = 2.9, 1.4, 6.4, 4.6
+
+
 def _bar(spec: dict) -> str:
     data = spec.get("data") or []
     mx = max((float(d.get("value") or 0) for d in data), default=1) or 1
@@ -311,6 +365,12 @@ def _bar(spec: dict) -> str:
     longest = max(disps, key=_units, default="")
     vfs = _fit_vw(longest, 20.0, 4.2)
     n = len(data) or 1
+    natural = n * (_BAR_LABEL_FS * 1.3 + _BAR_LABEL_MB + _BAR_TRACK_H) + (n - 1) * _BAR_GAP
+    s = _fit_scale(natural, _avail_vh(spec), 0.55)
+    label_fs = round(_BAR_LABEL_FS * s, 2)
+    label_mb = round(_BAR_LABEL_MB * s, 2)
+    track_h = round(_BAR_TRACK_H * s, 2)
+    gap = round(_BAR_GAP * s, 2)
     rows = []
     for i, (d, disp) in enumerate(zip(data, disps)):
         v = float(d.get("value") or 0)
@@ -320,11 +380,12 @@ def _bar(spec: dict) -> str:
         val = _count_or_text(disp, "bar-val", a=a, b=b, style=f"font-size:{vfs}vw")
         rows.append(
             f'<div class="bar-row" data-fade="{max(0,a-0.1):.2f},{a+0.08:.2f}">'
-            f'<div class="bar-label">{_esc(d.get("label"))}</div>'
-            f'<div class="bar-line"><div class="bar-track"><div class="bar-fill" '
+            f'<div class="bar-label" style="font-size:{label_fs}vh;margin-bottom:{label_mb}vh">'
+            f'{_esc(d.get("label"))}</div>'
+            f'<div class="bar-line"><div class="bar-track" style="height:{track_h}vh"><div class="bar-fill" '
             f'data-grow="{a:.2f},{b:.2f}" data-w="{pct:.1f}"></div></div>{val}</div></div>'
         )
-    return f'<div class="bars">{"".join(rows)}</div>'
+    return f'<div class="bars" style="gap:{gap}vh">{"".join(rows)}</div>'
 
 
 def _num_inner(val) -> str:
@@ -340,33 +401,53 @@ def _stat(spec: dict) -> str:
     val = spec.get("value")
     cap = spec.get("caption")
     pct = _percent(val)
+    budget = _avail_vh(spec)
     # 割合(%)はリングゲージで視覚化する価値がある（量の比較）。文脈を先に、ゲージは後で満ちる。
     if pct is not None and 0 <= pct <= 100:
         lead = f'<div class="stat-lead">{_reveal_words(cap, 0.12, 0.55)}</div>' if cap else ""
+        # ゲージ(既定34vh)がbudgetを超える時だけ軽く縮める。
+        gauge_vh = round(min(34.0, budget * 0.75), 2)
+        hole_vh = round(gauge_vh * (24.0 / 34.0), 2)
         gauge = (
             f'<div class="gauge" data-gauge=".5,.9" data-pct="{pct:.1f}" '
-            f'style="background:conic-gradient(#f4c25c 0 0%,#2a2218 0% 100%)">'
-            f'<div class="gauge-hole"></div>'
+            f'style="background:conic-gradient(#f4c25c 0 0%,#2a2218 0% 100%);'
+            f'width:{gauge_vh}vh;height:{gauge_vh}vh">'
+            f'<div class="gauge-hole" style="width:{hole_vh}vh;height:{hole_vh}vh"></div>'
             f'<div class="gauge-val" data-count=".5,.9" data-target="{int(pct)}" '
             f'data-suf="%" data-comma="0">0</div></div>'
         )
         return f'<div class="stat">{lead}<div class="stat-hero">{gauge}</div></div>'
     # 単一の事実(例: 7フラン)はカウントせず、「文脈(キャプション)→数字がドンと出る」ステートメントに。
     fs = _fit_vw(val, 70.0, 22.0)
+    # 数字(vw指定)がbudget(vh)を超える時だけ軽く縮める（1vh≈1.778vw換算）。
+    fs = round(min(fs, budget * _VH2VW * 0.75), 2)
     lead = f'<div class="stat-lead">{_reveal_words(cap, 0.12, 0.62)}</div>' if cap else ""
     star = _star_svg("star-bg", 'data-star=".6,.92" data-op="0.5"')
     num = f'<div class="num" data-stamp=".62,.84" style="font-size:{fs}vw">{_num_inner(val)}</div>'
     return f'<div class="stat">{lead}<div class="stat-hero">{star}{num}</div></div>'
 
 
+# cbar(同単位比較棒)の基準値。bar と同様の考え方だが cbar 独自の CSS 値を使う。
+_CBAR_LABEL_FS, _CBAR_LABEL_MB, _CBAR_TRACK_H, _CBAR_GAP = 3.0, 1.4, 6.0, 5.0
+# compare(カード型)の基準値。
+_CMP_PAD_V, _CMP_LABEL_FS, _CMP_VAL_FS, _CMP_ARROW_FS, _CMP_GAP = 2.4, 2.9, 5.1, 3.8, 1.4
+
+
 def _compare(spec: dict) -> str:
     items = spec.get("items") or []
+    budget = _avail_vh(spec)
     if _bar_comparable(items):
         mags = [_magnitude(it.get("value")) for it in items]
         mx = max(mags)
         longest = max((str(it.get("value") or "") for it in items), key=_units, default="")
         vfs = _fit_vw(longest, 34.0, 4.6)
         nb = len(items) or 1
+        natural = nb * (_CBAR_LABEL_FS * 1.3 + _CBAR_LABEL_MB + _CBAR_TRACK_H) + (nb - 1) * _CBAR_GAP
+        s = _fit_scale(natural, budget, 0.55)
+        label_fs = round(_CBAR_LABEL_FS * s, 2)
+        label_mb = round(_CBAR_LABEL_MB * s, 2)
+        track_h = round(_CBAR_TRACK_H * s, 2)
+        gap = round(_CBAR_GAP * s, 2)
         rows = []
         for i, (it, m) in enumerate(zip(items, mags)):
             pct = max(8.0, m / mx * 100.0)
@@ -375,36 +456,59 @@ def _compare(spec: dict) -> str:
             val = _count_or_text(it.get("value"), "cbar-val", a=a, b=b, style=f"font-size:{vfs}vw")
             rows.append(
                 f'<div class="cbar-row" data-fade="{max(0,a-0.1):.2f},{a+0.08:.2f}">'
-                f'<div class="cbar-label">{_esc(it.get("label"))}</div>'
-                f'<div class="cbar-line"><div class="cbar-track">'
+                f'<div class="cbar-label" style="font-size:{label_fs}vh;margin-bottom:{label_mb}vh">'
+                f'{_esc(it.get("label"))}</div>'
+                f'<div class="cbar-line"><div class="cbar-track" style="height:{track_h}vh">'
                 f'<div class="cbar-fill" data-grow="{a:.2f},{b:.2f}" data-w="{pct:.1f}"></div></div>{val}</div></div>'
             )
-        return f'<div class="cbars">{"".join(rows)}</div>'
+        return f'<div class="cbars" style="gap:{gap}vh">{"".join(rows)}</div>'
     longest = max((str(it.get("value") or "") for it in items), key=_units, default="")
     fs = _fit_vw(longest, 22.0, 9.0)
     nc = len(items) or 1
+    natural = nc * (_CMP_PAD_V * 2 + max(_CMP_LABEL_FS * 1.3, _CMP_VAL_FS)) + (nc - 1) * (
+        _CMP_ARROW_FS + _CMP_GAP * 2
+    )
+    s = _fit_scale(natural, budget, 0.45)
+    pad_v = round(_CMP_PAD_V * s, 2)
+    label_fs = round(_CMP_LABEL_FS * s, 2)
+    arrow_fs = round(_CMP_ARROW_FS * s, 2)
+    gap = round(_CMP_GAP * s, 2)
+    fs = round(fs * s, 2)
     parts = []
     for i, it in enumerate(items):
         a = 0.16 + i * (0.7 / nc)
         b = min(0.94, a + 0.42)
         if i:
-            parts.append(f'<div class="cmp-arrow" data-pop="{max(0,a-0.1):.2f},{a+0.06:.2f}">↓</div>')
+            parts.append(
+                f'<div class="cmp-arrow" style="font-size:{arrow_fs}vh" '
+                f'data-pop="{max(0,a-0.1):.2f},{a+0.06:.2f}">↓</div>'
+            )
         val = _count_or_text(it.get("value"), "cmp-val", a=a + 0.04, b=b, style=f"font-size:{fs}vw")
         parts.append(
-            f'<div class="cmp-item" data-rev="{a:.2f},{b:.2f}">{val}'
-            f'<div class="cmp-label">{_esc(it.get("label"))}</div></div>'
+            f'<div class="cmp-item" style="padding:{pad_v}vh 5vw" data-rev="{a:.2f},{b:.2f}">{val}'
+            f'<div class="cmp-label" style="font-size:{label_fs}vh">{_esc(it.get("label"))}</div></div>'
         )
-    return f'<div class="compare">{"".join(parts)}</div>'
+    return f'<div class="compare" style="gap:{gap}vh">{"".join(parts)}</div>'
+
+
+# timeline の基準値(scale=1時)。cardpad は上下2回、stem+head+マージンがイベント間の間隔。
+_TL_YEAR_FS, _TL_LABEL_FS, _TL_STEM_H, _TL_CARDPAD, _TL_HEAD_H, _TL_HEAD_W = 3.0, 2.55, 1.9, 1.5, 1.5, 1.2
+_TL_ARROW_MARGIN = 0.3  # ステム/矢頭間の見た目の余白(近似)
 
 
 def _timeline(spec: dict) -> str:
     evs = spec.get("events") or []
     n = len(evs) or 1
-    scale = max(0.46, min(1.0, 3.6 / n))
-    year_fs = round(3.0 * scale, 2)
-    label_fs = round(2.55 * scale, 2)
-    stem_h = round(1.9 * scale, 2)      # 矢印(stem)の長さ(vh)
-    cardpad = round(1.1 * scale, 2)
+    natural = n * (_TL_CARDPAD * 2 + max(_TL_YEAR_FS, _TL_LABEL_FS * 1.3)) + (n - 1) * (
+        _TL_STEM_H + _TL_HEAD_H + _TL_ARROW_MARGIN
+    )
+    s = _fit_scale(natural, _avail_vh(spec), 0.42)
+    year_fs = round(_TL_YEAR_FS * s, 2)
+    label_fs = round(_TL_LABEL_FS * s, 2)
+    stem_h = round(_TL_STEM_H * s, 2)      # 矢印(stem)の長さ(vh)
+    cardpad = round(_TL_CARDPAD * s, 2)
+    head_h = round(_TL_HEAD_H * s, 2)
+    head_w = round(_TL_HEAD_W * s, 2)
     parts = []
     for i, e in enumerate(evs):
         # 各出来事を尺いっぱいに割り振り。カードがぐっと出る→矢印が次カードへ「ぐーん」と伸びる。
@@ -422,24 +526,165 @@ def _timeline(spec: dict) -> str:
             parts.append(
                 f'<div class="tl-arrow">'
                 f'<div class="tl-stem" data-drawy="{ar_a:.3f},{ar_b:.3f}" style="height:{stem_h}vh"></div>'
-                f'<div class="tl-head" data-pop="{max(0, ar_b - 0.03):.3f},{ar_b + 0.03:.3f}"></div></div>'
+                f'<div class="tl-head" data-pop="{max(0, ar_b - 0.03):.3f},{ar_b + 0.03:.3f}" '
+                f'style="border-left:{head_w}vh solid transparent;border-right:{head_w}vh solid transparent;'
+                f'border-top:{head_h}vh solid #f0b450"></div></div>'
             )
     return f'<div class="timeline">{"".join(parts)}</div>'
 
 
-_BUILDERS = {"bar": _bar, "stat": _stat, "compare": _compare, "timeline": _timeline}
+_DONUT_COLORS = ["#f4c25c", "#d8503a", "#c9772a", "#e9e1d2", "#8a6b3d"]
+_DONUT_GAP_VW = 6.0    # .donut-block の gap（リング↔凡例）
+_DONUT_LEG_FS = 2.5    # 凡例 label/val の基準フォント(vh)
+_DONUT_CHIP = 1.8      # 色チップの基準サイズ(vh)
 
 
-def _eyebrow(spec: dict, win: str) -> str:
-    place = str(spec.get("place") or "").strip()
-    if not place:
-        return ""
-    kicker = _ACT.get(place, "")
-    k_html = f'<span class="kicker">{_esc(kicker)}</span>' if kicker else ""
-    return (
-        f'<div class="eyebrow" data-rev="{win}">'
-        f'<span class="act">{_esc(place)}</span><span class="krule"></span>{k_html}</div>'
+def _donut_layout(items: list, disps: list, budget: float) -> tuple[float, float, float, float]:
+    """(リング径vh, 凡例フォントvh, チップvh, 凡例幅vw) を決める。
+    リング径(vh→vw換算) + gap + 凡例幅 が内容幅82vwを超えないよう、まず凡例を
+    ~34vwに縮め(フロア0.6)、残り幅とbudgetの小さい方でリング径を決める。"""
+    if items:
+        # 行幅(vw) = チップ + flex gap(チップ↔label) + label + flex gap(label↔val) + val margin + val
+        raw_w = max(
+            _DONUT_CHIP * _VH2VW + 1.2
+            + _units(it.get("label")) * _DONUT_LEG_FS * _VH2VW
+            + 1.2 + 0.6
+            + _units(d) * _DONUT_LEG_FS * _VH2VW
+            for it, d in zip(items, disps)
+        )
+    else:
+        raw_w = 0.0
+    ls = max(0.6, min(1.0, 34.0 / raw_w)) if raw_w > 34.0 else 1.0
+    legend_w = round(raw_w * ls, 2)
+    size = round(min(34.0, budget * 0.72, (_CONTENT_VW - _DONUT_GAP_VW - legend_w) / _VH2VW), 2)
+    return size, round(_DONUT_LEG_FS * ls, 2), round(_DONUT_CHIP * ls, 2), legend_w
+
+
+def _donut(spec: dict) -> str:
+    items = spec.get("items") or []
+    vals = [max(0.0, float(it.get("value") or 0)) for it in items]
+    total = sum(vals) or 1.0
+    n = len(items) or 1
+    disps = [str(it.get("display") or _fmt(vals[i])) for i, it in enumerate(items)]
+    size, leg_fs, chip, _legend_w = _donut_layout(items, disps, _avail_vh(spec))
+    hole = round(size * (24.0 / 34.0), 2)
+    center_fs = round(4.4 * size / 34.0, 2)
+    # 累積ストップ(0..100%)。__apply が進捗sに応じ 0→各ストップへスイープする conic-gradient を生成。
+    stops = []
+    acc = 0.0
+    for v in vals:
+        stops.append((round(acc / total * 100, 3), round((acc + v) / total * 100, 3)))
+        acc += v
+    max_i = max(range(len(items)), key=lambda i: vals[i]) if items else 0
+    donut_stops = [
+        [stops[i][0], stops[i][1], _DONUT_COLORS[i % len(_DONUT_COLORS)]]
+        for i in range(len(items))
+    ]
+    legend_rows = []
+    for i, (it, disp) in enumerate(zip(items, disps)):
+        color = _DONUT_COLORS[i % len(_DONUT_COLORS)]
+        a = 0.2 + i * (0.6 / n)
+        b = min(0.96, a + 0.6 / n + 0.1)
+        legend_rows.append(
+            f'<div class="donut-item" data-rev="{a:.2f},{b:.2f}">'
+            f'<span class="donut-chip" style="background:{color};width:{chip}vh;height:{chip}vh"></span>'
+            f'<span class="donut-label" style="font-size:{leg_fs}vh">{_esc(it.get("label"))}</span>'
+            f'<span class="donut-val" style="font-size:{leg_fs}vh">{_esc(disp)}</span></div>'
+        )
+    center_disp = disps[max_i] if items else ""
+    donut_json = json.dumps(donut_stops)
+    ring = (
+        f'<div class="donut-ringwrap" style="width:{size}vh;height:{size}vh">'
+        f"<div class=\"donut\" data-donut='{donut_json}' data-dwin=\".15,.85\" "
+        f'style="width:{size}vh;height:{size}vh"></div>'
+        f'<div class="donut-hole" style="width:{hole}vh;height:{hole}vh">'
+        f'<div class="donut-center" data-stamp=".75,.95" style="font-size:{center_fs}vh">'
+        f"{_esc(center_disp)}</div></div></div>"
     )
+    return f'<div class="donut-block">{ring}<div class="donut-legend">{"".join(legend_rows)}</div></div>'
+
+
+def _line(spec: dict) -> str:
+    points = spec.get("points") or []
+    n = len(points) or 1
+    budget = _avail_vh(spec)
+    blk_h = round(min(38.0, budget * 0.9), 2)
+    ys = [float(p.get("y") or 0) for p in points] or [0.0]
+    y_lo, y_hi = min(ys), max(ys)
+    span = y_hi - y_lo
+    if span <= 0:
+        span = max(abs(y_hi), 1.0)  # 全点同一yでも0除算しない
+    pad = span * 0.1
+    plo, phi = y_lo - pad, y_hi + pad
+    pspan = (phi - plo) or 1.0
+    VBW, VBH = 100.0, 60.0
+    X0, X1 = 10.0, 90.0  # x範囲を内側に寄せ、端点のラベルが viewBox 左右で見切れないようにする
+    xs = [X0 + (i / (n - 1) if n > 1 else 0.5) * (X1 - X0) for i in range(n)]
+    yc = [VBH - ((y - plo) / pspan) * VBH for y in ys]
+    path_d = "M " + " L ".join(f"{x:.2f},{y:.2f}" for x, y in zip(xs, yc))
+    area_d = path_d + f" L {xs[-1]:.2f},{VBH:.2f} L {xs[0]:.2f},{VBH:.2f} Z"
+    max_i = max(range(n), key=lambda i: ys[i])
+    emphasize = {0, n - 1, max_i}
+    line_a, line_b = 0.10, 0.82
+
+    def _t(i):
+        f = i / (n - 1) if n > 1 else 0.5
+        return line_a + f * (line_b - line_a)
+
+    step = 2 if n >= 8 else 1
+    markers, labels, xlabels = [], [], []
+    for i, p in enumerate(points):
+        t = _t(i)
+        a, b = max(0.0, t - 0.02), min(0.98, t + 0.06)
+        is_last = i == n - 1
+        r = "1.6" if is_last else "1.1"
+        color = "#d8503a" if is_last else "#f4c25c"
+        markers.append(
+            f'<circle cx="{xs[i]:.2f}" cy="{yc[i]:.2f}" r="{r}" fill="{color}" '
+            f'data-pop="{a:.3f},{b:.3f}"/>'
+        )
+        # 端点のラベルは外側にはみ出さないよう、最初=start / 最後=end / 中間=middle で寄せる。
+        anchor = "start" if i == 0 else ("end" if is_last else "middle")
+        if i in emphasize:
+            disp = p.get("display") or _fmt(ys[i])
+            fw = "800" if is_last else "600"
+            fsize = 5.6 if is_last else 4.4
+            fill = "#d8503a" if is_last else "#f4c25c"
+            # 点の上に置き、viewBox 上端(y=0)から出るなら点の下へ（baseline≈フォント高でクランプ）。
+            y_text = yc[i] - 3.5
+            if y_text < fsize:
+                y_text = yc[i] + 7.0
+            labels.append(
+                f'<text x="{xs[i]:.2f}" y="{y_text:.2f}" font-size="{fsize}" '
+                f'font-weight="{fw}" fill="{fill}" text-anchor="{anchor}" '
+                f'data-fade="{a:.3f},{min(0.99, b + 0.04):.3f}">{_esc(disp)}</text>'
+            )
+        if i % step == 0 or is_last:
+            xlabels.append(
+                f'<text x="{xs[i]:.2f}" y="{VBH + 4.5:.2f}" font-size="3.4" fill="#9a9486" '
+                f'text-anchor="{anchor}" data-fade="{a:.3f},{min(0.99, b + 0.05):.3f}">'
+                f"{_esc(p.get('x'))}</text>"
+            )
+    svg = (
+        f'<svg viewBox="0 0 {VBW:.0f} {VBH + 9:.0f}" style="width:100%;height:{blk_h}vh">'
+        '<defs><linearGradient id="lineFill" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0%" stop-color="#f4c25c" stop-opacity="0.32"/>'
+        '<stop offset="100%" stop-color="#f4c25c" stop-opacity="0"/></linearGradient></defs>'
+        f'<path d="{area_d}" fill="url(#lineFill)" stroke="none" '
+        f'data-fade="{line_a:.2f},{min(0.99, line_a + 0.2):.2f}"/>'
+        f'<path d="{path_d}" fill="none" stroke="#f4c25c" stroke-width="0.7" '
+        f'stroke-linecap="round" stroke-linejoin="round" pathLength="1" '
+        f'data-line="{line_a:.2f},{line_b:.2f}"/>'
+        + "".join(markers) + "".join(labels) + "".join(xlabels)
+        + "</svg>"
+    )
+    return f'<div class="line-block">{svg}</div>'
+
+
+_BUILDERS = {
+    "bar": _bar, "stat": _stat, "compare": _compare, "timeline": _timeline,
+    "donut": _donut, "line": _line,
+}
 
 
 def _title_html(title) -> str:
@@ -459,12 +704,17 @@ def _wsec(a: float, b: float, duration) -> str:
 
 
 def _clean_source(s) -> str:
-    """出典文字列から「裏取り済み事実/情報」のメタ文言を除く。残りが括弧囲みだけなら外す。"""
+    """出典文字列から「裏取り済み事実/情報」のメタ文言を除く（「の」「より/から」も許容）。
+    残りが括弧囲みだけなら外す。2文字未満は空扱い、40字超は末尾を省略する。"""
     s = str(s or "").strip()
-    s = re.sub(r"^(裏取り済み(事実|情報))[\s:：、]*", "", s).strip()
+    s = re.sub(r"^(裏取り済み)の?(事実|情報)?(より|から)?[\s:：、，,]*", "", s).strip()
     m = re.fullmatch(r"[（(](.*)[)）]", s)
     if m:
         s = m.group(1).strip()
+    if len(s) < 2:
+        return ""
+    if len(s) > 40:
+        s = s[:40].rstrip() + "…"
     return s
 
 
@@ -516,7 +766,7 @@ def _page(spec: dict, body: str, duration=None, bg=None) -> str:
     scrim = "<div class='scrim'></div>" if bg else ""
     unit = spec.get("unit", "")
     source = _clean_source(spec.get("source", ""))
-    # 構造要素(アイブロウ/見出し/罫/単位)は尺に依らず冒頭で素早く出す（固定秒→p分率）。
+    # 構造要素(見出し/罫/単位)は尺に依らず冒頭で素早く出す（固定秒→p分率）。
     # データ(本体)は p 分率のまま尺いっぱいに広がり、切替の少し前(p≈1)に完了する。
     unit_html = f'<div class="unit" data-rev="{_wsec(0.5, 1.6, duration)}">{_esc(unit)}</div>' if unit else ""
     src_html = (f'<div class="source" data-rev=".88,1">出典: {_esc(source)}</div>'
@@ -527,7 +777,6 @@ def _page(spec: dict, body: str, duration=None, bg=None) -> str:
         + scrim
         + "<div class='grain'></div><div class='vig'></div><div class='frame'></div>"
         "<div class='wrap'>"
-        + _eyebrow(spec, _wsec(0.0, 0.7, duration))
         + f'<div class="title" data-rev="{_wsec(0.25, 1.7, duration)}" '
         + f'style="font-size:{_title_fs(spec.get("title", ""))}vh">'
         + f'{_title_html(spec.get("title", ""))}</div>'

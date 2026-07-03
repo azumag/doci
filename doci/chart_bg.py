@@ -25,6 +25,14 @@ def _items_desc(spec: dict) -> tuple[str, int]:
         its = spec.get("items") or []
         body = " / ".join(f'{x.get("value")}={x.get("label")}' for x in its)
         return f"compare: {body}", 1
+    if t == "donut":
+        its = spec.get("items") or []
+        body = " / ".join(f'{x.get("label")}={x.get("display") or x.get("value")}' for x in its)
+        return f"donut(構成比): {body}", 1
+    if t == "line":
+        pts = spec.get("points") or []
+        body = " → ".join(f'{p.get("x")}={p.get("display") or p.get("y")}' for p in pts)
+        return f"line(推移): {body}", 1
     return f'{t}: {spec.get("title", "")}', 1
 
 
