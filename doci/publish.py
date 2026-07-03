@@ -62,7 +62,8 @@ def _enabled(platform: str) -> tuple[bool, str]:
 
 
 def _do_upload(
-    platform: str, video: Path, title: str, description: str, tags: list[str], route
+    platform: str, video: Path, title: str, description: str, tags: list[str], route,
+    thumbnail: Path | None = None,
 ) -> PublishResult:
     if platform == "youtube":
         from . import youtube
@@ -70,6 +71,12 @@ def _do_upload(
         desc = description + (f"\n\n{route.hashtag}" if route.hashtag else "")
         ytags = tags + (["Shorts"] if route.is_youtube_short and "Shorts" not in tags else [])
         vid = youtube.upload(video, title, desc, ytags)
+        if thumbnail is not None:
+            # サムネイル設定はおまけ機能。失敗しても動画投稿自体の成功は損なわない。
+            try:
+                youtube.set_thumbnail(vid, thumbnail)
+            except Exception as e:  # noqa: BLE001
+                print(f"[doci] サムネイル設定失敗（動画投稿は成功のまま継続）: {e}")
         return PublishResult("youtube", "ok", url=f"https://youtu.be/{vid}", id=vid)
     if platform == "tiktok":
         from . import tiktok
@@ -92,6 +99,7 @@ def publish(
     tags: list[str],
     route,
     dry_run: bool | None = None,
+    thumbnail: Path | None = None,
 ) -> list[PublishResult]:
     """route に従い有効プラットフォームへ投稿。各結果を返す（例外は投げない）。"""
     dry = config.PUBLISH_DRY_RUN if dry_run is None else dry_run
@@ -105,7 +113,7 @@ def publish(
             results.append(PublishResult(platform, "dry_run", detail="PUBLISH_DRY_RUN: 実投稿せず"))
             continue
         try:
-            results.append(_do_upload(platform, Path(video_path), title, description, tags, route))
+            results.append(_do_upload(platform, Path(video_path), title, description, tags, route, thumbnail))
         except Exception as e:  # noqa: BLE001 1つ失敗しても他は続行
             results.append(PublishResult(platform, "error", detail=str(e)[:200]))
     return results

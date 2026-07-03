@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import shutil
+import subprocess
 import sys
 from datetime import date as _date
 from datetime import datetime
@@ -84,6 +85,8 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     scene_objs: list[compose.Scene] = []
     occ: dict[int, int] = {}
     chart_cache: dict[int, bool] = {}  # 図表は si ごとに1シーンに統合（重複スロットをスキップ）
+    # サムネイル背景選定用: シーンごとの「主画」(k==0で取得した実素材)のパス/動画フラグを記録。
+    primary_assets: dict[int, tuple] = {}
     # 画像スロットの配分をビート重要度(act: 起承転結)で重み付け（issue: 単純比例だと山場も
     # 前振りも同じ枚数になり間延びする）。act未指定(空文字)は重み1.0＝現行の均等配分と完全一致。
     # 図表シーンは1スロットしか実描画されない(chart_cacheで統合)ため重み付けしても無駄なので1.0固定。
@@ -185,6 +188,8 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
             except Exception as e:  # 動画失敗時は静止画にフォールバック
                 _log(f"動画生成失敗→静止画にフォールバック: {e}")
         scene_objs.append(compose.Scene(path=path, is_video=is_video, caption=sm.get("caption", ""), motion=sm.get("motion", "")))
+        if k == 0:
+            primary_assets[si] = (path, is_video)
 
     # 4) 合成（2.5で決めた向き・サイズで）
     _log("合成 (ffmpeg)…")
@@ -202,6 +207,38 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         f"youtube_short={route.is_youtube_short} 推奨={'/'.join(route.platforms)}"
     )
 
+    # 4.6) サムネイル生成（縦タイトルカードを作り、API送信直前だけ16:9ピラーボックス化）。
+    #      失敗しても動画生成・投稿自体は止めない。
+    thumbnail_path = None
+    try:
+        from . import thumbnail
+        # act重みが最大の非チャートシーンの実素材を背景に選ぶ
+        non_chart_candidates = [
+            si for si in primary_assets
+            if not scenes_meta[si].get("chart")
+        ]
+        if non_chart_candidates:
+            best_si = max(non_chart_candidates, key=lambda si: weights[si])
+            bg_path, bg_is_video = primary_assets[best_si]
+            bg_image = bg_path
+            if bg_is_video:
+                frame_path = workdir / "thumb_bg_frame.jpg"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", str(bg_path), "-ss", "0.5", "-frames:v", "1", "-q:v", "2", str(frame_path)],
+                    capture_output=True, timeout=30,
+                )
+                bg_image = frame_path if frame_path.exists() else None
+        else:
+            bg_image = None
+        thumb_vertical = workdir / "thumbnail_vertical.png"
+        thumbnail.render(script["title"], thumb_vertical, bg_image=bg_image, width=out_w, height=out_h)
+        thumb_final = workdir / "thumbnail.png"
+        thumbnail.to_16x9(thumb_vertical, thumb_final)
+        thumbnail_path = thumb_final
+        _log(f"サムネイル生成: {thumb_final}")
+    except Exception as e:
+        _log(f"サムネイル生成失敗（動画は続行）: {e}")
+
     # 5) アップロード（route.platforms と各 PUBLISH_* で出し分け: issue #3）
     video_id = None
     pub_results: list = []
@@ -214,6 +251,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
             description=script["description"] + _credits(corner),
             tags=script.get("tags", []),
             route=route,
+            thumbnail=thumbnail_path,
         )
         for r in pub_results:
             _log(f"  {r.platform}: {r.status}{(' ' + (r.url or r.detail)) if (r.url or r.detail) else ''}")

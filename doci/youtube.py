@@ -91,6 +91,16 @@ def upload(
     return video_id
 
 
+def set_thumbnail(video_id: str, thumbnail_path: Path) -> None:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+
+    creds = _load_credentials(interactive=False)
+    youtube = build("youtube", "v3", credentials=creds)
+    media = MediaFileUpload(str(thumbnail_path), mimetype="image/png")
+    youtube.thumbnails().set(videoId=video_id, media_body=media).execute()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="YouTube アップロード")
     ap.add_argument("--auth", action="store_true", help="初回OAuth同意してtokenを保存")
