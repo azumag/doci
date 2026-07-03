@@ -27,6 +27,7 @@ class Scene:
     path: Path
     is_video: bool
     caption: str = ""
+    motion: str = ""
     static: bool = False  # 図表(静止PNG)など：Ken Burns を掛けず静止表示（可読性優先）
     freeze_tail: bool = False  # 図表アニメ動画：入場を1回再生→最終フレームを静止保持して尺を埋める
     chart_spec: dict | None = None  # 図表アニメをシーン尺に合わせて compose 側で描画する仕様
@@ -360,10 +361,51 @@ def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: 
         cmd = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur}", "-i", str(scene.path),
                "-vf", vf, *tail]
     else:
-        vf = (f"scale={W * 2}:-1,"
-              f"zoompan=z='min(zoom+0.0010,1.18)':d={frames}:"
-              f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps={fps},"
-              f"trim=duration={dur},setsar=1,format=yuv420p")
+        motion_lower = (scene.motion or "").lower()
+        denom = max(frames - 1, 1)
+        PAN_ZOOM = 1.10
+        pan_triggers = ("pan across", "pan from", "panning", "tracking shot", "slide across", "dolly across", "pan left", "pan right")
+        tilt_triggers = ("tilt down", "tilts down", "tilt up", "tilts up", "camera tilts")
+        zoomout_triggers = ("zoom out", "pull back", "pulling back", "pull-back", "zooming out")
+
+        if any(t in motion_lower for t in tilt_triggers):
+            # 縦パン（tilt）: ズームは定数、y のみ上下に動かす
+            if "down" in motion_lower:
+                y_expr = f"(ih-ih/{PAN_ZOOM})*on/{denom}"       # 上→下
+            elif "up" in motion_lower:
+                y_expr = f"(ih-ih/{PAN_ZOOM})*(1-on/{denom})"   # 下→上
+            else:
+                y_expr = (f"(ih-ih/{PAN_ZOOM})*on/{denom}" if idx % 2 == 0
+                           else f"(ih-ih/{PAN_ZOOM})*(1-on/{denom})")
+            vf = (f"scale={W * 2}:-1,"
+                  f"zoompan=z='{PAN_ZOOM}':d={frames}:"
+                  f"x='iw/2-(iw/{PAN_ZOOM}/2)':y='{y_expr}':s={W}x{H}:fps={fps},"
+                  f"trim=duration={dur},setsar=1,format=yuv420p")
+        elif any(t in motion_lower for t in pan_triggers):
+            # 横パン: ズームは定数、x のみ左右に動かす
+            if "right to left" in motion_lower or "from right" in motion_lower:
+                x_expr = f"(iw-iw/{PAN_ZOOM})*(1-on/{denom})"   # 右→左
+            elif "left to right" in motion_lower or "from left" in motion_lower:
+                x_expr = f"(iw-iw/{PAN_ZOOM})*on/{denom}"       # 左→右
+            else:
+                x_expr = (f"(iw-iw/{PAN_ZOOM})*on/{denom}" if idx % 2 == 0
+                           else f"(iw-iw/{PAN_ZOOM})*(1-on/{denom})")
+            vf = (f"scale={W * 2}:-1,"
+                  f"zoompan=z='{PAN_ZOOM}':d={frames}:"
+                  f"x='{x_expr}':y='ih/2-(ih/{PAN_ZOOM}/2)':s={W}x{H}:fps={fps},"
+                  f"trim=duration={dur},setsar=1,format=yuv420p")
+        elif any(t in motion_lower for t in zoomout_triggers):
+            # ズームアウト: 1.18→1.0（既存ズームインの逆）、中央固定
+            vf = (f"scale={W * 2}:-1,"
+                  f"zoompan=z='if(eq(on,0),1.18,max(zoom-0.0010,1.0))':d={frames}:"
+                  f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps={fps},"
+                  f"trim=duration={dur},setsar=1,format=yuv420p")
+        else:
+            # 既定（現状維持）: ズームイン、中央固定
+            vf = (f"scale={W * 2}:-1,"
+                  f"zoompan=z='min(zoom+0.0010,1.18)':d={frames}:"
+                  f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps={fps},"
+                  f"trim=duration={dur},setsar=1,format=yuv420p")
         cmd = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur}", "-i", str(scene.path),
                "-vf", vf, *tail]
     _run(cmd)

@@ -165,7 +165,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
                 path, is_video = mp4, True
             except Exception as e:  # 動画失敗時は静止画にフォールバック
                 _log(f"動画生成失敗→静止画にフォールバック: {e}")
-        scene_objs.append(compose.Scene(path=path, is_video=is_video, caption=sm.get("caption", "")))
+        scene_objs.append(compose.Scene(path=path, is_video=is_video, caption=sm.get("caption", ""), motion=sm.get("motion", "")))
 
     # 4) 合成（2.5で決めた向き・サイズで）
     _log("合成 (ffmpeg)…")
