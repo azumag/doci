@@ -55,15 +55,19 @@ def _run_anthropic(prompt: str, model: str) -> str:
 
 
 def _run_opencode(prompt: str, model: str, agent: str) -> str:
-    cmd = ["opencode", "run"]
-    if model:
-        cmd += ["-m", model]
-    elif agent:
-        cmd += ["--agent", agent]
-    else:
+    if not model and not agent:
         raise RuntimeError(
             "OPENCODE_MODEL か OPENCODE_AGENT のどちらかを設定してください (TEXT_BACKEND=opencode)"
         )
+    # 呼び出し元がカスタムエージェントを明示していればそれを優先。未指定（既定）の場合は
+    # 下で opencode.json に定義する最小エージェント doci-write を使う。
+    # -m（モデル指定）と --agent（エージェント指定）は併用可能な CLI 仕様のため、
+    # model の有無に関わらず必ず --agent を付ける。
+    effective_agent = agent or "doci-write"
+    cmd = ["opencode", "run"]
+    if model:
+        cmd += ["-m", model]
+    cmd += ["--agent", effective_agent]
     # opencode はエージェント動作でカレントにファイルを書くことがあるため、
     # 使い捨ての作業ディレクトリに隔離する（生成物の repo 汚染を防ぐ）。
     scratch = config.OUTPUT / ".opencode_scratch"
@@ -72,11 +76,29 @@ def _run_opencode(prompt: str, model: str, agent: str) -> str:
     # external_directory 等)が応答待ちでブロックし、タイムアウトまでハングすることがある。
     # この使い捨て scratch にスコープ限定の設定を置き、権限を all-allow にして
     # 権限プロンプトで止まらないようにする（ユーザーのグローバル opencode 設定は変更しない）。
+    #
+    # 加えて doci-write という最小エージェントを定義する。既定の build エージェントは
+    # コーディングアシスタント用のフルシステムプロンプト（ツール定義・スキル一覧・
+    # グローバル CLAUDE.md 等、約8-10KB）を毎回上乗せするが、本用途は「JSON1個を
+    # テキスト生成させるだけ」でありファイル編集・bash実行等のツール能力は不要。
+    # prompt は空文字だと既定プロンプトへフォールバックする恐れがあるため半角スペース1つにする。
     (scratch / "opencode.json").write_text(
-        '{"$schema":"https://opencode.ai/config.json","permission":{"*":"allow"}}',
+        json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "permission": {"*": "allow"},
+                "agent": {
+                    "doci-write": {
+                        "mode": "primary",
+                        "prompt": " ",
+                        "tools": {"*": False},
+                    }
+                },
+            }
+        ),
         encoding="utf-8",
     )
-    cmd += ["--dir", str(scratch), prompt]
+    cmd += ["--print-logs", "--log-level", "ERROR", "--dir", str(scratch), prompt]
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=config.WRITE_LLM_TIMEOUT
     )

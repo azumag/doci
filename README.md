@@ -52,9 +52,10 @@ python -m doci.minimax  --image "a red flag, cinematic, vertical"  # 画像
 
 ## 日次スケジュール（ローカル）
 ```bash
-cp scripts/com.azumag.doci.daily.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.azumag.doci.daily.plist
+tools/install_launchd.sh
 ```
+launchd エージェント（`com.azumag.doci.generate`）を現在のプロジェクト位置から生成・再ロードする。
+プロジェクトを移動した場合は再実行すれば復旧する。第1引数で実行間隔（秒、デフォルト10800）を指定可能。
 
 ## クラウド移行
 ローカル依存は **VOICEVOX のみ**。`.github/workflows/daily.yml` が雛形:

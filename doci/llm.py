@@ -28,7 +28,10 @@ def run_claude(
         cmd += ["--allowedTools", *allowed_tools]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {proc.stderr[:500]}")
+        raise RuntimeError(
+            f"claude CLI failed (rc={proc.returncode}): "
+            f"stderr={proc.stderr[:500]} stdout={proc.stdout[:500]}"
+        )
     out = proc.stdout.strip()
     # --output-format json は {"type":"result","result":"...",...} を返す
     try:

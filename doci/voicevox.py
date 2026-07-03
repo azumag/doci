@@ -9,11 +9,13 @@ import argparse
 import io
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from . import config, voices
 
@@ -66,23 +68,53 @@ def split_sentences(text: str) -> list[str]:
     return out
 
 
+_T = TypeVar("_T")
+
+
+def _request_with_retry(fn: Callable[[], _T], retries: int = 3) -> _T:
+    """OSError系（接続断・タイムアウト等）を短い間隔でリトライして実行する。
+
+    VOICEVOXコンテナ（OrbStack）は稀に自己再起動し、その数百ms〜数秒の間だけ
+    一時的に不在になることがある。文単位で何度も呼ばれる音声合成HTTPリクエスト
+    がその瞬間に当たると RemoteDisconnected 等で失敗するため、短い待機を挟んで
+    最大 retries 回まで再試行する。最終試行の例外は呼び出し元にそのまま伝える。
+    """
+    for attempt in range(retries):
+        try:
+            return fn()
+        except OSError:
+            if attempt >= retries - 1:
+                raise
+            time.sleep(attempt + 1)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _audio_query(base: str, text: str, speaker: int) -> dict:
     url = f"{base}/audio_query?speaker={speaker}&text={urllib.parse.quote(text)}"
-    req = urllib.request.Request(url, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode("utf-8"))
+
+    def _do() -> dict:
+        req = urllib.request.Request(url, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode("utf-8"))
+
+    return _request_with_retry(_do)
 
 
 def _synthesis(base: str, query: dict, speaker: int) -> bytes:
     url = f"{base}/synthesis?speaker={speaker}"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(query).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "audio/wav"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return r.read()
+    data = json.dumps(query).encode("utf-8")
+
+    def _do() -> bytes:
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "Accept": "audio/wav"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.read()
+
+    return _request_with_retry(_do)
 
 
 def _sentence_intonation(sentence: str, base: float, vary: bool) -> float:

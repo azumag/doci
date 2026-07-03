@@ -1,9 +1,10 @@
 #!/bin/zsh
-# doci: 自動生成→アップロード（cron から5時間ごとに実行）。
+# doci: 自動生成→アップロード（launchd から定時実行）。
 # cron は最小環境なので PATH/HOME を明示し、VOICEVOX(OrbStack) を起動してから実行する。
 # コーナーは指定せず run_daily の自動交互（capitalism/communism）に任せる。
 
 export HOME="/Users/azumag"
+PROJ="${0:A:h:h}"
 # 外付けボリューム(/Volumes/satelite=homebrew)のバイナリを「起動」すると背景launchd文脈で
 # dyldが固まる。そこで実行時に使うバイナリは全て内蔵に寄せる:
 #  - ffmpeg/ffprobe: tools/ffbin(静的・内蔵) を最優先
@@ -11,9 +12,8 @@ export HOME="/Users/azumag"
 #  - python: 下記 .venv-cron(uv管理standalone・内蔵)
 #  - claude/opencode/orb/Chrome は元から内蔵
 # /opt/homebrew(外付け) は最後＝フォールバックのみ（基本使わせない）。
-export PATH="/Users/azumag/azumag/work/doci/tools/ffbin:/Users/azumag/.nvm/versions/node/v23.10.0/bin:/Users/azumag/.local/bin:/Users/azumag/.opencode/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+export PATH="$PROJ/tools/ffbin:/Users/azumag/.nvm/versions/node/v23.10.0/bin:/Users/azumag/.local/bin:/Users/azumag/.opencode/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 
-PROJ="/Users/azumag/azumag/work/doci"
 LOG="$PROJ/output/cron.log"
 PY="$PROJ/.venv-cron/bin/python"
 cd "$PROJ" || exit 1
