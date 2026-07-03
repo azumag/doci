@@ -132,7 +132,25 @@ def _validate(script: dict) -> dict:
         s.setdefault("act", "")
     if isinstance(script["tags"], str):
         script["tags"] = [t.strip() for t in script["tags"].split(",") if t.strip()]
+    _check_cold_open(script.get("narration", ""))
     return script
+
+
+_COLD_OPEN_PATTERNS = (
+    "今日は", "面白い話", "お話です", "突然ですが",
+    "こんにちは", "こんばんは",
+    "知っていますか",
+)
+
+
+def _check_cold_open(narration: str) -> None:
+    """冒頭が『いきなり本編』ルール(output_rules.md)に違反していないかを検証する。
+    実測で narration 冒頭に禁止フレーズが混入する事故が高頻度(24件中13件=54%)で
+    起きていたため、プロンプト指示だけに頼らずコード側でも検証しリトライへ回す。"""
+    head = (narration or "")[:60]
+    hit = next((p for p in _COLD_OPEN_PATTERNS if p in head), None)
+    if hit:
+        raise ValueError(f"冒頭が「いきなり本編」ルール違反（禁止フレーズ「{hit}」を検出）: {head!r}")
 
 
 # 図表は本来 scenes 側の要素として置く設計だが、執筆モデルが稀に図表マーカー
