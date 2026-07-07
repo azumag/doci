@@ -329,48 +329,79 @@ def _count_or_text(value, cls, *, a, b, style="", unit_cls=None):
     return f'<span class="{cls}"{st} data-rev="{a:.2f},{b:.2f}">{_esc(value)}</span>'
 
 
-# 縦9:16での vh→vw 換算係数（100vh = 1920px, 100vw = 1080px → 1vh ≈ 1.778vw）
-_VH2VW = 1.778
 # .wrap の左右 padding 9vw ずつを除いた内容幅(vw)
 _CONTENT_VW = 82.0
+# デザインの基準となる長辺(px)。9:16(1080x1920)で全フォント/間隔(vh指定)をチューニング済み。
+_REF_LONG_EDGE = 1920.0
 
 
-def _avail_vh(spec: dict) -> float:
+def _vh2vw(w: int, h: int) -> float:
+    """vh→vw 換算係数(1vh が何vwか)。実際の解像度から動的に算出(旧: 9:16固定の1.778)。"""
+    return h / w if w else 1.778
+
+
+def _scale(w: int, h: int) -> float:
+    """vh基準の文字/間隔サイズを実解像度に合わせて拡大する係数。長辺は常に1920(縦横入替のみ)
+    なので、縦9:16(h=1920)なら1.0(無変更)、横16:9(h=1080)なら1920/1080≈1.778倍し、
+    vh指定の絶対px相当サイズを両向きで揃える（横向きだと短辺化するhでvhの実pxが縮む問題を補正）。"""
+    return round(_REF_LONG_EDGE / h, 4) if h else 1.0
+
+
+def _avail_vh(spec: dict, w: int, h: int) -> float:
     """本体(.body)が使える縦領域(vh)を見積もる。.wrap は上7vh・下40vh(字幕帯)を確保しており、
     残りから見出し(タイトル行数×行高＋罫)・単位行・安全マージンを差し引いた分が本体の予算。
-    タイトル行数は 9:16(1vh≈1.778vw)・タイトル幅82vw を前提に概算する。"""
+    タイトル行数は実際の vh→vw 比・タイトル幅82vwから概算する。"""
     title = spec.get("title", "")
-    fs = _title_fs(title)
-    lines = max(1, math.ceil(_units(title) * fs * _VH2VW / _CONTENT_VW))
+    fs = _title_fs(title, w, h)
+    lines = max(1, math.ceil(_units(title) * fs * _vh2vw(w, h) / _CONTENT_VW))
     head = lines * fs * 1.25 + 1.4 + 0.32
-    unit_h = (2.3 * 1.4 + 0.8) if spec.get("unit") else 0.0
+    unit_h = (_unit_fs(w, h) * 1.4 + 0.8) if spec.get("unit") else 0.0
     return 100.0 - 7.0 - 40.0 - head - unit_h - 1.5
 
 
+def _unit_fs(w: int, h: int) -> float:
+    return round(2.3 * _scale(w, h), 2)
+
+
 def _fit_scale(natural: float, budget: float, floor: float) -> float:
-    """項目数から算出した自然高さ(natural, vh)を budget(vh) に収める倍率。フロアで可読性を保つ。"""
+    """項目数から算出した自然高さ(natural, vh)を budget(vh) に収める倍率。フロアで可読性を保つ。
+    floor は縦9:16のゆとりある budget を前提にした可読性の下限であり、横16:9等 budget が
+    そもそも floor を満たせないほど小さい場合にまで適用すると本体が枠から溢れる
+    （issue #12: 長尺で見出し/字幕帯に食い込む原因）。floor で収まらない時は、はみ出しより
+    フィットを優先してさらに縮める（下限0.15は極端な項目数での崩壊のみ防ぐ最終防波堤）。"""
     if natural <= 0:
         return 1.0
-    return round(max(floor, min(1.0, budget / natural)), 4)
+    ratio = budget / natural
+    if ratio >= floor:
+        return round(min(1.0, ratio), 4)
+    return round(max(0.15, ratio), 4)
 
 
 # 各ビルダーの「自然高さ(scale=1時, vh)」算出に使うCSSの基準値（.bar-label/.bar-track/.bars gap）。
 _BAR_LABEL_FS, _BAR_LABEL_MB, _BAR_TRACK_H, _BAR_GAP = 2.9, 1.4, 6.4, 4.6
 
 
-def _bar(spec: dict) -> str:
+def _bar(spec: dict, w: int, h: int) -> str:
+    scale = _scale(w, h)
     data = spec.get("data") or []
     mx = max((float(d.get("value") or 0) for d in data), default=1) or 1
     disps = [str(d.get("display") or _fmt(float(d.get("value") or 0))) for d in data]
     longest = max(disps, key=_units, default="")
-    vfs = _fit_vw(longest, 20.0, 4.2)
+    # vw指定は実際の横幅に直結するため、横16:9等 w>1080 では素の値のまま行の高さ(vh基準の
+    # トラック)を上回り得る(issue #12: 値テキストが行を突き破る)。scaleで逆補正し絶対px相当を揃え、
+    # さらに s も掛けてtrack/labelと同じ比率で縮む(項目数増でtrackだけ縮み値だけ据置→再度溢れるのを防ぐ)。
+    vfs_b = _fit_vw(longest, 20.0, 4.2) / scale
     n = len(data) or 1
-    natural = n * (_BAR_LABEL_FS * 1.3 + _BAR_LABEL_MB + _BAR_TRACK_H) + (n - 1) * _BAR_GAP
-    s = _fit_scale(natural, _avail_vh(spec), 0.55)
-    label_fs = round(_BAR_LABEL_FS * s, 2)
-    label_mb = round(_BAR_LABEL_MB * s, 2)
-    track_h = round(_BAR_TRACK_H * s, 2)
-    gap = round(_BAR_GAP * s, 2)
+    label_fs_b, label_mb_b, track_h_b, gap_b = (
+        _BAR_LABEL_FS * scale, _BAR_LABEL_MB * scale, _BAR_TRACK_H * scale, _BAR_GAP * scale
+    )
+    natural = n * (label_fs_b * 1.3 + label_mb_b + track_h_b) + (n - 1) * gap_b
+    s = _fit_scale(natural, _avail_vh(spec, w, h), 0.55)
+    label_fs = round(label_fs_b * s, 2)
+    label_mb = round(label_mb_b * s, 2)
+    track_h = round(track_h_b * s, 2)
+    gap = round(gap_b * s, 2)
+    vfs = round(vfs_b * s, 2)
     rows = []
     for i, (d, disp) in enumerate(zip(data, disps)):
         v = float(d.get("value") or 0)
@@ -397,16 +428,19 @@ def _num_inner(val) -> str:
     return f'<span class="v">{_esc(val)}</span>'
 
 
-def _stat(spec: dict) -> str:
+def _stat(spec: dict, w: int, h: int) -> str:
     val = spec.get("value")
     cap = spec.get("caption")
     pct = _percent(val)
-    budget = _avail_vh(spec)
+    budget = _avail_vh(spec, w, h)
+    scale = _scale(w, h)
+    lead_fs = round(3.1 * scale, 2)
     # 割合(%)はリングゲージで視覚化する価値がある（量の比較）。文脈を先に、ゲージは後で満ちる。
     if pct is not None and 0 <= pct <= 100:
-        lead = f'<div class="stat-lead">{_reveal_words(cap, 0.12, 0.55)}</div>' if cap else ""
-        # ゲージ(既定34vh)がbudgetを超える時だけ軽く縮める。
-        gauge_vh = round(min(34.0, budget * 0.75), 2)
+        lead = (f'<div class="stat-lead" style="font-size:{lead_fs}vh">'
+                f'{_reveal_words(cap, 0.12, 0.55)}</div>') if cap else ""
+        # ゲージ(既定34vh基準×scale)がbudgetを超える時だけ軽く縮める。
+        gauge_vh = round(min(34.0 * scale, budget * 0.75), 2)
         hole_vh = round(gauge_vh * (24.0 / 34.0), 2)
         gauge = (
             f'<div class="gauge" data-gauge=".5,.9" data-pct="{pct:.1f}" '
@@ -419,9 +453,10 @@ def _stat(spec: dict) -> str:
         return f'<div class="stat">{lead}<div class="stat-hero">{gauge}</div></div>'
     # 単一の事実(例: 7フラン)はカウントせず、「文脈(キャプション)→数字がドンと出る」ステートメントに。
     fs = _fit_vw(val, 70.0, 22.0)
-    # 数字(vw指定)がbudget(vh)を超える時だけ軽く縮める（1vh≈1.778vw換算）。
-    fs = round(min(fs, budget * _VH2VW * 0.75), 2)
-    lead = f'<div class="stat-lead">{_reveal_words(cap, 0.12, 0.62)}</div>' if cap else ""
+    # 数字(vw指定)がbudget(vh)を超える時だけ軽く縮める（実際の vh≈vw換算）。
+    fs = round(min(fs, budget * _vh2vw(w, h) * 0.75), 2)
+    lead = (f'<div class="stat-lead" style="font-size:{lead_fs}vh">'
+            f'{_reveal_words(cap, 0.12, 0.62)}</div>') if cap else ""
     star = _star_svg("star-bg", 'data-star=".6,.92" data-op="0.5"')
     num = f'<div class="num" data-stamp=".62,.84" style="font-size:{fs}vw">{_num_inner(val)}</div>'
     return f'<div class="stat">{lead}<div class="stat-hero">{star}{num}</div></div>'
@@ -433,21 +468,27 @@ _CBAR_LABEL_FS, _CBAR_LABEL_MB, _CBAR_TRACK_H, _CBAR_GAP = 3.0, 1.4, 6.0, 5.0
 _CMP_PAD_V, _CMP_LABEL_FS, _CMP_VAL_FS, _CMP_ARROW_FS, _CMP_GAP = 2.4, 2.9, 5.1, 3.8, 1.4
 
 
-def _compare(spec: dict) -> str:
+def _compare(spec: dict, w: int, h: int) -> str:
     items = spec.get("items") or []
-    budget = _avail_vh(spec)
+    budget = _avail_vh(spec, w, h)
+    scale = _scale(w, h)
     if _bar_comparable(items):
         mags = [_magnitude(it.get("value")) for it in items]
         mx = max(mags)
         longest = max((str(it.get("value") or "") for it in items), key=_units, default="")
-        vfs = _fit_vw(longest, 34.0, 4.6)
+        # issue #12: vw値の横長補正＋sで縮小(_barと同様、項目数増でtrackだけ縮み値だけ据置を防ぐ)
+        vfs_b = _fit_vw(longest, 34.0, 4.6) / scale
         nb = len(items) or 1
-        natural = nb * (_CBAR_LABEL_FS * 1.3 + _CBAR_LABEL_MB + _CBAR_TRACK_H) + (nb - 1) * _CBAR_GAP
+        label_fs_b, label_mb_b, track_h_b, gap_b = (
+            _CBAR_LABEL_FS * scale, _CBAR_LABEL_MB * scale, _CBAR_TRACK_H * scale, _CBAR_GAP * scale
+        )
+        natural = nb * (label_fs_b * 1.3 + label_mb_b + track_h_b) + (nb - 1) * gap_b
         s = _fit_scale(natural, budget, 0.55)
-        label_fs = round(_CBAR_LABEL_FS * s, 2)
-        label_mb = round(_CBAR_LABEL_MB * s, 2)
-        track_h = round(_CBAR_TRACK_H * s, 2)
-        gap = round(_CBAR_GAP * s, 2)
+        label_fs = round(label_fs_b * s, 2)
+        label_mb = round(label_mb_b * s, 2)
+        track_h = round(track_h_b * s, 2)
+        gap = round(gap_b * s, 2)
+        vfs = round(vfs_b * s, 2)
         rows = []
         for i, (it, m) in enumerate(zip(items, mags)):
             pct = max(8.0, m / mx * 100.0)
@@ -463,16 +504,20 @@ def _compare(spec: dict) -> str:
             )
         return f'<div class="cbars" style="gap:{gap}vh">{"".join(rows)}</div>'
     longest = max((str(it.get("value") or "") for it in items), key=_units, default="")
-    fs = _fit_vw(longest, 22.0, 9.0)
+    fs = round(_fit_vw(longest, 22.0, 9.0) / scale, 2)  # issue #12: vw値の横長補正(_barと同様)
     nc = len(items) or 1
-    natural = nc * (_CMP_PAD_V * 2 + max(_CMP_LABEL_FS * 1.3, _CMP_VAL_FS)) + (nc - 1) * (
-        _CMP_ARROW_FS + _CMP_GAP * 2
+    pad_v_b, label_fs_b, val_fs_b, arrow_fs_b, gap_b = (
+        _CMP_PAD_V * scale, _CMP_LABEL_FS * scale, _CMP_VAL_FS * scale,
+        _CMP_ARROW_FS * scale, _CMP_GAP * scale
+    )
+    natural = nc * (pad_v_b * 2 + max(label_fs_b * 1.3, val_fs_b)) + (nc - 1) * (
+        arrow_fs_b + gap_b * 2
     )
     s = _fit_scale(natural, budget, 0.45)
-    pad_v = round(_CMP_PAD_V * s, 2)
-    label_fs = round(_CMP_LABEL_FS * s, 2)
-    arrow_fs = round(_CMP_ARROW_FS * s, 2)
-    gap = round(_CMP_GAP * s, 2)
+    pad_v = round(pad_v_b * s, 2)
+    label_fs = round(label_fs_b * s, 2)
+    arrow_fs = round(arrow_fs_b * s, 2)
+    gap = round(gap_b * s, 2)
     fs = round(fs * s, 2)
     parts = []
     for i, it in enumerate(items):
@@ -496,19 +541,25 @@ _TL_YEAR_FS, _TL_LABEL_FS, _TL_STEM_H, _TL_CARDPAD, _TL_HEAD_H, _TL_HEAD_W = 3.0
 _TL_ARROW_MARGIN = 0.3  # ステム/矢頭間の見た目の余白(近似)
 
 
-def _timeline(spec: dict) -> str:
+def _timeline(spec: dict, w: int, h: int) -> str:
     evs = spec.get("events") or []
     n = len(evs) or 1
-    natural = n * (_TL_CARDPAD * 2 + max(_TL_YEAR_FS, _TL_LABEL_FS * 1.3)) + (n - 1) * (
-        _TL_STEM_H + _TL_HEAD_H + _TL_ARROW_MARGIN
+    scale = _scale(w, h)
+    year_fs_b, label_fs_b, stem_h_b, cardpad_b, head_h_b, head_w_b = (
+        _TL_YEAR_FS * scale, _TL_LABEL_FS * scale, _TL_STEM_H * scale,
+        _TL_CARDPAD * scale, _TL_HEAD_H * scale, _TL_HEAD_W * scale
     )
-    s = _fit_scale(natural, _avail_vh(spec), 0.42)
-    year_fs = round(_TL_YEAR_FS * s, 2)
-    label_fs = round(_TL_LABEL_FS * s, 2)
-    stem_h = round(_TL_STEM_H * s, 2)      # 矢印(stem)の長さ(vh)
-    cardpad = round(_TL_CARDPAD * s, 2)
-    head_h = round(_TL_HEAD_H * s, 2)
-    head_w = round(_TL_HEAD_W * s, 2)
+    arrow_margin_b = _TL_ARROW_MARGIN * scale
+    natural = n * (cardpad_b * 2 + max(year_fs_b, label_fs_b * 1.3)) + (n - 1) * (
+        stem_h_b + head_h_b + arrow_margin_b
+    )
+    s = _fit_scale(natural, _avail_vh(spec, w, h), 0.42)
+    year_fs = round(year_fs_b * s, 2)
+    label_fs = round(label_fs_b * s, 2)
+    stem_h = round(stem_h_b * s, 2)      # 矢印(stem)の長さ(vh)
+    cardpad = round(cardpad_b * s, 2)
+    head_h = round(head_h_b * s, 2)
+    head_w = round(head_w_b * s, 2)
     parts = []
     for i, e in enumerate(evs):
         # 各出来事を尺いっぱいに割り振り。カードがぐっと出る→矢印が次カードへ「ぐーん」と伸びる。
@@ -539,34 +590,37 @@ _DONUT_LEG_FS = 2.5    # 凡例 label/val の基準フォント(vh)
 _DONUT_CHIP = 1.8      # 色チップの基準サイズ(vh)
 
 
-def _donut_layout(items: list, disps: list, budget: float) -> tuple[float, float, float, float]:
+def _donut_layout(items: list, disps: list, budget: float, w: int, h: int) -> tuple[float, float, float, float]:
     """(リング径vh, 凡例フォントvh, チップvh, 凡例幅vw) を決める。
     リング径(vh→vw換算) + gap + 凡例幅 が内容幅82vwを超えないよう、まず凡例を
     ~34vwに縮め(フロア0.6)、残り幅とbudgetの小さい方でリング径を決める。"""
+    scale = _scale(w, h)
+    vh2vw = _vh2vw(w, h)
+    leg_fs_b, chip_b = _DONUT_LEG_FS * scale, _DONUT_CHIP * scale
     if items:
         # 行幅(vw) = チップ + flex gap(チップ↔label) + label + flex gap(label↔val) + val margin + val
         raw_w = max(
-            _DONUT_CHIP * _VH2VW + 1.2
-            + _units(it.get("label")) * _DONUT_LEG_FS * _VH2VW
+            chip_b * vh2vw + 1.2
+            + _units(it.get("label")) * leg_fs_b * vh2vw
             + 1.2 + 0.6
-            + _units(d) * _DONUT_LEG_FS * _VH2VW
+            + _units(d) * leg_fs_b * vh2vw
             for it, d in zip(items, disps)
         )
     else:
         raw_w = 0.0
     ls = max(0.6, min(1.0, 34.0 / raw_w)) if raw_w > 34.0 else 1.0
     legend_w = round(raw_w * ls, 2)
-    size = round(min(34.0, budget * 0.72, (_CONTENT_VW - _DONUT_GAP_VW - legend_w) / _VH2VW), 2)
-    return size, round(_DONUT_LEG_FS * ls, 2), round(_DONUT_CHIP * ls, 2), legend_w
+    size = round(min(34.0 * scale, budget * 0.72, (_CONTENT_VW - _DONUT_GAP_VW - legend_w) / vh2vw), 2)
+    return size, round(leg_fs_b * ls, 2), round(chip_b * ls, 2), legend_w
 
 
-def _donut(spec: dict) -> str:
+def _donut(spec: dict, w: int, h: int) -> str:
     items = spec.get("items") or []
     vals = [max(0.0, float(it.get("value") or 0)) for it in items]
     total = sum(vals) or 1.0
     n = len(items) or 1
     disps = [str(it.get("display") or _fmt(vals[i])) for i, it in enumerate(items)]
-    size, leg_fs, chip, _legend_w = _donut_layout(items, disps, _avail_vh(spec))
+    size, leg_fs, chip, _legend_w = _donut_layout(items, disps, _avail_vh(spec, w, h), w, h)
     hole = round(size * (24.0 / 34.0), 2)
     center_fs = round(4.4 * size / 34.0, 2)
     # 累積ストップ(0..100%)。__apply が進捗sに応じ 0→各ストップへスイープする conic-gradient を生成。
@@ -604,11 +658,11 @@ def _donut(spec: dict) -> str:
     return f'<div class="donut-block">{ring}<div class="donut-legend">{"".join(legend_rows)}</div></div>'
 
 
-def _line(spec: dict) -> str:
+def _line(spec: dict, w: int, h: int) -> str:
     points = spec.get("points") or []
     n = len(points) or 1
-    budget = _avail_vh(spec)
-    blk_h = round(min(38.0, budget * 0.9), 2)
+    budget = _avail_vh(spec, w, h)
+    blk_h = round(min(38.0 * _scale(w, h), budget * 0.9), 2)
     ys = [float(p.get("y") or 0) for p in points] or [0.0]
     y_lo, y_hi = min(ys), max(ys)
     span = y_hi - y_lo
@@ -691,9 +745,10 @@ def _title_html(title) -> str:
     return _esc(title).replace("→", '<span class="em">→</span>')
 
 
-def _title_fs(title) -> float:
+def _title_fs(title, w: int, h: int) -> float:
     """見出しを2行以内に収めるフォントサイズ(vh)。長いほど縮小（はみ出し・3行化を防ぐ）。"""
-    return round(max(3.4, min(4.6, 62.0 / _units(title))), 2)
+    base = max(3.4, min(4.6, 62.0 / _units(title)))
+    return round(base * _scale(w, h), 2)
 
 
 def _wsec(a: float, b: float, duration) -> str:
@@ -759,7 +814,7 @@ def _reveal_words(text, a: float, b: float) -> str:
     )
 
 
-def _page(spec: dict, body: str, duration=None, bg=None) -> str:
+def _page(spec: dict, body: str, duration=None, bg=None, w: int = 1080, h: int = 1920) -> str:
     css = _BASE_CSS.replace("__GRAIN__", _GRAIN)
     # 背景画像があれば body 背景に敷き、暗幕(scrim)で文字可読性を確保する。
     body_attr = f" style=\"background:#0a0a0c url('file://{bg}') center/cover no-repeat\"" if bg else ""
@@ -768,7 +823,9 @@ def _page(spec: dict, body: str, duration=None, bg=None) -> str:
     source = _clean_source(spec.get("source", ""))
     # 構造要素(見出し/罫/単位)は尺に依らず冒頭で素早く出す（固定秒→p分率）。
     # データ(本体)は p 分率のまま尺いっぱいに広がり、切替の少し前(p≈1)に完了する。
-    unit_html = f'<div class="unit" data-rev="{_wsec(0.5, 1.6, duration)}">{_esc(unit)}</div>' if unit else ""
+    unit_fs = _unit_fs(w, h)
+    unit_html = (f'<div class="unit" style="font-size:{unit_fs}vh" '
+                 f'data-rev="{_wsec(0.5, 1.6, duration)}">{_esc(unit)}</div>') if unit else ""
     src_html = (f'<div class="source" data-rev=".88,1">出典: {_esc(source)}</div>'
                 if source else "")
     return (
@@ -778,7 +835,7 @@ def _page(spec: dict, body: str, duration=None, bg=None) -> str:
         + "<div class='grain'></div><div class='vig'></div><div class='frame'></div>"
         "<div class='wrap'>"
         + f'<div class="title" data-rev="{_wsec(0.25, 1.7, duration)}" '
-        + f'style="font-size:{_title_fs(spec.get("title", ""))}vh">'
+        + f'style="font-size:{_title_fs(spec.get("title", ""), w, h)}vh">'
         + f'{_title_html(spec.get("title", ""))}</div>'
         + f'<div class="trule" data-drawx="{_wsec(0.7, 2.0, duration)}"></div>'
         + unit_html
@@ -788,11 +845,13 @@ def _page(spec: dict, body: str, duration=None, bg=None) -> str:
     )
 
 
-def chart_html(spec: dict, duration=None, bg=None) -> str:
+def chart_html(spec: dict, duration=None, bg=None, width: int | None = None, height: int | None = None) -> str:
     builder = _BUILDERS.get(spec.get("type", ""))
     if not builder:
         raise ValueError(f"未対応の chart type: {spec.get('type')}")
-    return _page(spec, builder(spec), duration, bg)
+    w = width or config.VIDEO_WIDTH
+    h = height or config.VIDEO_HEIGHT
+    return _page(spec, builder(spec, w, h), duration, bg, w, h)
 
 
 # ===== 描画 =====
@@ -819,7 +878,7 @@ def render_chart(spec: dict, out_png: Path, width: int | None = None, height: in
     out_png.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="doci_chart_") as td:
         hp = Path(td) / "chart.html"
-        hp.write_text(chart_html(spec), encoding="utf-8")
+        hp.write_text(chart_html(spec, width=W, height=H), encoding="utf-8")
         if not _chrome_shot(hp, out_png, W, H, budget=800):
             raise RuntimeError("Chrome 描画失敗（PNG 生成されず）")
     return out_png
@@ -907,7 +966,7 @@ def render_chart_video(
     with tempfile.TemporaryDirectory(prefix="doci_chartvid_") as td:
         td = Path(td)
         hp = td / "chart.html"
-        hp.write_text(chart_html(spec, duration=duration, bg=bg), encoding="utf-8")
+        hp.write_text(chart_html(spec, duration=duration, bg=bg, width=W, height=H), encoding="utf-8")
         fdir = td / "frames"
         fdir.mkdir()
         cdp = _CDP(W, H)

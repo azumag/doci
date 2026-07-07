@@ -77,13 +77,20 @@ def _bg_track(bgs: list[dict], dur: float, W: int, H: int, td: Path) -> Path:
     return out
 
 
-def _overlay_html(spec: dict) -> str:
+def _overlay_html(spec: dict, w: int, h: int) -> str:
     """順次フローの透過オーバーレイ HTML（背景は無し・scrim＋見出し＋ラベル＋矢印）。
     spec の "place"(起承転結) は受け取っても画面には表示しない。"""
     evs = spec.get("events") or []
     events_json = json.dumps(
         [{"year": charts._esc(e.get("year")), "label": charts._esc(e.get("label"))} for e in evs],
         ensure_ascii=False,
+    )
+    # 文字サイズ(vh)は縦9:16(h=1920)を基準にチューニング済み。横16:9等 h<1920 では
+    # vh の実pxが縮むため、charts._scale で絶対px相当を揃える（issue #12: 長尺のフォント縮小対策）。
+    s = charts._scale(w, h)
+    year_fs, label_fs, stem_w, head_w, head_h, counter_fs = (
+        round(13.0 * s, 2), round(4.4 * s, 2), round(0.6 * s, 3),
+        round(1.6 * s, 3), round(2.0 * s, 3), round(2.1 * s, 3),
     )
     return (
         "<!doctype html><html><head><meta charset='utf-8'><style>"
@@ -95,18 +102,18 @@ def _overlay_html(spec: dict) -> str:
         ".frame{position:fixed;inset:2.4vh 4.2vw;border:.18vh solid rgba(232,182,90,.3);border-radius:.6vh}"
         ".stage{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:center;"
         "align-items:center;text-align:center;padding:0 9vw 30vh 9vw}"
-        ".year{font-family:'Hiragino Mincho ProN',serif;font-weight:700;font-size:13vh;color:#f4c25c;"
-        "line-height:1;text-shadow:0 .5vh 2.4vh rgba(0,0,0,.85);letter-spacing:.01em}"
-        ".label{font-size:4.4vh;line-height:1.45;color:#f5efe2;margin-top:2.6vh;max-width:80vw;"
+        f".year{{font-family:'Hiragino Mincho ProN',serif;font-weight:700;font-size:{year_fs}vh;"
+        "color:#f4c25c;line-height:1;text-shadow:0 .5vh 2.4vh rgba(0,0,0,.85);letter-spacing:.01em}"
+        f".label{{font-size:{label_fs}vh;line-height:1.45;color:#f5efe2;margin-top:2.6vh;max-width:80vw;"
         "text-shadow:0 .3vh 1.8vh rgba(0,0,0,.9);font-feature-settings:'palt'}"
         ".arrow{position:fixed;left:50%;top:62vh;transform:translateX(-50%);"
         "display:flex;flex-direction:column;align-items:center}"
-        ".stem{width:.6vh;background:linear-gradient(180deg,#f0b450,#caa05a);"
+        f".stem{{width:{stem_w}vh;background:linear-gradient(180deg,#f0b450,#caa05a);"
         "box-shadow:0 0 1.6vh rgba(240,180,80,.6);border-radius:.6vh}"
-        ".head{width:0;height:0;border-left:1.6vh solid transparent;border-right:1.6vh solid transparent;"
-        "border-top:2vh solid #f0b450;margin-top:-.1vh}"
-        ".counter{position:fixed;bottom:6vh;left:0;right:0;text-align:center;color:#caa05a;"
-        "font-size:2.1vh;letter-spacing:.4em}"
+        f".head{{width:0;height:0;border-left:{head_w}vh solid transparent;"
+        f"border-right:{head_w}vh solid transparent;border-top:{head_h}vh solid #f0b450;margin-top:-.1vh}}"
+        f".counter{{position:fixed;bottom:6vh;left:0;right:0;text-align:center;color:#caa05a;"
+        f"font-size:{counter_fs}vh;letter-spacing:.4em}}"
         "</style></head><body>"
         "<div class='scrim'></div><div class='frame'></div>"
         "<div class='stage' id='stage'></div>"
@@ -132,7 +139,7 @@ def _overlay_html(spec: dict) -> str:
 
 def _overlay_frames(spec: dict, dur: float, fps: int, W: int, H: int, td: Path) -> Path:
     """透過オーバーレイを CDP で1セッション撮影し、PNG(アルファ)連番ディレクトリを返す。"""
-    html = _overlay_html(spec)
+    html = _overlay_html(spec, W, H)
     hp = td / "overlay.html"
     hp.write_text(html, encoding="utf-8")
     fdir = td / "ov"
