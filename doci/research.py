@@ -7,7 +7,8 @@ claude CLI の Web ツール、または codex exec(+MiniMax-M3)のシェル経�
 """
 from __future__ import annotations
 
-from . import config, corners, llm
+from . import config, llm
+from .channel import CornerSpec
 
 # バックエンドごとの「Webで確認する」手順の言い回し。claude は従来どおり WebSearch/WebFetch
 # ツールを使わせる。codex はツールを持たないためシェルの curl 等での取得を明示的に指示する。
@@ -76,7 +77,7 @@ def _attempt(prompt: str) -> dict:
     return data
 
 
-def web_research(corner: corners.Corner, past_topics: list[str]) -> dict | None:
+def web_research(corner: CornerSpec, past_topics: list[str]) -> dict | None:
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
     backend = config.RESEARCH_BACKEND

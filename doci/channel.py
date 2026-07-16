@@ -61,6 +61,17 @@ class ChannelSpec:
     def pipeline_get(self, key: str, default: Any = None) -> Any:
         return self.pipeline.get(key, default)
 
+    def voice_for(self, corner: CornerSpec | str) -> voices.VoiceCfg:
+        """チャンネル固有 voices.json からコーナーの声を解決する。"""
+        corner_spec = self.corners[corner] if isinstance(corner, str) else corner
+        loaded = voices.load(self.voices_path)
+        try:
+            return loaded[corner_spec.voice_key]
+        except KeyError as exc:  # load() 時の検証後にファイルが変わった場合も明示する
+            raise ChannelConfigError(
+                f"voice key disappeared from {self.voices_path}: {corner_spec.voice_key}"
+            ) from exc
+
 
 _TOP_LEVEL_KEYS = {"channel", "corners", "voices", "style", "publish", "pipeline"}
 _CHANNEL_KEYS = {"id", "name", "rotation"}

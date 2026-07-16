@@ -13,7 +13,19 @@ from datetime import date as _date
 from datetime import datetime
 from pathlib import Path
 
-from . import ai_text, assets, compose, config, corners, history, imagegen, routing, voicevox
+from . import (
+    ai_text,
+    assets,
+    channel,
+    compose,
+    config,
+    corners,
+    history,
+    imagegen,
+    routing,
+    voicevox,
+)
+from .channel import ChannelSpec
 
 
 def _workdir_name(day: str, corner_key: str, hhmmss: str) -> str:
@@ -26,12 +38,12 @@ def _log(msg: str) -> None:
     print(f"[doci] {msg}", flush=True)
 
 
-def _credits(corner) -> str:
+def _credits(spec: ChannelSpec, corner) -> str:
     """概要欄に付ける素材クレジット。VOICEVOX はキャラ名込みで表記必須（利用規約）。
     Pexels は必須ではないが明記する。"""
     import re as _re
 
-    label = getattr(getattr(corner, "voice", None), "label", "") or ""
+    label = spec.voice_for(corner).label
     m = _re.search(r"[（(]\s*([^/／）)]+)", label)  # 「メリケンAI (冥鳴ひまり/ノーマル)」→ 冥鳴ひまり
     char = m.group(1).strip() if m else ""
     vv = f"VOICEVOX:{char}" if char else "VOICEVOX"
@@ -43,27 +55,45 @@ def _credits(corner) -> str:
     )
 
 
-def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) -> dict:
-    corner = corners.CORNERS[corner_key] if corner_key else corners.pick_corner(history.last_corner())
-    workdir = config.OUTPUT / _workdir_name(day, corner.key, datetime.now().strftime("%H%M%S"))
+def run(
+    spec: ChannelSpec,
+    day: str,
+    corner_key: str | None,
+    do_upload: bool,
+    video_scenes: int,
+) -> dict:
+    if corner_key and corner_key not in spec.corners:
+        raise ValueError(f"unknown corner for channel {spec.id}: {corner_key}")
+    corner = (
+        spec.corners[corner_key]
+        if corner_key
+        else corners.pick_corner(spec, history.last_corner(spec))
+    )
+    voice = spec.voice_for(corner)
+    workdir = spec.output_dir / _workdir_name(
+        day, corner.key, datetime.now().strftime("%H%M%S")
+    )
     workdir.mkdir(parents=True, exist_ok=True)
-    _log(f"corner={corner.key} voice={corner.voice_key}(spk{corner.speaker}) workdir={workdir}")
+    _log(
+        f"channel={spec.id} corner={corner.key} "
+        f"voice={corner.voice_key}(spk{voice.speaker}) workdir={workdir}"
+    )
 
     # 1) 台本
     _log("台本生成 (opus 4.8)…")
-    script = ai_text.generate(corner, day, history.recent_topics())
+    script = ai_text.generate(spec, corner, day, history.recent_topics(spec))
     (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
 
     # 2) 音声（voices.json の話者＋速度/ピッチ/抑揚/音量を適用: issue #1）
     _log("音声合成 (VOICEVOX)…")
-    v = corner.voice
+    v = voice
     tts = voicevox.synthesize(
-        script["narration"], corner.speaker, workdir / "narration.wav",
+        script["narration"], v.speaker, workdir / "narration.wav",
         speed=v.speed, pitch=v.pitch, intonation=v.intonation,
         intonation_vary=v.intonation_vary, volume=v.volume,
     )
-    _log(f"narration {tts.duration:.1f}s (spk{corner.speaker} speed{v.speed} into{v.intonation})")
+    _log(f"narration {tts.duration:.1f}s (spk{v.speaker} speed{v.speed} into{v.intonation})")
 
     # 2.5) 尺が決まったので向き・サイズを決める。longform(>180s=YouTube通常動画)は横16:9、
     #      ショートは縦9:16。以降の素材取得・合成・AI生成へ同じ寸法/向きを流す。
@@ -77,8 +107,13 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
     #    1枚あたり約 SECONDS_PER_IMAGE 秒になるよう枚数を増やして間延びを防ぐ。
     scenes_meta = script["scenes"]
     n_scenes = len(scenes_meta)
-    target = math.ceil(tts.duration / config.SECONDS_PER_IMAGE) if tts.duration > 0 else n_scenes
-    n_images = max(n_scenes, min(target, config.MAX_IMAGES))
+    seconds_per_image = float(
+        spec.pipeline_get("seconds_per_image", config.SECONDS_PER_IMAGE)
+    )
+    max_images = int(spec.pipeline_get("max_images", config.MAX_IMAGES))
+    asset_media = str(spec.pipeline_get("asset_media", config.ASSET_MEDIA))
+    target = math.ceil(tts.duration / seconds_per_image) if tts.duration > 0 else n_scenes
+    n_images = max(n_scenes, min(target, max_images))
     if n_images > n_scenes:
         _log(f"映像スケール: {n_scenes}シーン→{n_images}枚 (約{tts.duration / n_images:.0f}s/枚)")
     use_video = config.VIDEO_BACKEND == "minimax" and video_scenes > 0
@@ -137,7 +172,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         #    動画→写真→AI生成 の順に、各段が独立に劣化フォールバックする。
         got_path, is_video = None, False
         if config.ASSET_BACKEND not in ("", "none"):
-            want_video = config.ASSET_MEDIA == "video" or (config.ASSET_MEDIA == "mix" and k == 0)
+            want_video = asset_media == "video" or (asset_media == "mix" and k == 0)
             if want_video:
                 try:
                     vid = workdir / f"scene_{si:02d}_{k}.mp4"
@@ -248,7 +283,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         pub_results = publish.publish(
             out_mp4,
             title=script["title"],
-            description=script["description"] + _credits(corner),
+            description=script["description"] + _credits(spec, corner),
             tags=script.get("tags", []),
             route=route,
             thumbnail=thumbnail_path,
@@ -262,6 +297,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
 
     # 6) 履歴
     history.record(
+        spec,
         corner.key,
         script["title"],
         video_id,
@@ -275,6 +311,7 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
         },
     )
     return {
+        "channel": spec.id,
         "corner": corner.key,
         "title": script["title"],
         "video": str(out_mp4),
@@ -287,14 +324,33 @@ def run(day: str, corner_key: str | None, do_upload: bool, video_scenes: int) ->
 
 
 def main() -> None:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--channel")
+    known, _ = pre.parse_known_args()
+    try:
+        spec = channel.load(known.channel or channel.default_channel())
+    except (channel.ChannelConfigError, OSError) as exc:
+        pre.error(str(exc))
+
     ap = argparse.ArgumentParser(description="doci 日次生成")
-    ap.add_argument("--corner", choices=list(corners.CORNERS), help="指定が無ければ前回と交互")
+    ap.add_argument("--channel", default=spec.id, help="チャンネルID")
+    ap.add_argument(
+        "--corner",
+        choices=list(spec.corners),
+        help="指定が無ければチャンネル履歴の前回と交互",
+    )
     ap.add_argument("--date", default=_date.today().isoformat())
     ap.add_argument("--no-upload", action="store_true", help="生成のみ（アップロードしない）")
     ap.add_argument("--video-scenes", type=int, default=config.MINIMAX_VIDEO_SCENES)
     args = ap.parse_args()
     try:
-        result = run(args.date, args.corner, do_upload=not args.no_upload, video_scenes=args.video_scenes)
+        result = run(
+            spec,
+            args.date,
+            args.corner,
+            do_upload=not args.no_upload,
+            video_scenes=args.video_scenes,
+        )
     except Exception as e:
         _log(f"ERROR: {e}")
         sys.exit(1)

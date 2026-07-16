@@ -65,18 +65,19 @@ voice = "narrator"
         self.assertEqual(spec.pipeline_get("max_images", 60), 60)
 
     def test_reference_ideology_matches_current_corners(self) -> None:
-        from doci.corners import CORNERS, ROTATION
-
         spec = channel.load("ideology")
 
-        self.assertEqual(spec.rotation, ROTATION)
-        self.assertEqual(set(spec.corners), set(CORNERS))
-        for key, current in CORNERS.items():
-            loaded = spec.corners[key]
-            self.assertEqual(loaded.label, current.label)
-            self.assertEqual(loaded.voice_key, current.voice_key)
-            self.assertEqual(loaded.persona_path.name, current.persona_file)
-            self.assertEqual(loaded.corner_path.name, current.corner_file)
+        self.assertEqual(spec.rotation, ["capitalism", "communism"])
+        self.assertEqual(set(spec.corners), {"capitalism", "communism"})
+        self.assertEqual(spec.corners["communism"].label, "共産主義ネタ")
+        self.assertEqual(spec.corners["communism"].voice_key, "chinese_ai")
+        self.assertEqual(
+            spec.corners["communism"].persona_path.name,
+            "persona_chinese.md",
+        )
+        self.assertEqual(spec.corners["capitalism"].label, "資本主義ネタ")
+        self.assertEqual(spec.corners["capitalism"].voice_key, "american_ai")
+        self.assertEqual(spec.voice_for("communism").speaker, 109)
 
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\

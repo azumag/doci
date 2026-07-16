@@ -7,16 +7,18 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from doci import config, corners, plan
+from doci import config, plan
+from doci.channel import CornerSpec
 
 
-_CORNER = corners.Corner(
+_CORNER = CornerSpec(
     key="communism",
     label="共産主義ネタ",
-    persona_file="persona_chinese.md",
-    corner_file="corner_communism.md",
+    persona_path=Path("persona_chinese.md"),
+    corner_path=Path("corner_communism.md"),
     voice_key="chinese_ai",
 )
 

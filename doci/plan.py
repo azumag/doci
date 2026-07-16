@@ -7,7 +7,8 @@ minimax-M3 が「構成（起承転結）」と「解説に効く図表」を設
 """
 from __future__ import annotations
 
-from . import ai_text, config, corners, llm
+from . import ai_text, config, llm
+from .channel import CornerSpec
 
 _TYPES = {"bar", "stat", "compare", "timeline", "donut", "line"}
 
@@ -60,7 +61,7 @@ def _research_block(research: dict | None) -> str:
     return "\n".join(lines)
 
 
-def make_plan(corner: corners.Corner, research: dict | None) -> dict | None:
+def make_plan(corner: CornerSpec, research: dict | None) -> dict | None:
     """構成＋図表を設計。失敗時は None（呼び出し側は構成プラン無しで続行）。"""
     prompt = _PROMPT.format(label=corner.label, research=_research_block(research))
     last_err: Exception | None = None
