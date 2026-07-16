@@ -4,6 +4,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -22,6 +23,38 @@ class WriteTimeoutTest(unittest.TestCase):
             ai_text._run_opencode("prompt", "opencode-go/qwen3.7-plus", "")
 
         self.assertIsNone(run_mock.call_args.kwargs["timeout"])
+
+    def test_opencode_go_stream_returns_text_without_thinking(self) -> None:
+        events = b"".join(
+            [
+                b'data:{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"secret reasoning"}}\n',
+                b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"{\\"title\\":"}}\n',
+                b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"\\"ok\\"}"}}\n',
+                b'data:{"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n',
+            ]
+        )
+
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ) as urlopen_mock,
+        ):
+            result = ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus")
+
+        self.assertEqual(result, '{"title":"ok"}')
+        self.assertIsNone(urlopen_mock.call_args.kwargs["timeout"])
+        request = urlopen_mock.call_args.args[0]
+        self.assertEqual(request.headers["X-api-key"], "test-key")
+        self.assertEqual(request.headers["User-agent"], "doci/1.0")
 
     def test_positive_value_is_kept(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")

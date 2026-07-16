@@ -13,7 +13,11 @@ import json
 import re
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import date as _date
+from pathlib import Path
 
 from . import channel, config, corners, llm
 from .channel import ChannelSpec, CornerSpec
@@ -34,8 +38,6 @@ def _run_claude_cli(prompt: str, model: str) -> str:
 
 
 def _run_anthropic(prompt: str, model: str) -> str:
-    import urllib.request
-
     key = config.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY が未設定です (TEXT_BACKEND=anthropic)")
@@ -58,6 +60,102 @@ def _run_anthropic(prompt: str, model: str) -> str:
     with urllib.request.urlopen(req, timeout=_write_timeout()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return "".join(b.get("text", "") for b in data.get("content", []))
+
+
+def _opencode_go_key() -> str:
+    """環境変数を優先し、無ければ OpenCode の既存認証ストアから Go の鍵を読む。"""
+    if config.OPENCODE_GO_API_KEY:
+        return config.OPENCODE_GO_API_KEY
+    auth_file = Path(config.OPENCODE_AUTH_FILE).expanduser()
+    try:
+        auth = json.loads(auth_file.read_text(encoding="utf-8"))
+        key = auth.get("opencode-go", {}).get("key", "")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        key = ""
+    if not key:
+        raise RuntimeError(
+            "OPENCODE_GO_API_KEY が未設定で、OpenCode認証ストアにも "
+            f"opencode-go の鍵がありません: {auth_file}"
+        )
+    return key
+
+
+def _run_opencode_go(prompt: str, model: str) -> str:
+    """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
+    if not model:
+        raise RuntimeError("OPENCODE_MODEL が未設定です (TEXT_BACKEND=opencode_go)")
+    provider, sep, model_id = model.partition("/")
+    if sep and provider != "opencode-go":
+        raise RuntimeError(
+            "TEXT_BACKEND=opencode_go では OPENCODE_MODEL を "
+            "opencode-go/<model> 形式で指定してください"
+        )
+    if not sep:
+        model_id = model
+    body = json.dumps(
+        {
+            "model": model_id,
+            "max_tokens": config.OPENCODE_GO_MAX_TOKENS,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{config.OPENCODE_GO_BASE_URL}/messages",
+        data=body,
+        headers={
+            "x-api-key": _opencode_go_key(),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+            # Python標準UAはGoゲートウェイで403になるため、アプリ固有UAを明示する。
+            "user-agent": "doci/1.0",
+        },
+    )
+    started = time.monotonic()
+    next_progress = 60.0
+    text_parts: list[str] = []
+    text_chars = 0
+    stop_reason = ""
+    try:
+        with urllib.request.urlopen(req, timeout=_write_timeout()) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].lstrip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                event_type = event.get("type")
+                if event_type == "error":
+                    raise RuntimeError(f"OpenCode Go API error: {event.get('error', event)}")
+                delta = event.get("delta") or {}
+                if delta.get("type") == "text_delta":
+                    part = delta.get("text", "")
+                    text_parts.append(part)
+                    text_chars += len(part)
+                if event_type == "message_delta":
+                    stop_reason = delta.get("stop_reason") or stop_reason
+                elapsed = time.monotonic() - started
+                if elapsed >= next_progress:
+                    _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
+                    next_progress += 60.0
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"OpenCode Go API failed (HTTP {exc.code}): {detail}") from exc
+
+    text = "".join(text_parts)
+    if stop_reason == "max_tokens":
+        raise RuntimeError(
+            f"OpenCode Go API が max_tokens={config.OPENCODE_GO_MAX_TOKENS} に達しました"
+        )
+    if not text.strip():
+        raise RuntimeError(f"OpenCode Go API が空の本文を返しました (stop_reason={stop_reason or 'unknown'})")
+    _log(f"Qwen直接API完了 ({time.monotonic() - started:.1f}s / 本文{len(text)}字)")
+    return text
 
 
 def _run_opencode(prompt: str, model: str, agent: str) -> str:
@@ -118,6 +216,8 @@ def _dispatch(prompt: str) -> str:
         return _run_claude_cli(prompt, model)
     if backend == "anthropic":
         return _run_anthropic(prompt, model)
+    if backend == "opencode_go":
+        return _run_opencode_go(prompt, config.OPENCODE_MODEL)
     if backend == "opencode":
         return _run_opencode(prompt, config.OPENCODE_MODEL, config.OPENCODE_AGENT)
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")

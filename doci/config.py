@@ -66,6 +66,14 @@ FALLBACK_TEXT_MODEL = get("FALLBACK_TEXT_MODEL", "claude-sonnet-5")
 OPENCODE_AGENT = get("OPENCODE_AGENT", "")
 # provider/model 形式（例: opencode-go/minimax-m3）。指定時は --agent より優先。
 OPENCODE_MODEL = get("OPENCODE_MODEL", "")
+# 本文生成だけOpenCode CLIを外し、OpenCode GoのAnthropic互換APIへ直接接続する設定。
+# APIキーは環境変数を優先し、未指定なら既存のOpenCode認証ストアから読む。
+OPENCODE_GO_API_KEY = get("OPENCODE_GO_API_KEY", "")
+OPENCODE_AUTH_FILE = get(
+    "OPENCODE_AUTH_FILE", str(Path.home() / ".local" / "share" / "opencode" / "auth.json")
+)
+OPENCODE_GO_BASE_URL = get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1").rstrip("/")
+OPENCODE_GO_MAX_TOKENS = get_int("OPENCODE_GO_MAX_TOKENS", 65536)
 
 # --- 台本品質: 前段リサーチ＋後段ファクトチェック (issue #6) ---
 # SCRIPT_RESEARCH: 下書き前に claude CLI(Webツール)で題材を選び実ソースで裏取りした
