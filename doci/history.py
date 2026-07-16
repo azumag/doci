@@ -46,6 +46,16 @@ def recent_topics(spec: ChannelSpec, limit: int = 30) -> list[str]:
     return topics[-limit:]
 
 
+def recent_titles(spec: ChannelSpec, limit: int = 30) -> list[str]:
+    """重複回避プロンプト用に題名だけを返す。
+
+    description まで全件結合するとOpenCode Goゲートウェイが長い入力をHTTP 500にするため、
+    題材の重複判定に必要なtitleだけを本文生成へ渡す。
+    """
+    titles = [row.get("title", "").strip() for row in _read_all(spec)]
+    return [title for title in titles if title][-limit:]
+
+
 def record(
     spec: ChannelSpec,
     corner: str,

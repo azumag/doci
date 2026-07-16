@@ -101,7 +101,7 @@ def run(
 
     # 1) 台本
     _log("台本生成 (opus 4.8)…")
-    script = ai_text.generate(spec, corner, day, history.recent_topics(spec))
+    script = ai_text.generate(spec, corner, day, history.recent_titles(spec))
     (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
 
