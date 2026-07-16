@@ -24,5 +24,6 @@ dir = "bgm"
 platforms = ["youtube"]
 
 [publish.youtube]
+privacy = "unlisted"
 client_secret = "secrets/ideology/client_secret.json"
 token = "secrets/ideology/youtube_token.json"
