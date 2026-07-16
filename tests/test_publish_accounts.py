@@ -1,0 +1,264 @@
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from doci import config, instagram, publish, routing, tiktok, youtube
+from doci.channel import (
+    InstagramPublishSpec,
+    PublishSpec,
+    TikTokPublishSpec,
+    YouTubePublishSpec,
+)
+
+
+class PublishAccountsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.route = routing.Route(
+            tier="longform",
+            is_youtube_short=False,
+            platforms=["youtube"],
+            hashtag="",
+            landscape=True,
+        )
+
+    def _youtube_spec(self, name: str, *, platforms=("youtube",)) -> PublishSpec:
+        token = self.root / name / "youtube_token.json"
+        token.parent.mkdir(parents=True)
+        token.write_text("{}", encoding="utf-8")
+        return PublishSpec(
+            platforms=platforms,
+            youtube=YouTubePublishSpec(
+                privacy="unlisted",
+                client_secret=self.root / name / "client_secret.json",
+                token=token,
+            ),
+        )
+
+    def test_enabled_requires_channel_platform_token_and_global_switch(self) -> None:
+        spec = self._youtube_spec("alpha")
+        with patch.object(config, "PUBLISH_YOUTUBE", True):
+            self.assertEqual(publish._enabled("youtube", spec), (True, ""))
+
+        with patch.object(config, "PUBLISH_YOUTUBE", False):
+            enabled, why = publish._enabled("youtube", spec)
+        self.assertFalse(enabled)
+        self.assertIn("PUBLISH_YOUTUBE=0", why)
+
+        excluded = self._youtube_spec("beta", platforms=())
+        with patch.object(config, "PUBLISH_YOUTUBE", True):
+            enabled, why = publish._enabled("youtube", excluded)
+        self.assertFalse(enabled)
+        self.assertIn("publish.platforms", why)
+
+        spec.youtube.token.unlink()
+        with patch.object(config, "PUBLISH_YOUTUBE", True):
+            enabled, why = publish._enabled("youtube", spec)
+        self.assertFalse(enabled)
+        self.assertIn(str(spec.youtube.token), why)
+
+    def test_tiktok_and_instagram_require_channel_credentials(self) -> None:
+        tik_token = self.root / "tiktok.json"
+        tik_token.write_text("{}", encoding="utf-8")
+        spec = PublishSpec(
+            platforms=("tiktok", "instagram"),
+            tiktok=TikTokPublishSpec(token=tik_token, privacy="SELF_ONLY"),
+            instagram=InstagramPublishSpec(
+                user_id="ig-user", access_token_env="IG_TOKEN_TEST"
+            ),
+        )
+        with (
+            patch.object(config, "PUBLISH_TIKTOK", True),
+            patch.object(config, "TIKTOK_CLIENT_KEY", "key"),
+            patch.object(config, "TIKTOK_CLIENT_SECRET", "secret"),
+        ):
+            self.assertEqual(publish._enabled("tiktok", spec), (True, ""))
+
+        with (
+            patch.object(config, "PUBLISH_INSTAGRAM", True),
+            patch.dict(os.environ, {"IG_TOKEN_TEST": "token"}),
+        ):
+            self.assertEqual(publish._enabled("instagram", spec), (True, ""))
+
+        with patch.object(config, "PUBLISH_INSTAGRAM", True), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            enabled, why = publish._enabled("instagram", spec)
+        self.assertFalse(enabled)
+        self.assertIn("IG_TOKEN_TEST", why)
+
+    def test_dry_run_identifies_each_channel_token_path(self) -> None:
+        alpha = SimpleNamespace(publish=self._youtube_spec("alpha"))
+        beta = SimpleNamespace(publish=self._youtube_spec("beta"))
+
+        with patch.object(config, "PUBLISH_YOUTUBE", True):
+            alpha_result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=self.route,
+                spec=alpha,
+                dry_run=True,
+            )[0]
+            beta_result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=self.route,
+                spec=beta,
+                dry_run=True,
+            )[0]
+
+        self.assertEqual(alpha_result.status, "dry_run")
+        self.assertIn(str(alpha.publish.youtube.token), alpha_result.detail)
+        self.assertIn(str(beta.publish.youtube.token), beta_result.detail)
+        self.assertNotEqual(alpha_result.detail, beta_result.detail)
+
+    def test_global_dry_run_switch_prevents_upload(self) -> None:
+        spec = SimpleNamespace(publish=self._youtube_spec("alpha"))
+        with (
+            patch.object(config, "PUBLISH_YOUTUBE", True),
+            patch.object(config, "PUBLISH_DRY_RUN", True),
+            patch.object(publish, "_do_upload") as upload_mock,
+        ):
+            result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=self.route,
+                spec=spec,
+            )[0]
+
+        self.assertEqual(result.status, "dry_run")
+        upload_mock.assert_not_called()
+
+    def test_youtube_upload_and_thumbnail_receive_channel_credentials(self) -> None:
+        settings = self._youtube_spec("alpha")
+        thumbnail = self.root / "thumbnail.png"
+        with (
+            patch.object(youtube, "upload", return_value="video-id") as upload_mock,
+            patch.object(youtube, "set_thumbnail") as thumbnail_mock,
+        ):
+            result = publish._do_upload(
+                "youtube",
+                self.root / "video.mp4",
+                "Title",
+                "Description",
+                ["tag"],
+                self.route,
+                settings,
+                thumbnail,
+            )
+
+        self.assertEqual(result.id, "video-id")
+        self.assertEqual(upload_mock.call_args.args[4], "unlisted")
+        self.assertEqual(
+            upload_mock.call_args.kwargs["token_file"], settings.youtube.token
+        )
+        self.assertEqual(
+            upload_mock.call_args.kwargs["client_secret_file"],
+            settings.youtube.client_secret,
+        )
+        self.assertEqual(
+            thumbnail_mock.call_args.kwargs["token_file"], settings.youtube.token
+        )
+
+    def test_tiktok_token_helpers_use_requested_path(self) -> None:
+        path = self.root / "nested" / "tiktok_token.json"
+        token = {"access_token": "channel-token", "expires_at": 99999999999}
+
+        tiktok._save_token(token, path)
+
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), token)
+        self.assertEqual(tiktok._load_token(path), token)
+        self.assertEqual(tiktok._access_token(path), "channel-token")
+
+    def test_tiktok_and_instagram_uploads_receive_channel_settings(self) -> None:
+        tik_token = self.root / "tiktok_token.json"
+        settings = PublishSpec(
+            platforms=("tiktok", "instagram"),
+            tiktok=TikTokPublishSpec(token=tik_token, privacy="SELF_ONLY"),
+            instagram=InstagramPublishSpec(
+                user_id="ig-channel", access_token_env="IG_CHANNEL_TOKEN"
+            ),
+        )
+        short_route = routing.Route(
+            tier="short",
+            is_youtube_short=True,
+            platforms=["tiktok", "instagram"],
+            hashtag="#Shorts",
+            landscape=False,
+        )
+        with patch.object(
+            tiktok,
+            "upload",
+            return_value={"publish_id": "tik-id", "status": "PUBLISH_COMPLETE"},
+        ) as tik_upload:
+            publish._do_upload(
+                "tiktok",
+                self.root / "video.mp4",
+                "Title",
+                "Description",
+                [],
+                short_route,
+                settings,
+            )
+        self.assertEqual(tik_upload.call_args.kwargs["token_file"], tik_token)
+        self.assertEqual(tik_upload.call_args.kwargs["privacy"], "SELF_ONLY")
+
+        with (
+            patch.dict(os.environ, {"IG_CHANNEL_TOKEN": "secret-value"}),
+            patch.object(
+                instagram,
+                "upload",
+                return_value={"id": "ig-id", "permalink": "https://example.test/ig"},
+            ) as ig_upload,
+        ):
+            publish._do_upload(
+                "instagram",
+                self.root / "video.mp4",
+                "Title",
+                "Description",
+                [],
+                short_route,
+                settings,
+            )
+        self.assertEqual(ig_upload.call_args.kwargs["user_id"], "ig-channel")
+        self.assertEqual(
+            ig_upload.call_args.kwargs["access_token"], "secret-value"
+        )
+
+    def test_youtube_auth_cli_uses_selected_channel_paths(self) -> None:
+        settings = self._youtube_spec("alpha")
+        fake_spec = SimpleNamespace(publish=settings)
+        with (
+            patch("sys.argv", ["doci.youtube", "--auth", "--channel", "alpha"]),
+            patch("doci.channel.load", return_value=fake_spec),
+            patch.object(youtube, "_load_credentials") as load_mock,
+            patch("builtins.print"),
+        ):
+            youtube.main()
+
+        self.assertTrue(load_mock.call_args.kwargs["interactive"])
+        self.assertEqual(
+            load_mock.call_args.kwargs["token_file"], settings.youtube.token
+        )
+        self.assertEqual(
+            load_mock.call_args.kwargs["client_secret_file"],
+            settings.youtube.client_secret,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

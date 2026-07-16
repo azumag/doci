@@ -314,6 +314,7 @@ def run(
             description=script["description"] + _credits(spec, corner),
             tags=script.get("tags", []),
             route=route,
+            spec=spec,
             thumbnail=thumbnail_path,
         )
         for r in pub_results:

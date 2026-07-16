@@ -206,12 +206,13 @@ factcheck = false
                 "doci.thumbnail.render", side_effect=fake_thumbnail
             ) as thumbnail_mock,
             patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail),
+            patch("doci.publish.publish", return_value=[]) as publish_mock,
         ):
             result = run_daily.run(
                 spec,
                 "2026-07-16",
                 "a",
-                do_upload=False,
+                do_upload=True,
                 video_scenes=0,
             )
 
@@ -228,6 +229,7 @@ factcheck = false
         self.assertIs(
             thumbnail_mock.call_args.kwargs["style"], spec.style.thumbnail
         )
+        self.assertIs(publish_mock.call_args.kwargs["spec"], spec)
         self.assertTrue(workdir.name.startswith("2026-07-16_a_"))
 
 

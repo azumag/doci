@@ -51,9 +51,18 @@ def _post(path: str, fields: dict) -> dict:
         return json.loads(r.read().decode())
 
 
-def upload(video_path: Path, title: str, description: str, tags: list[str]) -> dict:
+def upload(
+    video_path: Path,
+    title: str,
+    description: str,
+    tags: list[str],
+    *,
+    user_id: str | None = None,
+    access_token: str | None = None,
+) -> dict:
     """Reels として投稿。{id, permalink} を返す。"""
-    uid, token = config.INSTAGRAM_USER_ID, config.INSTAGRAM_ACCESS_TOKEN
+    uid = config.INSTAGRAM_USER_ID if user_id is None else user_id
+    token = config.INSTAGRAM_ACCESS_TOKEN if access_token is None else access_token
     if not (uid and token):
         raise InstagramError("INSTAGRAM_USER_ID / INSTAGRAM_ACCESS_TOKEN 未設定")
     video_url = _host_video(Path(video_path))  # ← 未実装で停止（後回し）

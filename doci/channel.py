@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tomllib
 import warnings
 from dataclasses import dataclass, field
@@ -14,6 +15,12 @@ from . import config, voices
 
 class ChannelConfigError(ValueError):
     """channel.toml の内容が不正なときのエラー。"""
+
+
+def _repo_path(value: str | Path) -> Path:
+    """資格情報パスをリポジトリルート相対で解決する。存在は認証時まで要求しない。"""
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else (config.ROOT / path).resolve()
 
 
 @dataclass(frozen=True)
@@ -78,10 +85,34 @@ class StyleSpec:
 
 
 @dataclass(frozen=True)
-class PublishSpec:
-    """#19 で拡張する publish 設定の暫定コンテナ。"""
+class YouTubePublishSpec:
+    privacy: str = field(default_factory=lambda: config.YOUTUBE_PRIVACY)
+    client_secret: Path = field(
+        default_factory=lambda: _repo_path(config.YOUTUBE_CLIENT_SECRET_FILE)
+    )
+    token: Path = field(default_factory=lambda: _repo_path(config.YOUTUBE_TOKEN_FILE))
 
-    values: dict[str, Any] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class TikTokPublishSpec:
+    token: Path = field(default_factory=lambda: _repo_path(config.TIKTOK_TOKEN_FILE))
+    privacy: str = field(default_factory=lambda: config.TIKTOK_PRIVACY)
+
+
+@dataclass(frozen=True)
+class InstagramPublishSpec:
+    user_id: str = field(default_factory=lambda: config.INSTAGRAM_USER_ID)
+    access_token_env: str = "INSTAGRAM_ACCESS_TOKEN"
+
+
+@dataclass(frozen=True)
+class PublishSpec:
+    """チャンネル別の投稿先と資格情報参照。既定値は従来のグローバル設定。"""
+
+    platforms: tuple[str, ...] = ("youtube", "tiktok", "instagram")
+    youtube: YouTubePublishSpec = field(default_factory=YouTubePublishSpec)
+    tiktok: TikTokPublishSpec = field(default_factory=TikTokPublishSpec)
+    instagram: InstagramPublishSpec = field(default_factory=InstagramPublishSpec)
 
 
 @dataclass(frozen=True)
@@ -144,6 +175,12 @@ _CHART_STYLE_KEYS = {"palette", "font"}
 _VIDEO_STYLE_KEYS = {"pad_color", "filter"}
 _BGM_STYLE_KEYS = {"dir", "volume", "rotation"}
 _CREDITS_STYLE_KEYS = {"template"}
+_PUBLISH_KEYS = {"platforms", "youtube", "tiktok", "instagram"}
+_YOUTUBE_PUBLISH_KEYS = {"privacy", "client_secret", "token"}
+_TIKTOK_PUBLISH_KEYS = {"token", "privacy"}
+_INSTAGRAM_PUBLISH_KEYS = {"user_id", "access_token_env"}
+_PUBLISH_PLATFORMS = {"youtube", "tiktok", "instagram"}
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _AUDIO_SUFFIXES = {".mp3", ".ogg", ".wav", ".m4a", ".flac"}
 
 
@@ -190,6 +227,13 @@ def _style_table(data: dict[str, Any], key: str) -> dict[str, Any]:
     value = data.get(key, {})
     if not isinstance(value, dict):
         raise ChannelConfigError(f"style.{key} must be a table")
+    return value
+
+
+def _publish_table(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key, {})
+    if not isinstance(value, dict):
+        raise ChannelConfigError(f"publish.{key} must be a table")
     return value
 
 
@@ -317,6 +361,74 @@ def _load_style(data: dict[str, Any], channel_root: Path) -> StyleSpec:
     )
 
 
+def _publish_path(data: dict[str, Any], key: str, default: str | Path) -> Path:
+    value = data.get(key, default)
+    if not isinstance(value, (str, Path)):
+        raise ChannelConfigError(f"publish credential path must be a string: {key}")
+    if not str(value).strip():
+        raise ChannelConfigError(f"publish credential path must not be empty: {key}")
+    return _repo_path(value)
+
+
+def _load_publish(data: dict[str, Any]) -> PublishSpec:
+    _warn_unknown(data, _PUBLISH_KEYS, "publish.")
+    youtube = _publish_table(data, "youtube")
+    tiktok = _publish_table(data, "tiktok")
+    instagram = _publish_table(data, "instagram")
+    _warn_unknown(youtube, _YOUTUBE_PUBLISH_KEYS, "publish.youtube.")
+    _warn_unknown(tiktok, _TIKTOK_PUBLISH_KEYS, "publish.tiktok.")
+    _warn_unknown(instagram, _INSTAGRAM_PUBLISH_KEYS, "publish.instagram.")
+
+    platforms = data.get("platforms", ["youtube", "tiktok", "instagram"])
+    if not isinstance(platforms, list) or not all(
+        isinstance(item, str) for item in platforms
+    ):
+        raise ChannelConfigError("publish.platforms must be a list of platform names")
+    unknown = sorted(set(platforms) - _PUBLISH_PLATFORMS)
+    if unknown:
+        raise ChannelConfigError(
+            "publish.platforms contains unsupported platforms: " + ", ".join(unknown)
+        )
+    if len(platforms) != len(set(platforms)):
+        raise ChannelConfigError("publish.platforms must not contain duplicates")
+
+    access_token_env = _string(
+        instagram,
+        "access_token_env",
+        "INSTAGRAM_ACCESS_TOKEN",
+        "publish.instagram.",
+    )
+    if access_token_env and not _ENV_NAME_RE.fullmatch(access_token_env):
+        raise ChannelConfigError(
+            "publish.instagram.access_token_env must be an environment variable name"
+        )
+
+    return PublishSpec(
+        platforms=tuple(platforms),
+        youtube=YouTubePublishSpec(
+            privacy=_string(
+                youtube, "privacy", config.YOUTUBE_PRIVACY, "publish.youtube."
+            ),
+            client_secret=_publish_path(
+                youtube, "client_secret", config.YOUTUBE_CLIENT_SECRET_FILE
+            ),
+            token=_publish_path(youtube, "token", config.YOUTUBE_TOKEN_FILE),
+        ),
+        tiktok=TikTokPublishSpec(
+            token=_publish_path(tiktok, "token", config.TIKTOK_TOKEN_FILE),
+            privacy=_string(
+                tiktok, "privacy", config.TIKTOK_PRIVACY, "publish.tiktok."
+            ),
+        ),
+        instagram=InstagramPublishSpec(
+            user_id=_string(
+                instagram, "user_id", config.INSTAGRAM_USER_ID, "publish.instagram."
+            ),
+            access_token_env=access_token_env,
+        ),
+    )
+
+
 def _read_toml(path: Path) -> dict[str, Any]:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -421,7 +533,7 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         rotation=list(rotation),
         voices_path=voices_path,
         style=_load_style(style, root),
-        publish=PublishSpec(dict(publish)),
+        publish=_load_publish(publish),
         pipeline=dict(pipeline),
     )
 
