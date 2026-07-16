@@ -15,7 +15,8 @@ import subprocess
 import sys
 from datetime import date as _date
 
-from . import config, corners, llm
+from . import channel, config, corners, llm
+from .channel import ChannelSpec, CornerSpec
 
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
 
@@ -203,10 +204,15 @@ def _log(msg: str) -> None:
     print(f"[doci] {msg}", flush=True)
 
 
-def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
+def generate(
+    spec: ChannelSpec,
+    corner: CornerSpec,
+    day: str,
+    past_topics: list[str],
+) -> dict:
     # 1) 前段リサーチ（issue #6）: 題材選定＋Web裏取り。失敗してもリサーチ無しで続行。
     research = None
-    if config.SCRIPT_RESEARCH:
+    if spec.pipeline_get("research", config.SCRIPT_RESEARCH):
         from . import research as research_mod
 
         _log(f"前段リサーチ ({config.RESEARCH_BACKEND}+Web)…")
@@ -220,7 +226,7 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
 
     # 1.5) 構成プラン（issue #2）: minimax で起承転結＋図表を設計。失敗してもプラン無しで続行。
     plan = None
-    if config.SCRIPT_PLAN:
+    if spec.pipeline_get("plan", config.SCRIPT_PLAN):
         from . import plan as plan_mod
 
         _log(f"構成プラン (minimax) …")
@@ -234,7 +240,9 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
 
     # 2) 執筆（qwen3.7-plus 等）。リサーチの具体＋プランの構成/図表に沿わせる。
     #    稀に不完全JSONを返すため再生成で吸収。
-    prompt = corners.build_prompt(corner, day, past_topics, research=research, plan=plan)
+    prompt = corners.build_prompt(
+        spec, corner, day, past_topics, research=research, plan=plan
+    )
     script = None
     last_err: Exception | None = None
     for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
@@ -290,7 +298,7 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
             _log(f"図表を {used} シーンに配置")
 
     # 3) 後段ファクトチェック（issue #6）: 別モデル(opus)＋Web検証で narration を自動修正。
-    if config.SCRIPT_FACTCHECK:
+    if spec.pipeline_get("factcheck", config.SCRIPT_FACTCHECK):
         from . import factcheck
 
         _log(f"後段ファクトチェック ({config.FACTCHECK_BACKEND}+Web)…")
@@ -306,7 +314,8 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
             _log(f"ファクトチェック失敗→修正なしで続行: {e}")
 
     script["_corner"] = corner.key
-    script["_speaker"] = corner.speaker
+    script["_speaker"] = spec.voice_for(corner).speaker
+    script["_channel"] = spec.id
     script["_date"] = day
     if research:
         script["_research"] = research
@@ -315,14 +324,24 @@ def generate(corner: corners.Corner, day: str, past_topics: list[str]) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="台本生成 (opus 4.8)")
-    ap.add_argument("--corner", choices=list(corners.CORNERS), default="communism")
+    ap.add_argument("--channel", help="チャンネルID（未指定時は既定チャンネル）")
+    ap.add_argument("--corner", help="コーナーID")
     ap.add_argument("--date", default=_date.today().isoformat())
     args = ap.parse_args()
-    corner = corners.CORNERS[args.corner]
-    script = generate(corner, args.date, past_topics=[])
+    spec = channel.load(args.channel or channel.default_channel())
+    corner_key = args.corner or spec.rotation[0]
+    if corner_key not in spec.corners:
+        ap.error(
+            f"unknown corner for channel {spec.id}: {corner_key}; "
+            f"choose from {', '.join(spec.corners)}"
+        )
+    corner = spec.corners[corner_key]
+    voice = spec.voice_for(corner)
+    script = generate(spec, corner, args.date, past_topics=[])
     print(json.dumps(script, ensure_ascii=False, indent=2))
     print(
-        f"\n--- corner={corner.key} voice={corner.voice_key} speaker={corner.speaker} "
+        f"\n--- channel={spec.id} corner={corner.key} voice={corner.voice_key} "
+        f"speaker={voice.speaker} "
         f"narration_chars={len(script['narration'])} scenes={len(script['scenes'])} ---",
         file=sys.stderr,
     )
