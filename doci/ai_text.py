@@ -24,8 +24,13 @@ REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
 _extract_json = llm.extract_json
 
 
+def _write_timeout() -> int | None:
+    """台本執筆の待機上限。0以下は長文生成を途中で切らない無制限モード。"""
+    return config.WRITE_LLM_TIMEOUT if config.WRITE_LLM_TIMEOUT > 0 else None
+
+
 def _run_claude_cli(prompt: str, model: str) -> str:
-    return llm.run_claude(prompt, model, timeout=config.WRITE_LLM_TIMEOUT)
+    return llm.run_claude(prompt, model, timeout=_write_timeout())
 
 
 def _run_anthropic(prompt: str, model: str) -> str:
@@ -50,7 +55,7 @@ def _run_anthropic(prompt: str, model: str) -> str:
             "content-type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=config.WRITE_LLM_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=_write_timeout()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return "".join(b.get("text", "") for b in data.get("content", []))
 
@@ -100,9 +105,7 @@ def _run_opencode(prompt: str, model: str, agent: str) -> str:
         encoding="utf-8",
     )
     cmd += ["--print-logs", "--log-level", "ERROR", "--dir", str(scratch), prompt]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=config.WRITE_LLM_TIMEOUT
-    )
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_write_timeout())
     if proc.returncode != 0:
         raise RuntimeError(f"opencode failed (rc={proc.returncode}): {proc.stderr[:500]}")
     return proc.stdout
