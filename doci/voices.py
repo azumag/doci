@@ -1,4 +1,4 @@
-"""声の設定（話者＋速度/ピッチ/抑揚/音量）を config/voices.json から読む（issue #1）。
+"""声の設定（話者＋速度/ピッチ/抑揚/音量）を voices.json から読む（issue #1）。
 
 これまで voicevox.py は audio_query をそのまま合成しており、speed/pitch/intonation が
 一切効いていなかった。ここで voices.json を唯一の真実として読み、コーナーの話者と
@@ -113,7 +113,7 @@ def load(
 
 def _load() -> dict[str, VoiceCfg]:
     """後方互換用のグローバル voice 設定をロードする。"""
-    path = config.CONFIG_DIR / "voices.json"
+    path = config.ROOT / "channels" / "ideology" / "voices.json"
     if not path.exists():
         return dict(_FALLBACK)
     try:

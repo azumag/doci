@@ -1,4 +1,4 @@
-voices = "config/voices.json"
+voices = "voices.json"
 
 [channel]
 id = "ideology"
@@ -7,12 +7,22 @@ rotation = ["capitalism", "communism"]
 
 [corners.communism]
 label = "共産主義ネタ"
-persona = "doci/prompts/persona_chinese.md"
-corner = "doci/prompts/corner_communism.md"
+persona = "prompts/persona_chinese.md"
+corner = "prompts/corner_communism.md"
 voice = "chinese_ai"
 
 [corners.capitalism]
 label = "資本主義ネタ"
-persona = "doci/prompts/persona_american.md"
-corner = "doci/prompts/corner_capitalism.md"
+persona = "prompts/persona_american.md"
+corner = "prompts/corner_capitalism.md"
 voice = "american_ai"
+
+[style.bgm]
+dir = "bgm"
+
+[publish]
+platforms = ["youtube"]
+
+[publish.youtube]
+client_secret = "secrets/ideology/client_secret.json"
+token = "secrets/ideology/youtube_token.json"

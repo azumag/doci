@@ -13,10 +13,10 @@
 
 したがって本 mp3 は YouTube 配信での BGM 利用に問題ありません。
 
-別の音源（例: 実際のピアノ演奏）を使いたい場合は、`assets/bgm/` に音声ファイル
+別の音源（例: 実際のピアノ演奏）を使いたい場合は、`channels/ideology/bgm/` に音声ファイル
 （mp3/ogg/wav）を置けば自動的にそちらが使われます（`doci/config.py: bgm_path()`）。
 
 再生成:
 ```
-python tools/make_bgm.py --midi internationale.mid --out assets/bgm/internationale_piano.mp3
+python tools/make_bgm.py --midi internationale.mid --out channels/ideology/bgm/internationale_piano.mp3
 ```

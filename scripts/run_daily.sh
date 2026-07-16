@@ -15,5 +15,5 @@ LOG_DIR="$HERE/output/logs"
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d_%H%M%S)"
 
-# 引数はそのまま run_daily へ（例: --no-upload, --corner communism）
+# 引数はそのまま run_daily へ（例: --all-channels, --channel ideology, --no-upload）
 exec "$PY" -m doci.run_daily "$@" >>"$LOG_DIR/run_${TS}.log" 2>&1

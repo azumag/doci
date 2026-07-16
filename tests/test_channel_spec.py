@@ -78,6 +78,12 @@ voice = "narrator"
         self.assertEqual(spec.corners["capitalism"].label, "資本主義ネタ")
         self.assertEqual(spec.corners["capitalism"].voice_key, "american_ai")
         self.assertEqual(spec.voice_for("communism").speaker, 109)
+        self.assertEqual(spec.voices_path, spec.root / "voices.json")
+        self.assertEqual(spec.style.bgm.dir, spec.root / "bgm")
+        self.assertEqual(
+            spec.publish.youtube.token,
+            (config.ROOT / "secrets/ideology/youtube_token.json").resolve(),
+        )
 
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\
@@ -274,6 +280,41 @@ access_token_env = "EAAB token value"
 
         with self.assertRaisesRegex(channel.ChannelConfigError, "environment variable name"):
             channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_ideology_uses_legacy_youtube_files_until_migrated(self) -> None:
+        self._write_channel(
+            "ideology",
+            toml='''\
+[channel]
+id = "ideology"
+name = "Ideology"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish]
+platforms = ["youtube"]
+[publish.youtube]
+client_secret = "secrets/ideology/client_secret.json"
+token = "secrets/ideology/youtube_token.json"
+''',
+        )
+        legacy_secret = self.root / "client_secret.json"
+        legacy_token = self.root / "youtube_token.json"
+        legacy_secret.write_text("{}", encoding="utf-8")
+        legacy_token.write_text("{}", encoding="utf-8")
+
+        with (
+            patch.object(config, "ROOT", self.root),
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always")
+            spec = channel.load("ideology", channels_dir=self.channels_dir)
+
+        self.assertEqual(spec.publish.youtube.client_secret, legacy_secret)
+        self.assertEqual(spec.publish.youtube.token, legacy_token)
+        self.assertTrue(any("migrate_channels.py" in str(item.message) for item in caught))
 
     def test_discover_and_default_channel(self) -> None:
         self.assertEqual(channel.discover(channels_dir=self.channels_dir), [])

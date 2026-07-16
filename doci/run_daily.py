@@ -352,27 +352,108 @@ def run(
     }
 
 
-def main() -> None:
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--channel")
-    known, _ = pre.parse_known_args()
-    try:
-        spec = channel.load(known.channel or channel.default_channel())
-    except (channel.ChannelConfigError, OSError) as exc:
-        pre.error(str(exc))
+def _list_channels() -> list[dict]:
+    rows: list[dict] = []
+    for channel_id in channel.discover():
+        try:
+            spec = channel.load(channel_id)
+            last = history.last_run(spec)
+            last_summary = (
+                {
+                    key: last.get(key)
+                    for key in ("ts", "corner", "title", "video_id", "duration_sec")
+                    if key in last
+                }
+                if last
+                else None
+            )
+            rows.append(
+                {
+                    "channel": spec.id,
+                    "name": spec.name,
+                    "last_run": last_summary,
+                }
+            )
+        except Exception as exc:  # 壊れた1設定が他チャンネルの一覧を妨げない
+            rows.append(
+                {"channel": channel_id, "status": "error", "error": str(exc)}
+            )
+    return rows
 
+
+def _run_all_channels(
+    day: str,
+    *,
+    do_upload: bool,
+    video_scenes: int,
+) -> tuple[dict, int]:
+    results: list[dict] = []
+    for channel_id in channel.discover():
+        try:
+            spec = channel.load(channel_id)
+            result = run(
+                spec,
+                day,
+                None,
+                do_upload=do_upload,
+                video_scenes=video_scenes,
+            )
+            results.append(
+                {"channel": channel_id, "status": "ok", "result": result}
+            )
+        except Exception as exc:  # 1チャンネル失敗でも残りを逐次実行する
+            _log(f"channel={channel_id} ERROR: {exc}")
+            results.append(
+                {"channel": channel_id, "status": "error", "error": str(exc)}
+            )
+    succeeded = sum(item["status"] == "ok" for item in results)
+    summary = {
+        "mode": "all_channels",
+        "date": day,
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+        "channels": results,
+    }
+    return summary, 0 if succeeded else 1
+
+
+def main() -> int:
     ap = argparse.ArgumentParser(description="doci 日次生成")
-    ap.add_argument("--channel", default=spec.id, help="チャンネルID")
+    target = ap.add_mutually_exclusive_group()
+    target.add_argument("--channel", help="チャンネルID")
+    target.add_argument(
+        "--all-channels",
+        action="store_true",
+        help="全チャンネルを逐次実行（1件の失敗で他を止めない）",
+    )
+    target.add_argument(
+        "--list-channels",
+        action="store_true",
+        help="チャンネル一覧と直近実行を表示",
+    )
     ap.add_argument(
         "--corner",
-        choices=list(spec.corners),
         help="指定が無ければチャンネル履歴の前回と交互",
     )
     ap.add_argument("--date", default=_date.today().isoformat())
     ap.add_argument("--no-upload", action="store_true", help="生成のみ（アップロードしない）")
     ap.add_argument("--video-scenes", type=int, default=config.MINIMAX_VIDEO_SCENES)
     args = ap.parse_args()
+    if args.list_channels:
+        print(json.dumps(_list_channels(), ensure_ascii=False, indent=2))
+        return 0
+    if args.all_channels:
+        if args.corner:
+            ap.error("--corner は --all-channels と同時に指定できません")
+        result, exit_code = _run_all_channels(
+            args.date,
+            do_upload=not args.no_upload,
+            video_scenes=args.video_scenes,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return exit_code
     try:
+        spec = channel.load(args.channel or channel.default_channel())
         result = run(
             spec,
             args.date,
@@ -382,9 +463,10 @@ def main() -> None:
         )
     except Exception as e:
         _log(f"ERROR: {e}")
-        sys.exit(1)
+        return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
