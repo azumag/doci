@@ -43,6 +43,15 @@ class PublishAccountsTest(unittest.TestCase):
             ),
         )
 
+    def test_youtube_token_scope_check_uses_stored_grants(self) -> None:
+        token = self.root / "youtube_token.json"
+        token.write_text(json.dumps({"scopes": youtube.SCOPES}), encoding="utf-8")
+
+        self.assertTrue(youtube._token_has_scopes(token, youtube.SCOPES))
+        self.assertFalse(
+            youtube._token_has_scopes(token, youtube.ACCOUNT_SCOPES)
+        )
+
     def test_enabled_requires_channel_platform_token_and_global_switch(self) -> None:
         spec = self._youtube_spec("alpha")
         with patch.object(config, "PUBLISH_YOUTUBE", True):

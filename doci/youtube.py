@@ -10,12 +10,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from . import config
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 ACCOUNT_SCOPES = [*SCOPES, "https://www.googleapis.com/auth/youtube.readonly"]
+
+
+def _token_has_scopes(token_file: Path, required_scopes: list[str]) -> bool:
+    """保存済みtoken JSONに実際に記録されたscopeを比較する。"""
+    try:
+        raw = json.loads(token_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    stored = raw.get("scopes") or []
+    if isinstance(stored, str):
+        stored = stored.split()
+    return set(required_scopes).issubset(set(stored))
 
 
 def _load_credentials(
@@ -35,8 +48,16 @@ def _load_credentials(
     )
     required_scopes = scopes or SCOPES
     creds = None
-    if token_file.exists():
+    token_scopes_ok = token_file.exists() and _token_has_scopes(
+        token_file, required_scopes
+    )
+    if token_scopes_ok:
         creds = Credentials.from_authorized_user_file(str(token_file), required_scopes)
+    elif token_file.exists() and not interactive:
+        raise RuntimeError(
+            "YouTube token のscopeが不足しています。"
+            "`python -m doci.youtube --auth [--channel <id>]` で再認証してください。"
+        )
     if creds and not creds.has_scopes(required_scopes):
         if not interactive:
             raise RuntimeError(
@@ -72,7 +93,12 @@ def _load_credentials(
     flow = InstalledAppFlow.from_client_secrets_file(
         str(client_secret_file), required_scopes
     )
-    creds = flow.run_local_server(port=0)
+    creds = flow.run_local_server(
+        port=0,
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(creds.to_json(), encoding="utf-8")
     return creds
