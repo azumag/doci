@@ -74,6 +74,28 @@ class VoiceConfigTest(unittest.TestCase):
         self.assertEqual(v.pitch, -0.02)
         self.assertEqual(v.intonation, 0.8)
 
+    def test_path_loader_supports_channel_specific_keys_without_env_override(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "voices.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "narrator": {"voicevox_speaker": 42, "speed": 1.2},
+                    "chinese_ai": {"voicevox_speaker": 109},
+                }
+            ),
+            encoding="utf-8",
+        )
+        from doci import voices
+
+        with patch.dict(os.environ, {"VOICE_CHINESE_AI": "321"}):
+            loaded = voices.load(path)
+
+        self.assertEqual(loaded["narrator"].speaker, 42)
+        self.assertEqual(loaded["narrator"].speed, 1.2)
+        self.assertEqual(loaded["chinese_ai"].speaker, 109)
+
 
 if __name__ == "__main__":
     unittest.main()
