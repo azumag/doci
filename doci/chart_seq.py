@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from . import charts, config
+from .channel import ChartStyle
 
 _XFADE = 0.6  # 背景切替のクロスフェード秒
 
@@ -77,7 +78,12 @@ def _bg_track(bgs: list[dict], dur: float, W: int, H: int, td: Path) -> Path:
     return out
 
 
-def _overlay_html(spec: dict, w: int, h: int) -> str:
+def _overlay_html(
+    spec: dict,
+    w: int,
+    h: int,
+    style: ChartStyle | None = None,
+) -> str:
     """順次フローの透過オーバーレイ HTML（背景は無し・scrim＋見出し＋ラベル＋矢印）。
     spec の "place"(起承転結) は受け取っても画面には表示しない。"""
     evs = spec.get("events") or []
@@ -92,7 +98,7 @@ def _overlay_html(spec: dict, w: int, h: int) -> str:
         round(13.0 * s, 2), round(4.4 * s, 2), round(0.6 * s, 3),
         round(1.6 * s, 3), round(2.0 * s, 3), round(2.1 * s, 3),
     )
-    return (
+    page = (
         "<!doctype html><html><head><meta charset='utf-8'><style>"
         "*{margin:0;padding:0;box-sizing:border-box}"
         "html,body{width:100%;height:100%;overflow:hidden;background:transparent}"
@@ -135,11 +141,20 @@ def _overlay_html(spec: dict, w: int, h: int) -> str:
         "window.__apply(1);"
         "</script></body></html>"
     )
+    return charts._apply_style_html(page, style)
 
 
-def _overlay_frames(spec: dict, dur: float, fps: int, W: int, H: int, td: Path) -> Path:
+def _overlay_frames(
+    spec: dict,
+    dur: float,
+    fps: int,
+    W: int,
+    H: int,
+    td: Path,
+    style: ChartStyle | None = None,
+) -> Path:
     """透過オーバーレイを CDP で1セッション撮影し、PNG(アルファ)連番ディレクトリを返す。"""
-    html = _overlay_html(spec, W, H)
+    html = _overlay_html(spec, W, H, style)
     hp = td / "overlay.html"
     hp.write_text(html, encoding="utf-8")
     fdir = td / "ov"
@@ -169,8 +184,15 @@ def _overlay_frames(spec: dict, dur: float, fps: int, W: int, H: int, td: Path) 
     return fdir
 
 
-def render(spec: dict, out_mp4: Path, duration: float,
-           width: int | None = None, height: int | None = None, fps: int = 12) -> Path:
+def render(
+    spec: dict,
+    out_mp4: Path,
+    duration: float,
+    width: int | None = None,
+    height: int | None = None,
+    fps: int = 12,
+    style: ChartStyle | None = None,
+) -> Path:
     """順次フロー timeline を out_mp4 に合成して返す。"""
     W = width or config.VIDEO_WIDTH
     H = height or config.VIDEO_HEIGHT
@@ -181,7 +203,7 @@ def render(spec: dict, out_mp4: Path, duration: float,
     with tempfile.TemporaryDirectory(prefix="doci_tlseq_") as tds:
         td = Path(tds)
         bgtrack = _bg_track(bgs, dur, W, H, td)
-        ovdir = _overlay_frames(spec, dur, fps, W, H, td)
+        ovdir = _overlay_frames(spec, dur, fps, W, H, td, style)
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", str(bgtrack), "-framerate", str(fps), "-i", str(ovdir / "f%04d.png"),
              "-filter_complex", "[0:v][1:v]overlay=0:0:shortest=1,format=yuv420p[v]",

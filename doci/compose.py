@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
+from .channel import StyleSpec
 
 JP_FONT_CANDIDATES = [
     "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
@@ -146,7 +147,9 @@ def build_subtitles(segments) -> list[tuple[str, float, float]]:
     return [(c, s, e) for c, s, e, _ in raw]
 
 
-def _font_path() -> str | None:
+def _font_path(preferred: Path | None = None) -> str | None:
+    if preferred is not None and preferred.is_file():
+        return str(preferred)
     for f in JP_FONT_CANDIDATES:
         if Path(f).exists():
             return f
@@ -215,13 +218,21 @@ def _scene_boundaries(total: float, n: int, segments, *,
     return boundaries
 
 
-def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
+def _render_caption_png(
+    text: str,
+    out_png: Path,
+    W: int,
+    H: int,
+    style: StyleSpec | None = None,
+) -> bool:
     """字幕を透過PNGに描画。成功時 True。フォント/Pillow 不在なら False。"""
-    font_path = _font_path()
+    style = style or StyleSpec()
+    subtitle = style.subtitle
+    font_path = _font_path(subtitle.font)
     if not font_path:
         return False
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageColor, ImageDraw, ImageFont
     except Exception:
         return False
 
@@ -257,17 +268,26 @@ def _render_caption_png(text: str, out_png: Path, W: int, H: int) -> bool:
     box_w, box_h = int(text_w + pad_x * 2), int(text_h + pad_y * 2)
     box_w = min(box_w, W)  # 念のため枠内にクランプ
     x0 = max(0, (W - box_w) // 2)
-    y0 = int(H * SUB_Y_RATIO)
+    y0 = int(H * subtitle.position_ratio)
+    box_rgb = ImageColor.getrgb(subtitle.box_color)
+    fill_rgb = ImageColor.getrgb(subtitle.fill)
+    stroke_rgb = ImageColor.getrgb(subtitle.stroke)
     draw.rounded_rectangle(
-        [x0, y0, x0 + box_w, y0 + box_h], radius=int(size * 0.35), fill=(0, 0, 0, 150)
+        [x0, y0, x0 + box_w, y0 + box_h],
+        radius=int(size * 0.35),
+        fill=(*box_rgb, round(subtitle.box_alpha * 255)),
     )
     stroke = max(2, size // 12)
     cy = y0 + pad_y
     for ln in lines:
         lw = draw.textlength(ln, font=font)
         draw.text(
-            ((W - lw) // 2, cy), ln, font=font, fill=(255, 255, 255, 255),
-            stroke_width=stroke, stroke_fill=(0, 0, 0, 255),
+            ((W - lw) // 2, cy),
+            ln,
+            font=font,
+            fill=(*fill_rgb, 255),
+            stroke_width=stroke,
+            stroke_fill=(*stroke_rgb, 255),
         )
         cy += line_h
     img.save(out_png)
@@ -287,7 +307,17 @@ def _probe_dur(path: Path) -> float:
         return 0.0
 
 
-def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: int) -> Path:
+def _build_scene_clip(
+    scene: Scene,
+    dur: float,
+    idx: int,
+    tmp: Path,
+    W: int,
+    H: int,
+    style: StyleSpec | None = None,
+) -> Path:
+    style = style or StyleSpec()
+    pad_color = style.video.pad_color
     fps = config.VIDEO_FPS
     out = tmp / f"scene_{idx:02d}.mp4"
     frames = max(1, round(dur * fps))
@@ -305,13 +335,26 @@ def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: 
         anim_path = tmp / f"chart_{idx:02d}.mp4"
         if spec.get("type") == "timeline" and spec.get("_bgs"):
             from . import chart_seq
-            anim = chart_seq.render(spec, anim_path, duration=adur, width=W, height=H)
+            anim = chart_seq.render(
+                spec,
+                anim_path,
+                duration=adur,
+                width=W,
+                height=H,
+                style=style.chart,
+            )
         else:
             anim = charts.render_chart_video(
-                spec, anim_path, duration=adur, width=W, height=H, bg=spec.get("_bg")
+                spec,
+                anim_path,
+                duration=adur,
+                width=W,
+                height=H,
+                bg=spec.get("_bg"),
+                style=style.chart,
             )
         vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0a0a0c,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color},"
               f"fps={fps},setsar=1,format=yuv420p,"
               f"tpad=stop_mode=clone:stop_duration={dur:.3f}")
         cmd = ["ffmpeg", "-y", "-i", str(anim), "-t", f"{dur}", "-vf", vf, *tail]
@@ -323,7 +366,7 @@ def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: 
         # tpad の stop_duration を dur にしておけば（入場 < dur の限り）最後の状態で必ず満たされ、
         # -t dur で正確に切る（ループ再生＝入場の再発を防ぐ）。
         vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0a0a0c,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color},"
               f"fps={fps},setsar=1,format=yuv420p,"
               f"tpad=stop_mode=clone:stop_duration={dur:.3f}")
         cmd = ["ffmpeg", "-y", "-i", str(scene.path), "-t", f"{dur}", "-vf", vf, *tail]
@@ -356,7 +399,7 @@ def _build_scene_clip(scene: Scene, dur: float, idx: int, tmp: Path, W: int, H: 
     elif scene.static:
         # 図表など: Ken Burns を掛けず静止。枠に収め、はみ出しは暗色でパッド（文字を切らない）。
         vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0a0a0c,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color},"
               f"fps={fps},setsar=1,format=yuv420p")
         cmd = ["ffmpeg", "-y", "-loop", "1", "-t", f"{dur}", "-i", str(scene.path),
                "-vf", vf, *tail]
@@ -517,6 +560,7 @@ def compose(
     segments=None,
     width: int | None = None,
     height: int | None = None,
+    style: StyleSpec | None = None,
 ) -> Path:
     if not scenes:
         raise ValueError("scenes が空です")
@@ -524,6 +568,7 @@ def compose(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     W = width or config.VIDEO_WIDTH
     H = height or config.VIDEO_HEIGHT
+    style = style or StyleSpec()
     fps = config.VIDEO_FPS
     total = narration_dur + 0.4
     # segments がある場合、各シーン境界を「直前の文末」にスナップさせる。
@@ -538,7 +583,10 @@ def compose(
 
     with tempfile.TemporaryDirectory(prefix="doci_compose_") as td:
         tmp = Path(td)
-        clips = [_build_scene_clip(s, d, i, tmp, W, H) for i, (s, d) in enumerate(zip(scenes, durs))]
+        clips = [
+            _build_scene_clip(s, d, i, tmp, W, H, style)
+            for i, (s, d) in enumerate(zip(scenes, durs))
+        ]
         silent = _concat(clips, tmp)
 
         # 字幕PNG。segments があれば「発話フル字幕」（チャンク窓に同期: issue #5）、
@@ -547,7 +595,7 @@ def compose(
         if segments:
             for text, s, e in build_subtitles(segments):
                 png = tmp / f"cap_{len(caps):03d}.png"
-                if _render_caption_png(text, png, W, H):
+                if _render_caption_png(text, png, W, H, style):
                     caps.append((png, s, e))
         else:
             t = 0.0
@@ -556,7 +604,7 @@ def compose(
                 t = e
                 if sc.caption:
                     png = tmp / f"cap_{len(caps):03d}.png"
-                    if _render_caption_png(sc.caption, png, W, H):
+                    if _render_caption_png(sc.caption, png, W, H, style):
                         caps.append((png, s, e))
 
         # 字幕は単一の透過トラックに連結して1回だけ overlay（字幕本数に依らずO(1)・長尺高速）。
@@ -566,14 +614,18 @@ def compose(
             inputs += ["-stream_loop", "-1", "-i", str(bgm)]
             bgm_idx = 2
         vparts: list[str] = []
+        base_video = "0:v"
+        if style.video.filter.strip():
+            vparts.append(f"[0:v]{style.video.filter.strip()}[vstyled]")
+            base_video = "vstyled"
         if caps:
             subtrack = _build_subtitle_track(caps, total, tmp, W, H, fps)
             sub_idx = 2 + (1 if bgm else 0)
             inputs += ["-i", str(subtrack)]
-            vparts.append(f"[0:v][{sub_idx}:v]overlay=0:0[vov]")
+            vparts.append(f"[{base_video}][{sub_idx}:v]overlay=0:0[vov]")
             pad_src = "vov"
         else:
-            pad_src = "0:v"
+            pad_src = base_video
         # 末尾途切れ防止: 連結動画はクリップのフレーム量子化で total より僅かに短くなり得る。
         # 最終フレームを複製(tpad)して total を必ず超える長さにし、-t total で正確に切る（-shortest不使用）。
         vparts.append(f"[{pad_src}]tpad=stop_mode=clone:stop_duration=3[vout]")
@@ -598,7 +650,7 @@ def compose(
             # スペクトル的にマスクして「百年」に聞こえる事象への対策（耳で確認済）。
             la = config.BGM_DUCK_LOOKAHEAD_MS
             afilters.append(
-                f"[{bgm_idx}:a]volume={config.BGM_VOLUME},aformat=channel_layouts=mono,adelay={la}|{la}[bgv];"
+                f"[{bgm_idx}:a]volume={style.bgm.volume},aformat=channel_layouts=mono,adelay={la}|{la}[bgv];"
                 f"[1:a]aformat=channel_layouts=mono,asplit=2[n1][n2];"
                 f"[bgv][n1]sidechaincompress=threshold={config.BGM_DUCK_THRESHOLD}:ratio={config.BGM_DUCK_RATIO}:attack=5:release={config.BGM_DUCK_RELEASE}[bgd];"
                 f"[n2][bgd]amix=inputs=2:normalize=0:duration=first,{afade}[a]"

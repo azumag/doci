@@ -1,6 +1,7 @@
 """チャンネル定義（channels/<id>/channel.toml）のロードと検証。"""
 from __future__ import annotations
 
+import hashlib
 import os
 import tomllib
 import warnings
@@ -25,10 +26,55 @@ class CornerSpec:
 
 
 @dataclass(frozen=True)
-class StyleSpec:
-    """#18 で拡張する style 設定の暫定コンテナ。"""
+class SubtitleStyle:
+    font: Path | None = None
+    fill: str = "#ffffff"
+    stroke: str = "#000000"
+    box_color: str = "#000000"
+    box_alpha: float = 0.45
+    position_ratio: float = 0.64
 
-    values: dict[str, Any] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class ThumbnailStyle:
+    font_family: str = "'Hiragino Mincho ProN','Hiragino Mincho Pro',serif"
+    title_color: str = "#f6efe1"
+
+
+@dataclass(frozen=True)
+class ChartStyle:
+    palette: tuple[str, ...] = ()
+    font: Path | None = None
+
+
+@dataclass(frozen=True)
+class VideoStyle:
+    pad_color: str = "0x0a0a0c"
+    filter: str = ""
+
+
+@dataclass(frozen=True)
+class BgmStyle:
+    dir: Path = field(default_factory=lambda: config.BGM_DIR)
+    volume: float = field(default_factory=lambda: config.BGM_VOLUME)
+    rotation: str = "fixed"
+
+
+@dataclass(frozen=True)
+class CreditsStyle:
+    template: str = ""
+
+
+@dataclass(frozen=True)
+class StyleSpec:
+    """チャンネルの見た目・聞こえ方。全フィールドは現行値が既定。"""
+
+    subtitle: SubtitleStyle = field(default_factory=SubtitleStyle)
+    thumbnail: ThumbnailStyle = field(default_factory=ThumbnailStyle)
+    chart: ChartStyle = field(default_factory=ChartStyle)
+    video: VideoStyle = field(default_factory=VideoStyle)
+    bgm: BgmStyle = field(default_factory=BgmStyle)
+    credits: CreditsStyle = field(default_factory=CreditsStyle)
 
 
 @dataclass(frozen=True)
@@ -84,6 +130,21 @@ _PIPELINE_KEYS = {
     "plan",
     "asset_media",
 }
+_STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
+_SUBTITLE_STYLE_KEYS = {
+    "font",
+    "fill",
+    "stroke",
+    "box_color",
+    "box_alpha",
+    "position_ratio",
+}
+_THUMBNAIL_STYLE_KEYS = {"font_family", "title_color"}
+_CHART_STYLE_KEYS = {"palette", "font"}
+_VIDEO_STYLE_KEYS = {"pad_color", "filter"}
+_BGM_STYLE_KEYS = {"dir", "volume", "rotation"}
+_CREDITS_STYLE_KEYS = {"template"}
+_AUDIO_SUFFIXES = {".mp3", ".ogg", ".wav", ".m4a", ".flac"}
 
 
 def _warn_unknown(data: dict[str, Any], allowed: set[str], location: str) -> None:
@@ -115,6 +176,145 @@ def _resolve_path(channel_root: Path, value: str, key: str) -> Path:
     if not candidate.is_file():
         raise ChannelConfigError(f"referenced file does not exist: {key}={value}")
     return candidate
+
+
+def _optional_file(channel_root: Path, value: Any, key: str) -> Path | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ChannelConfigError(f"{key} must be a path string")
+    return _resolve_path(channel_root, value, key)
+
+
+def _style_table(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key, {})
+    if not isinstance(value, dict):
+        raise ChannelConfigError(f"style.{key} must be a table")
+    return value
+
+
+def _string(data: dict[str, Any], key: str, default: str, location: str) -> str:
+    value = data.get(key, default)
+    if not isinstance(value, str):
+        raise ChannelConfigError(f"{location}{key} must be a string")
+    return value
+
+
+def _number(
+    data: dict[str, Any],
+    key: str,
+    default: float,
+    location: str,
+    *,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+) -> float:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ChannelConfigError(f"{location}{key} must be a number")
+    result = float(value)
+    if result < minimum or (maximum is not None and result > maximum):
+        bounds = f"{minimum}..{maximum}" if maximum is not None else f">= {minimum}"
+        raise ChannelConfigError(f"{location}{key} must be {bounds}")
+    return result
+
+
+def _resolve_style_dir(channel_root: Path, value: str) -> Path:
+    raw = Path(value)
+    if raw.is_absolute():
+        return raw.resolve()
+    local = channel_root / raw
+    if local.exists() or not (config.ROOT / raw).exists():
+        return local.resolve()
+    return (config.ROOT / raw).resolve()
+
+
+def _load_style(data: dict[str, Any], channel_root: Path) -> StyleSpec:
+    _warn_unknown(data, _STYLE_KEYS, "style.")
+    subtitle = _style_table(data, "subtitle")
+    thumbnail = _style_table(data, "thumbnail")
+    chart = _style_table(data, "chart")
+    video = _style_table(data, "video")
+    bgm = _style_table(data, "bgm")
+    credits = _style_table(data, "credits")
+    _warn_unknown(subtitle, _SUBTITLE_STYLE_KEYS, "style.subtitle.")
+    _warn_unknown(thumbnail, _THUMBNAIL_STYLE_KEYS, "style.thumbnail.")
+    _warn_unknown(chart, _CHART_STYLE_KEYS, "style.chart.")
+    _warn_unknown(video, _VIDEO_STYLE_KEYS, "style.video.")
+    _warn_unknown(bgm, _BGM_STYLE_KEYS, "style.bgm.")
+    _warn_unknown(credits, _CREDITS_STYLE_KEYS, "style.credits.")
+
+    palette = chart.get("palette", [])
+    if not isinstance(palette, list) or not all(isinstance(item, str) for item in palette):
+        raise ChannelConfigError("style.chart.palette must be a list of colors")
+    rotation = _string(bgm, "rotation", "fixed", "style.bgm.")
+    if rotation not in {"fixed", "daily", "per_corner"}:
+        raise ChannelConfigError(
+            "style.bgm.rotation must be fixed, daily, or per_corner"
+        )
+    bgm_dir_value = _string(bgm, "dir", "", "style.bgm.")
+
+    return StyleSpec(
+        subtitle=SubtitleStyle(
+            font=_optional_file(
+                channel_root, subtitle.get("font", ""), "style.subtitle.font"
+            ),
+            fill=_string(subtitle, "fill", "#ffffff", "style.subtitle."),
+            stroke=_string(subtitle, "stroke", "#000000", "style.subtitle."),
+            box_color=_string(
+                subtitle, "box_color", "#000000", "style.subtitle."
+            ),
+            box_alpha=_number(
+                subtitle,
+                "box_alpha",
+                0.45,
+                "style.subtitle.",
+                maximum=1.0,
+            ),
+            position_ratio=_number(
+                subtitle,
+                "position_ratio",
+                0.64,
+                "style.subtitle.",
+                maximum=1.0,
+            ),
+        ),
+        thumbnail=ThumbnailStyle(
+            font_family=_string(
+                thumbnail,
+                "font_family",
+                "'Hiragino Mincho ProN','Hiragino Mincho Pro',serif",
+                "style.thumbnail.",
+            ),
+            title_color=_string(
+                thumbnail, "title_color", "#f6efe1", "style.thumbnail."
+            ),
+        ),
+        chart=ChartStyle(
+            palette=tuple(palette),
+            font=_optional_file(
+                channel_root, chart.get("font", ""), "style.chart.font"
+            ),
+        ),
+        video=VideoStyle(
+            pad_color=_string(video, "pad_color", "0x0a0a0c", "style.video."),
+            filter=_string(video, "filter", "", "style.video."),
+        ),
+        bgm=BgmStyle(
+            dir=(
+                _resolve_style_dir(channel_root, bgm_dir_value)
+                if bgm_dir_value
+                else config.BGM_DIR
+            ),
+            volume=_number(
+                bgm, "volume", config.BGM_VOLUME, "style.bgm.", maximum=1.0
+            ),
+            rotation=rotation,
+        ),
+        credits=CreditsStyle(
+            template=_string(credits, "template", "", "style.credits.")
+        ),
+    )
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -220,7 +420,7 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         corners=corners,
         rotation=list(rotation),
         voices_path=voices_path,
-        style=StyleSpec(dict(style)),
+        style=_load_style(style, root),
         publish=PublishSpec(dict(publish)),
         pipeline=dict(pipeline),
     )
@@ -252,3 +452,23 @@ def default_channel(*, channels_dir: Path | None = None) -> str:
         "multiple channels found; set DOCI_CHANNEL or pass --channel: "
         + ", ".join(available)
     )
+
+
+def bgm_path(spec: ChannelSpec, corner: CornerSpec | str, day: str) -> Path | None:
+    """チャンネルの BGM rotation に従って決定的に1曲を選ぶ。"""
+    corner_spec = spec.corners[corner] if isinstance(corner, str) else corner
+    base = spec.style.bgm.dir
+    search_dir = base / corner_spec.key if spec.style.bgm.rotation == "per_corner" else base
+    if not search_dir.is_dir():
+        return None
+    files = sorted(
+        path
+        for path in search_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in _AUDIO_SUFFIXES
+    )
+    if not files:
+        return None
+    if spec.style.bgm.rotation in {"fixed", "per_corner"}:
+        return files[0]
+    digest = hashlib.sha256(f"{spec.id}:{day}".encode("utf-8")).digest()
+    return files[int.from_bytes(digest[:8], "big") % len(files)]

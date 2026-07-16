@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 
 from . import config
+from .channel import ChartStyle
 
 _MULT = {"兆": 1e12, "億": 1e8, "万": 1e4, "千": 1e3}
 
@@ -814,7 +815,34 @@ def _reveal_words(text, a: float, b: float) -> str:
     )
 
 
-def _page(spec: dict, body: str, duration=None, bg=None, w: int = 1080, h: int = 1920) -> str:
+def _apply_style_html(html_text: str, style: ChartStyle | None) -> str:
+    """既定チャートHTMLへチャンネル palette / font を適用する。"""
+    if style is None:
+        return html_text
+    if style.palette:
+        palette = style.palette
+        for index, default in enumerate(_DONUT_COLORS):
+            html_text = html_text.replace(default, palette[index % len(palette)])
+    if style.font is not None:
+        font_face = (
+            "@font-face{font-family:'DociChannelChart';"
+            + "src:url('" + style.font.as_uri() + "')}"
+            "body,.title,.num .u,.tl-card .y,.donut-center{"
+            "font-family:'DociChannelChart',sans-serif!important}"
+        )
+        html_text = html_text.replace("</style>", font_face + "</style>", 1)
+    return html_text
+
+
+def _page(
+    spec: dict,
+    body: str,
+    duration=None,
+    bg=None,
+    w: int = 1080,
+    h: int = 1920,
+    style: ChartStyle | None = None,
+) -> str:
     css = _BASE_CSS.replace("__GRAIN__", _GRAIN)
     # 背景画像があれば body 背景に敷き、暗幕(scrim)で文字可読性を確保する。
     body_attr = f" style=\"background:#0a0a0c url('file://{bg}') center/cover no-repeat\"" if bg else ""
@@ -828,7 +856,7 @@ def _page(spec: dict, body: str, duration=None, bg=None, w: int = 1080, h: int =
                  f'data-rev="{_wsec(0.5, 1.6, duration)}">{_esc(unit)}</div>') if unit else ""
     src_html = (f'<div class="source" data-rev=".88,1">出典: {_esc(source)}</div>'
                 if source else "")
-    return (
+    page = (
         "<!doctype html><html><head><meta charset='utf-8'><style>" + css + "</style></head>"
         "<body" + body_attr + ">"
         + scrim
@@ -843,15 +871,23 @@ def _page(spec: dict, body: str, duration=None, bg=None, w: int = 1080, h: int =
         + src_html
         + "</div><script>" + _ANIM_JS + "</script></body></html>"
     )
+    return _apply_style_html(page, style)
 
 
-def chart_html(spec: dict, duration=None, bg=None, width: int | None = None, height: int | None = None) -> str:
+def chart_html(
+    spec: dict,
+    duration=None,
+    bg=None,
+    width: int | None = None,
+    height: int | None = None,
+    style: ChartStyle | None = None,
+) -> str:
     builder = _BUILDERS.get(spec.get("type", ""))
     if not builder:
         raise ValueError(f"未対応の chart type: {spec.get('type')}")
     w = width or config.VIDEO_WIDTH
     h = height or config.VIDEO_HEIGHT
-    return _page(spec, builder(spec, w, h), duration, bg, w, h)
+    return _page(spec, builder(spec, w, h), duration, bg, w, h, style)
 
 
 # ===== 描画 =====
@@ -870,7 +906,13 @@ def _chrome_shot(html_path: Path, out_png: Path, w: int, h: int, budget: int = 1
     return Path(out_png).exists()
 
 
-def render_chart(spec: dict, out_png: Path, width: int | None = None, height: int | None = None) -> Path:
+def render_chart(
+    spec: dict,
+    out_png: Path,
+    width: int | None = None,
+    height: int | None = None,
+    style: ChartStyle | None = None,
+) -> Path:
     """chart 仕様を out_png に描画して返す（最終状態 p=1 の静止 PNG）。"""
     W = width or config.VIDEO_WIDTH
     H = height or config.VIDEO_HEIGHT
@@ -878,7 +920,7 @@ def render_chart(spec: dict, out_png: Path, width: int | None = None, height: in
     out_png.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="doci_chart_") as td:
         hp = Path(td) / "chart.html"
-        hp.write_text(chart_html(spec, width=W, height=H), encoding="utf-8")
+        hp.write_text(chart_html(spec, width=W, height=H, style=style), encoding="utf-8")
         if not _chrome_shot(hp, out_png, W, H, budget=800):
             raise RuntimeError("Chrome 描画失敗（PNG 生成されず）")
     return out_png
@@ -952,6 +994,7 @@ class _CDP:
 def render_chart_video(
     spec: dict, out_mp4: Path, duration: float,
     width: int | None = None, height: int | None = None, fps: int = _VID_FPS, bg=None,
+    style: ChartStyle | None = None,
 ) -> Path:
     """入場アニメ(p:0→1)を `duration` 秒かけて描く mp4 を返す。
     CDP で1セッション・毎フレーム window.__apply(p) を評価して撮影（尺いっぱいの緩やかなビルド）。
@@ -966,7 +1009,17 @@ def render_chart_video(
     with tempfile.TemporaryDirectory(prefix="doci_chartvid_") as td:
         td = Path(td)
         hp = td / "chart.html"
-        hp.write_text(chart_html(spec, duration=duration, bg=bg, width=W, height=H), encoding="utf-8")
+        hp.write_text(
+            chart_html(
+                spec,
+                duration=duration,
+                bg=bg,
+                width=W,
+                height=H,
+                style=style,
+            ),
+            encoding="utf-8",
+        )
         fdir = td / "frames"
         fdir.mkdir()
         cdp = _CDP(W, H)

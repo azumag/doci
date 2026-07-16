@@ -5,8 +5,8 @@
 **縦構図で作り(`render`)、API送信時にのみ16:9キャンバスへ中央配置+背景ぼかし埋め
 (ピラーボックス、`to_16x9`)する**設計を採る。
 
-デザインは `doci/charts.py` と同じ墨地＋ゴールド＋明朝のトーンを踏襲するが、charts.py 自体は
-改変せず、色/フォント値をここに複製して使う（chart 専用の大量の未使用CSSを引きずらないため）。
+デザインは `doci/charts.py` と同じ墨地＋ゴールド＋明朝のトーンを踏襲するが、chart 用 CSS は
+直接共有せず、必要な値だけをここに持つ（chart 専用の大量の未使用CSSを引きずらないため）。
 HTML→PNG描画は charts.py の `_chrome_shot`(headless Chromeスクリーンショット汎用ヘルパー)を
 そのまま再利用する。
 """
@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .channel import ThumbnailStyle
 from .charts import _chrome_shot
 
 # ===== デザイン値（charts.py の墨地＋ゴールド＋明朝トーンを複製。charts.py 自体は改変しない） =====
@@ -82,7 +83,19 @@ def _display_text(title: str, *, max_len: int = 24) -> str:
     return window.rstrip() + "…"
 
 
-def _html_doc(title: str, bg_image: Path | None) -> str:
+def _style_css(style: ThumbnailStyle | None) -> str:
+    style = style or ThumbnailStyle()
+    return _CSS.replace(
+        "'Hiragino Mincho ProN','Hiragino Mincho Pro',serif",
+        style.font_family,
+    ).replace("#f6efe1", style.title_color)
+
+
+def _html_doc(
+    title: str,
+    bg_image: Path | None,
+    style: ThumbnailStyle | None = None,
+) -> str:
     body_style = ""
     scrim = ""
     if bg_image is not None:
@@ -91,7 +104,9 @@ def _html_doc(title: str, bg_image: Path | None) -> str:
     text = _display_text(title)
     fs = _title_fs(text)
     return (
-        "<!doctype html><html><head><meta charset='utf-8'><style>" + _CSS + "</style></head>"
+        "<!doctype html><html><head><meta charset='utf-8'><style>"
+        + _style_css(style)
+        + "</style></head>"
         f"<body{body_style}>"
         + scrim
         + "<div class='vig'></div>"
@@ -103,12 +118,18 @@ def _html_doc(title: str, bg_image: Path | None) -> str:
 
 
 def render(
-    title: str, out_png: Path, *, bg_image: Path | None = None, width: int = 1080, height: int = 1920
+    title: str,
+    out_png: Path,
+    *,
+    bg_image: Path | None = None,
+    width: int = 1080,
+    height: int = 1920,
+    style: ThumbnailStyle | None = None,
 ) -> Path:
     """縦構図のタイトルカードを HTML→Chrome で PNG 描画して返す。"""
     out_png = Path(out_png)
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    doc = _html_doc(title, Path(bg_image) if bg_image else None)
+    doc = _html_doc(title, Path(bg_image) if bg_image else None, style)
     with tempfile.TemporaryDirectory(prefix="doci_thumb_") as td:
         hp = Path(td) / "thumbnail.html"
         hp.write_text(doc, encoding="utf-8")

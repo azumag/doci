@@ -9,6 +9,7 @@ import math
 import shutil
 import subprocess
 import sys
+import warnings
 from datetime import date as _date
 from datetime import datetime
 from pathlib import Path
@@ -47,12 +48,31 @@ def _credits(spec: ChannelSpec, corner) -> str:
     m = _re.search(r"[（(]\s*([^/／）)]+)", label)  # 「メリケンAI (冥鳴ひまり/ノーマル)」→ 冥鳴ひまり
     char = m.group(1).strip() if m else ""
     vv = f"VOICEVOX:{char}" if char else "VOICEVOX"
-    return (
-        "\n\n──────────\n"
-        "■ クレジット / Credits\n"
-        f"音声合成: {vv}（https://voicevox.hiroshiba.jp/）\n"
-        "背景・映像素材: Pexels（https://www.pexels.com/）"
-    )
+    voicevox_credit = f"音声合成: {vv}（https://voicevox.hiroshiba.jp/）"
+    asset_credit = "背景・映像素材: Pexels（https://www.pexels.com/）"
+    template = spec.style.credits.template
+    if not template:
+        return (
+            "\n\n──────────\n"
+            "■ クレジット / Credits\n"
+            f"{voicevox_credit}\n"
+            f"{asset_credit}"
+        )
+    try:
+        rendered = template.format(
+            voicevox_credit=voicevox_credit,
+            asset_credit=asset_credit,
+        )
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"invalid style.credits.template: {exc}") from exc
+    if voicevox_credit not in rendered:
+        warnings.warn(
+            "style.credits.template omitted {voicevox_credit}; required credit appended",
+            UserWarning,
+            stacklevel=2,
+        )
+        rendered = rendered.rstrip() + "\n" + voicevox_credit
+    return "\n\n" + rendered.lstrip()
 
 
 def run(
@@ -231,8 +251,9 @@ def run(
     out_mp4 = workdir / "video.mp4"
     compose.compose(
         scene_objs, tts.wav_path, tts.duration, out_mp4,
-        bgm=config.bgm_path(), segments=tts.segments,
+        bgm=channel.bgm_path(spec, corner, day), segments=tts.segments,
         width=out_w, height=out_h,
+        style=spec.style,
     )
     _log(f"動画完成: {out_mp4} ({out_mp4.stat().st_size} bytes)")
 
@@ -266,7 +287,14 @@ def run(
         else:
             bg_image = None
         thumb_vertical = workdir / "thumbnail_vertical.png"
-        thumbnail.render(script["title"], thumb_vertical, bg_image=bg_image, width=out_w, height=out_h)
+        thumbnail.render(
+            script["title"],
+            thumb_vertical,
+            bg_image=bg_image,
+            width=out_w,
+            height=out_h,
+            style=spec.style.thumbnail,
+        )
         thumb_final = workdir / "thumbnail.png"
         thumbnail.to_16x9(thumb_vertical, thumb_final)
         thumbnail_path = thumb_final
