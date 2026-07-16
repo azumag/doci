@@ -20,7 +20,7 @@ def run_claude(
     prompt: str,
     model: str,
     allowed_tools: list[str] | None = None,
-    timeout: int = 240,
+    timeout: int | None = 240,
 ) -> str:
     """claude CLI を print モードで実行し、本文(result)文字列を返す。"""
     cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json"]

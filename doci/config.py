@@ -66,6 +66,14 @@ FALLBACK_TEXT_MODEL = get("FALLBACK_TEXT_MODEL", "claude-sonnet-5")
 OPENCODE_AGENT = get("OPENCODE_AGENT", "")
 # provider/model 形式（例: opencode-go/minimax-m3）。指定時は --agent より優先。
 OPENCODE_MODEL = get("OPENCODE_MODEL", "")
+# 本文生成だけOpenCode CLIを外し、OpenCode GoのAnthropic互換APIへ直接接続する設定。
+# APIキーは環境変数を優先し、未指定なら既存のOpenCode認証ストアから読む。
+OPENCODE_GO_API_KEY = get("OPENCODE_GO_API_KEY", "")
+OPENCODE_AUTH_FILE = get(
+    "OPENCODE_AUTH_FILE", str(Path.home() / ".local" / "share" / "opencode" / "auth.json")
+)
+OPENCODE_GO_BASE_URL = get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1").rstrip("/")
+OPENCODE_GO_MAX_TOKENS = get_int("OPENCODE_GO_MAX_TOKENS", 65536)
 
 # --- 台本品質: 前段リサーチ＋後段ファクトチェック (issue #6) ---
 # SCRIPT_RESEARCH: 下書き前に claude CLI(Webツール)で題材を選び実ソースで裏取りした
@@ -87,8 +95,8 @@ CODEX_MODEL = get("CODEX_MODEL", "MiniMax-M3")
 CODEX_MINIMAX_BASE_URL = get("CODEX_MINIMAX_BASE_URL", "https://api.minimax.io/v1")
 # リサーチ/チェックは Web検索＋長尺narrationで時間がかかるため長めの上限（長尺で300sは不足）。
 SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
-# 執筆(opencode/qwen 等)専用の上限。健全な執筆は実測 ~70秒。qwen がヘッドレスで稀に
-# ハングしても 600秒待たず素早く打ち切り、リトライ/claudeフォールバックで復帰するため短め。
+# 執筆(opencode/qwen 等)専用の上限。0以下ならタイムアウトなし。長文生成を必ず待つ運用では
+# WRITE_LLM_TIMEOUT=0 を指定する。正数の場合だけ、その秒数で打ち切ってリトライへ進む。
 WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 240)
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
