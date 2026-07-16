@@ -84,6 +84,7 @@ voice = "narrator"
             spec.publish.youtube.token,
             (config.ROOT / "secrets/ideology/youtube_token.json").resolve(),
         )
+        self.assertEqual(spec.publish.youtube.privacy, "unlisted")
 
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\

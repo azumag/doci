@@ -252,12 +252,39 @@ class PublishAccountsTest(unittest.TestCase):
 
         self.assertTrue(load_mock.call_args.kwargs["interactive"])
         self.assertEqual(
+            load_mock.call_args.kwargs["scopes"], youtube.ACCOUNT_SCOPES
+        )
+        self.assertEqual(
             load_mock.call_args.kwargs["token_file"], settings.youtube.token
         )
         self.assertEqual(
             load_mock.call_args.kwargs["client_secret_file"],
             settings.youtube.client_secret,
         )
+
+    def test_youtube_whoami_cli_uses_selected_channel_paths(self) -> None:
+        settings = self._youtube_spec("alpha")
+        fake_spec = SimpleNamespace(publish=settings)
+        with (
+            patch("sys.argv", ["doci.youtube", "--whoami", "--channel", "alpha"]),
+            patch("doci.channel.load", return_value=fake_spec),
+            patch.object(
+                youtube,
+                "account_info",
+                return_value=[{"id": "UC-test", "title": "Alpha Channel"}],
+            ) as info_mock,
+            patch("builtins.print") as print_mock,
+        ):
+            youtube.main()
+
+        self.assertEqual(
+            info_mock.call_args.kwargs["token_file"], settings.youtube.token
+        )
+        self.assertEqual(
+            info_mock.call_args.kwargs["client_secret_file"],
+            settings.youtube.client_secret,
+        )
+        print_mock.assert_called_with("channel_id=UC-test title=Alpha Channel")
 
 
 if __name__ == "__main__":

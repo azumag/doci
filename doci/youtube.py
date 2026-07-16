@@ -15,6 +15,7 @@ from pathlib import Path
 from . import config
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+ACCOUNT_SCOPES = [*SCOPES, "https://www.googleapis.com/auth/youtube.readonly"]
 
 
 def _load_credentials(
@@ -22,6 +23,7 @@ def _load_credentials(
     *,
     token_file: Path | None = None,
     client_secret_file: Path | None = None,
+    scopes: list[str] | None = None,
 ):
     from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
@@ -31,9 +33,17 @@ def _load_credentials(
     client_secret_file = Path(
         client_secret_file or config.YOUTUBE_CLIENT_SECRET_FILE
     )
+    required_scopes = scopes or SCOPES
     creds = None
     if token_file.exists():
-        creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+        creds = Credentials.from_authorized_user_file(str(token_file), required_scopes)
+    if creds and not creds.has_scopes(required_scopes):
+        if not interactive:
+            raise RuntimeError(
+                "YouTube token のscopeが不足しています。"
+                "`python -m doci.youtube --auth [--channel <id>]` で再認証してください。"
+            )
+        creds = None
     if creds and creds.valid:
         return creds
     if creds and creds.expired and creds.refresh_token:
@@ -59,11 +69,38 @@ def _load_credentials(
         raise RuntimeError(
             f"OAuthクライアント秘密ファイルがありません: {client_secret_file}"
         )
-    flow = InstalledAppFlow.from_client_secrets_file(str(client_secret_file), SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(client_secret_file), required_scopes
+    )
     creds = flow.run_local_server(port=0)
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(creds.to_json(), encoding="utf-8")
     return creds
+
+
+def account_info(
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> list[dict[str, str]]:
+    """tokenが紐づくYouTubeチャンネルのIDと表示名を返す。"""
+    from googleapiclient.discovery import build
+
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ACCOUNT_SCOPES,
+    )
+    youtube = build("youtube", "v3", credentials=creds)
+    data = youtube.channels().list(part="id,snippet", mine=True).execute()
+    return [
+        {
+            "id": item.get("id", ""),
+            "title": item.get("snippet", {}).get("title", ""),
+        }
+        for item in data.get("items", [])
+    ]
 
 
 def upload(
@@ -134,6 +171,11 @@ def set_thumbnail(
 def main() -> None:
     ap = argparse.ArgumentParser(description="YouTube アップロード")
     ap.add_argument("--auth", action="store_true", help="初回OAuth同意してtokenを保存")
+    ap.add_argument(
+        "--whoami",
+        action="store_true",
+        help="tokenが紐づくYouTubeチャンネルIDと表示名を確認",
+    )
     ap.add_argument("--channel", help="channel.toml の YouTube 資格情報を使用")
     ap.add_argument("--video")
     ap.add_argument("--title", default="doci test")
@@ -154,8 +196,19 @@ def main() -> None:
             interactive=True,
             token_file=token_file,
             client_secret_file=client_secret_file,
+            scopes=ACCOUNT_SCOPES,
         )
         print(f"認証完了: {token_file}")
+        return
+    if args.whoami:
+        accounts = account_info(
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+        )
+        if not accounts:
+            raise RuntimeError("tokenに紐づくYouTubeチャンネルが見つかりません")
+        for account in accounts:
+            print(f"channel_id={account['id']} title={account['title']}")
         return
     if args.video:
         upload(
