@@ -6,7 +6,7 @@
 したがって出力は権利的にクリーンな BGM として配信に使える。
 
 使い方:
-    python tools/make_bgm.py --midi internationale.mid --out assets/bgm/internationale_piano.mp3
+    python tools/make_bgm.py --midi internationale.mid --out channels/ideology/bgm/internationale_piano.mp3
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 #!/bin/zsh
 # doci: 自動生成→アップロード（launchd から定時実行）。
 # cron は最小環境なので PATH/HOME を明示し、VOICEVOX(OrbStack) を起動してから実行する。
-# コーナーは指定せず run_daily の自動交互（capitalism/communism）に任せる。
+# 引数は run_daily へ透過する（--all-channels / --channel <id> 等）。
 
 export HOME="/Users/azumag"
 PROJ="${0:A:h:h}"
@@ -14,7 +14,13 @@ PROJ="${0:A:h:h}"
 # /opt/homebrew(外付け) は最後＝フォールバックのみ（基本使わせない）。
 export PATH="$PROJ/tools/ffbin:/Users/azumag/.nvm/versions/node/v23.10.0/bin:/Users/azumag/.local/bin:/Users/azumag/.opencode/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 
-LOG="$PROJ/output/cron.log"
+RUN_NAME="default"
+if [ "${1:-}" = "--all-channels" ]; then
+  RUN_NAME="all"
+elif [ "${1:-}" = "--channel" ] && [ -n "${2:-}" ]; then
+  RUN_NAME="${2//[^A-Za-z0-9_-]/_}"
+fi
+LOG="$PROJ/output/cron_${RUN_NAME}.log"
 PY="$PROJ/.venv-cron/bin/python"
 cd "$PROJ" || exit 1
 mkdir -p "$PROJ/output"
@@ -23,7 +29,7 @@ ts() { date "+%Y-%m-%d %H:%M:%S"; }
 echo "[$(ts)] ===== cron run start =====" >> "$LOG"
 
 # 多重起動防止（前回が走っていたらスキップ）
-LOCK="$PROJ/output/.cron_generate.lock"
+LOCK="$PROJ/output/.cron_generate_${RUN_NAME}.lock"
 if [ -e "$LOCK" ]; then
   pid=$(cat "$LOCK" 2>/dev/null)
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -47,7 +53,7 @@ if [ "$ok" != "1" ]; then
 fi
 
 # パイプライン実行（生成→YouTube限定公開アップロード→履歴記録）
-"$PY" -m doci.run_daily >> "$LOG" 2>&1
+"$PY" -m doci.run_daily "$@" >> "$LOG" 2>&1
 rc=$?
 echo "[$(ts)] ===== cron run end rc=$rc =====" >> "$LOG"
 exit $rc

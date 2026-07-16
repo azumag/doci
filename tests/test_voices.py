@@ -15,16 +15,18 @@ class VoiceConfigTest(unittest.TestCase):
     def _load_with(self, voices_json: dict, env: dict[str, str] | None = None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        cfg_dir = Path(tmp.name)
-        (cfg_dir / "voices.json").write_text(
+        root = Path(tmp.name)
+        voices_dir = root / "channels" / "ideology"
+        voices_dir.mkdir(parents=True)
+        (voices_dir / "voices.json").write_text(
             json.dumps(voices_json, ensure_ascii=False), encoding="utf-8"
         )
         env_patch = patch.dict(os.environ, env or {}, clear=True)
-        cfg_patch = patch.object(config, "CONFIG_DIR", cfg_dir)
+        root_patch = patch.object(config, "ROOT", root)
         env_patch.start()
-        cfg_patch.start()
+        root_patch.start()
         self.addCleanup(env_patch.stop)
-        self.addCleanup(cfg_patch.stop)
+        self.addCleanup(root_patch.stop)
         from doci import voices
 
         return importlib.reload(voices)

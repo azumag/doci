@@ -181,6 +181,7 @@ _TIKTOK_PUBLISH_KEYS = {"token", "privacy"}
 _INSTAGRAM_PUBLISH_KEYS = {"user_id", "access_token_env"}
 _PUBLISH_PLATFORMS = {"youtube", "tiktok", "instagram"}
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CHANNEL_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _AUDIO_SUFFIXES = {".mp3", ".ogg", ".wav", ".m4a", ".flac"}
 
 
@@ -370,7 +371,25 @@ def _publish_path(data: dict[str, Any], key: str, default: str | Path) -> Path:
     return _repo_path(value)
 
 
-def _load_publish(data: dict[str, Any]) -> PublishSpec:
+def _ideology_credential_fallback(
+    channel_id: str,
+    configured: Path,
+    legacy_value: str | Path,
+    key: str,
+) -> Path:
+    """移行前の ideology 資格情報だけを旧ルートから継続利用する。"""
+    legacy = _repo_path(legacy_value)
+    if channel_id == "ideology" and not configured.exists() and legacy.is_file():
+        warnings.warn(
+            f"using legacy {key}; run tools/migrate_channels.py --apply: {legacy}",
+            UserWarning,
+            stacklevel=3,
+        )
+        return legacy
+    return configured
+
+
+def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
     _warn_unknown(data, _PUBLISH_KEYS, "publish.")
     youtube = _publish_table(data, "youtube")
     tiktok = _publish_table(data, "tiktok")
@@ -403,16 +422,31 @@ def _load_publish(data: dict[str, Any]) -> PublishSpec:
             "publish.instagram.access_token_env must be an environment variable name"
         )
 
+    youtube_client_secret = _publish_path(
+        youtube, "client_secret", config.YOUTUBE_CLIENT_SECRET_FILE
+    )
+    youtube_token = _publish_path(youtube, "token", config.YOUTUBE_TOKEN_FILE)
+    youtube_client_secret = _ideology_credential_fallback(
+        channel_id,
+        youtube_client_secret,
+        config.YOUTUBE_CLIENT_SECRET_FILE,
+        "YouTube client secret",
+    )
+    youtube_token = _ideology_credential_fallback(
+        channel_id,
+        youtube_token,
+        config.YOUTUBE_TOKEN_FILE,
+        "YouTube token",
+    )
+
     return PublishSpec(
         platforms=tuple(platforms),
         youtube=YouTubePublishSpec(
             privacy=_string(
                 youtube, "privacy", config.YOUTUBE_PRIVACY, "publish.youtube."
             ),
-            client_secret=_publish_path(
-                youtube, "client_secret", config.YOUTUBE_CLIENT_SECRET_FILE
-            ),
-            token=_publish_path(youtube, "token", config.YOUTUBE_TOKEN_FILE),
+            client_secret=youtube_client_secret,
+            token=youtube_token,
         ),
         tiktok=TikTokPublishSpec(
             token=_publish_path(tiktok, "token", config.TIKTOK_TOKEN_FILE),
@@ -445,7 +479,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     """``channels/<id>/channel.toml`` をロードし、参照を検証する。"""
-    if not channel_id or Path(channel_id).name != channel_id:
+    if not channel_id or not _CHANNEL_ID_RE.fullmatch(channel_id):
         raise ChannelConfigError(f"invalid channel id: {channel_id!r}")
     base = (channels_dir or (config.ROOT / "channels")).resolve()
     root = (base / channel_id).resolve()
@@ -533,7 +567,7 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         rotation=list(rotation),
         voices_path=voices_path,
         style=_load_style(style, root),
-        publish=_load_publish(publish),
+        publish=_load_publish(publish, spec_id),
         pipeline=dict(pipeline),
     )
 

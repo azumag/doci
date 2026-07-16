@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "doci"
 PROMPTS = PKG / "prompts"
 ASSETS = ROOT / "assets"
-BGM_DIR = ASSETS / "bgm"
+BGM_DIR = ROOT / "channels" / "ideology" / "bgm"  # 後方互換の既定BGM
 CONFIG_DIR = ROOT / "config"
 OUTPUT = ROOT / "output"
 # codex CLI 用の隔離ホーム。ユーザーの ~/.codex には一切触れない(ChatGPTログイン破壊事故を避けるため)。
@@ -210,7 +210,7 @@ BGM_DUCK_LOOKAHEAD_MS = get_int("BGM_DUCK_LOOKAHEAD_MS", 280)
 
 
 def bgm_path() -> Path | None:
-    """assets/bgm 配下の最初の音声ファイルを返す。"""
+    """旧単一チャンネルAPI用。新経路は channel.bgm_path() を使う。"""
     if not BGM_DIR.exists():
         return None
     for ext in ("*.mp3", "*.ogg", "*.wav", "*.m4a", "*.flac"):

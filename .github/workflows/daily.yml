@@ -1,0 +1,23 @@
+name: doci daily template
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "0 0 * * *"
+
+jobs:
+  generate:
+    # VOICEVOX serviceと各チャンネルのSecretsを設定した後にtrueへ変更する雛形。
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [ideology]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - run: python -m doci.run_daily --channel "${{ matrix.channel }}"

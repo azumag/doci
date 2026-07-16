@@ -28,6 +28,12 @@ def last_corner(spec: ChannelSpec) -> str | None:
     return rows[-1].get("corner") if rows else None
 
 
+def last_run(spec: ChannelSpec) -> dict | None:
+    """チャンネルの直近実行レコードを返す。履歴なしなら None。"""
+    rows = _read_all(spec)
+    return rows[-1] if rows else None
+
+
 def recent_topics(spec: ChannelSpec, limit: int = 30) -> list[str]:
     rows = _read_all(spec)
     topics: list[str] = []
