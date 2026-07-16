@@ -153,6 +153,56 @@ voice = "narrator"
         self.assertEqual(spec.id, "sample")
         self.assertTrue(any("future_option" in str(item.message) for item in caught))
 
+    def test_loads_typed_style_settings(self) -> None:
+        root = self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[style.subtitle]
+font = "prompts/persona.md"
+fill = "#ffeeaa"
+stroke = "#112233"
+box_color = "#334455"
+box_alpha = 0.3
+position_ratio = 0.7
+[style.thumbnail]
+font_family = "serif"
+title_color = "#abcdef"
+[style.chart]
+palette = ["#111111", "#222222"]
+font = "prompts/persona.md"
+[style.video]
+pad_color = "0x123456"
+filter = "eq=saturation=0.8"
+[style.bgm]
+dir = "music"
+volume = 0.12
+rotation = "daily"
+[style.credits]
+template = "{voicevox_credit} / {asset_credit}"
+''')
+
+        spec = channel.load("sample", channels_dir=self.channels_dir)
+
+        self.assertEqual(spec.style.subtitle.font, root / "prompts" / "persona.md")
+        self.assertEqual(spec.style.subtitle.fill, "#ffeeaa")
+        self.assertEqual(spec.style.subtitle.box_alpha, 0.3)
+        self.assertEqual(spec.style.subtitle.position_ratio, 0.7)
+        self.assertEqual(spec.style.thumbnail.font_family, "serif")
+        self.assertEqual(spec.style.thumbnail.title_color, "#abcdef")
+        self.assertEqual(spec.style.chart.palette, ("#111111", "#222222"))
+        self.assertEqual(spec.style.video.pad_color, "0x123456")
+        self.assertEqual(spec.style.video.filter, "eq=saturation=0.8")
+        self.assertEqual(spec.style.bgm.dir, root / "music")
+        self.assertEqual(spec.style.bgm.volume, 0.12)
+        self.assertEqual(spec.style.bgm.rotation, "daily")
+        self.assertIn("{voicevox_credit}", spec.style.credits.template)
+
     def test_discover_and_default_channel(self) -> None:
         self.assertEqual(channel.discover(channels_dir=self.channels_dir), [])
         with self.assertRaisesRegex(channel.ChannelConfigError, "no channels"):

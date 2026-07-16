@@ -199,8 +199,12 @@ factcheck = false
                 ),
             ) as synthesize_mock,
             patch.object(run_daily.assets, "fetch_image", side_effect=fake_fetch_image),
-            patch.object(run_daily.compose, "compose", side_effect=fake_compose),
-            patch("doci.thumbnail.render", side_effect=fake_thumbnail),
+            patch.object(
+                run_daily.compose, "compose", side_effect=fake_compose
+            ) as compose_mock,
+            patch(
+                "doci.thumbnail.render", side_effect=fake_thumbnail
+            ) as thumbnail_mock,
             patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail),
         ):
             result = run_daily.run(
@@ -220,6 +224,10 @@ factcheck = false
         self.assertEqual(row["channel"], "alpha")
         self.assertEqual(generate_mock.call_args.args[:3], (spec, spec.corners["a"], "2026-07-16"))
         self.assertEqual(synthesize_mock.call_args.args[1], 41)
+        self.assertIs(compose_mock.call_args.kwargs["style"], spec.style)
+        self.assertIs(
+            thumbnail_mock.call_args.kwargs["style"], spec.style.thumbnail
+        )
         self.assertTrue(workdir.name.startswith("2026-07-16_a_"))
 
 
