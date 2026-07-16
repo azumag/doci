@@ -30,6 +30,38 @@ cp .env.example .env             # 値を埋める（MINIMAX_API_KEY 等）
 1. Google Cloud で YouTube Data API v3 を有効化し、OAuth「デスクトップ」クライアントを作成 → `client_secret.json` を置く。
 2. `python -m doci.youtube --auth` で同意 → `youtube_token.json`（refresh token）が保存される。以降は無人。
 
+チャンネル別アカウントでは、資格情報を `secrets/<channel>/` に置き、次のように認証する。
+
+```bash
+python -m doci.youtube --auth --channel ideology
+python -m doci.tiktok --auth --channel ideology
+```
+
+`secrets/` はGit管理対象外。`channel.toml` には秘密値を直接書かず、資格情報のパスか
+アクセストークンを保持する環境変数名だけを書く。
+
+```toml
+[publish]
+platforms = ["youtube"]
+
+[publish.youtube]
+privacy = "unlisted"
+client_secret = "secrets/ideology/client_secret.json"
+token = "secrets/ideology/youtube_token.json"
+
+[publish.tiktok]
+token = "secrets/ideology/tiktok_token.json"
+privacy = "SELF_ONLY"
+
+[publish.instagram]
+user_id = "123456789"
+access_token_env = "IG_TOKEN_IDEOLOGY"
+```
+
+パスはリポジトリルート相対。`[publish]` 未指定時は `.env` の従来パスへフォールバックする。
+`PUBLISH_YOUTUBE` / `PUBLISH_TIKTOK` / `PUBLISH_INSTAGRAM` の `0` は、個別設定より優先する
+全チャンネル共通の強制OFFスイッチ。実投稿前は `PUBLISH_DRY_RUN=1` で参照先を確認する。
+
 ## 使い方
 
 ```bash

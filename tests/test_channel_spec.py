@@ -203,6 +203,78 @@ template = "{voicevox_credit} / {asset_credit}"
         self.assertEqual(spec.style.bgm.rotation, "daily")
         self.assertIn("{voicevox_credit}", spec.style.credits.template)
 
+    def test_loads_channel_publish_accounts_with_repo_relative_paths(self) -> None:
+        self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish]
+platforms = ["youtube", "tiktok", "instagram"]
+[publish.youtube]
+privacy = "private"
+client_secret = "secrets/sample/client_secret.json"
+token = "secrets/sample/youtube_token.json"
+[publish.tiktok]
+token = "secrets/sample/tiktok_token.json"
+privacy = "SELF_ONLY"
+[publish.instagram]
+user_id = "123456"
+access_token_env = "IG_TOKEN_SAMPLE"
+''')
+
+        spec = channel.load("sample", channels_dir=self.channels_dir)
+
+        self.assertEqual(spec.publish.platforms, ("youtube", "tiktok", "instagram"))
+        self.assertEqual(spec.publish.youtube.privacy, "private")
+        self.assertEqual(
+            spec.publish.youtube.client_secret,
+            (config.ROOT / "secrets/sample/client_secret.json").resolve(),
+        )
+        self.assertEqual(
+            spec.publish.youtube.token,
+            (config.ROOT / "secrets/sample/youtube_token.json").resolve(),
+        )
+        self.assertEqual(
+            spec.publish.tiktok.token,
+            (config.ROOT / "secrets/sample/tiktok_token.json").resolve(),
+        )
+        self.assertEqual(spec.publish.instagram.user_id, "123456")
+        self.assertEqual(spec.publish.instagram.access_token_env, "IG_TOKEN_SAMPLE")
+
+    def test_publish_defaults_preserve_global_settings(self) -> None:
+        self._write_channel()
+
+        spec = channel.load("sample", channels_dir=self.channels_dir)
+
+        self.assertEqual(spec.publish.platforms, ("youtube", "tiktok", "instagram"))
+        self.assertEqual(spec.publish.youtube.privacy, config.YOUTUBE_PRIVACY)
+        self.assertEqual(
+            spec.publish.youtube.token,
+            (config.ROOT / config.YOUTUBE_TOKEN_FILE).resolve(),
+        )
+
+    def test_rejects_secret_value_in_instagram_env_name(self) -> None:
+        self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.instagram]
+access_token_env = "EAAB token value"
+''')
+
+        with self.assertRaisesRegex(channel.ChannelConfigError, "environment variable name"):
+            channel.load("sample", channels_dir=self.channels_dir)
+
     def test_discover_and_default_channel(self) -> None:
         self.assertEqual(channel.discover(channels_dir=self.channels_dir), [])
         with self.assertRaisesRegex(channel.ChannelConfigError, "no channels"):

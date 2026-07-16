@@ -2,6 +2,7 @@
 
 初回のみ OAuth 同意:
     python -m doci.tiktok --auth     # ブラウザで認可→token保存
+    python -m doci.tiktok --auth --channel <id>
 
 依存: 標準ライブラリのみ（urllib）。資格情報は config の TIKTOK_CLIENT_KEY/SECRET。
 
@@ -53,12 +54,14 @@ def _post_json(url: str, token: str, body: dict) -> dict:
 
 
 # ---------------- OAuth / token ----------------
-def _save_token(d: dict) -> None:
-    Path(config.TIKTOK_TOKEN_FILE).write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+def _save_token(d: dict, token_file: Path | None = None) -> None:
+    path = Path(token_file or config.TIKTOK_TOKEN_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
 
 
-def _load_token() -> dict | None:
-    p = Path(config.TIKTOK_TOKEN_FILE)
+def _load_token(token_file: Path | None = None) -> dict | None:
+    p = Path(token_file or config.TIKTOK_TOKEN_FILE)
     if not p.exists():
         return None
     try:
@@ -67,28 +70,34 @@ def _load_token() -> dict | None:
         return None
 
 
-def _exchange(fields: dict) -> dict:
+def _exchange(fields: dict, token_file: Path | None = None) -> dict:
     fields = {"client_key": config.TIKTOK_CLIENT_KEY, "client_secret": config.TIKTOK_CLIENT_SECRET, **fields}
     d = _post_form(_TOKEN, fields)
     if "access_token" not in d:
         raise TikTokError(f"トークン取得失敗: {json.dumps(d)[:300]}")
     d["expires_at"] = time.time() + int(d.get("expires_in", 0)) - 60
-    _save_token(d)
+    _save_token(d, token_file)
     return d
 
 
-def _access_token() -> str:
-    tok = _load_token()
+def _access_token(token_file: Path | None = None) -> str:
+    tok = _load_token(token_file)
     if not tok:
-        raise TikTokError("TikTok未認証です。`python -m doci.tiktok --auth` を実行してください。")
+        raise TikTokError(
+            "TikTok未認証です。"
+            "`python -m doci.tiktok --auth [--channel <id>]` を実行してください。"
+        )
     if tok.get("expires_at", 0) <= time.time():
         if not tok.get("refresh_token"):
             raise TikTokError("TikTokトークン期限切れ・refresh不可。再認証してください。")
-        tok = _exchange({"grant_type": "refresh_token", "refresh_token": tok["refresh_token"]})
+        tok = _exchange(
+            {"grant_type": "refresh_token", "refresh_token": tok["refresh_token"]},
+            token_file,
+        )
     return tok["access_token"]
 
 
-def _oauth_interactive() -> None:
+def _oauth_interactive(token_file: Path | None = None) -> None:
     import http.server
     import secrets
     import threading
@@ -137,9 +146,10 @@ def _oauth_interactive() -> None:
     if code_box.get("state") != state:
         raise TikTokError("state 不一致（CSRFの疑い）。中止します。")
     _exchange(
-        {"grant_type": "authorization_code", "code": code_box["code"], "redirect_uri": redirect}
+        {"grant_type": "authorization_code", "code": code_box["code"], "redirect_uri": redirect},
+        token_file,
     )
-    print(f"認証完了: {config.TIKTOK_TOKEN_FILE}")
+    print(f"認証完了: {Path(token_file or config.TIKTOK_TOKEN_FILE)}")
 
 
 # ---------------- 投稿 ----------------
@@ -148,9 +158,18 @@ def _caption(title: str, tags: list[str]) -> str:
     return (f"{title} {hash_part}").strip()[:2200]
 
 
-def upload(video_path: Path, title: str, description: str, tags: list[str]) -> dict:
+def upload(
+    video_path: Path,
+    title: str,
+    description: str,
+    tags: list[str],
+    *,
+    token_file: Path | None = None,
+    privacy: str | None = None,
+) -> dict:
     """Direct Post で動画を投稿。{publish_id, status} を返す。"""
-    token = _access_token()
+    token = _access_token(token_file)
+    privacy = privacy or config.TIKTOK_PRIVACY
     video_path = Path(video_path)
     size = video_path.stat().st_size
     # ≤64MBは1チャンク。超過は ~32MB 分割（各 5–64MB 制約を満たす）。
@@ -166,7 +185,7 @@ def upload(video_path: Path, title: str, description: str, tags: list[str]) -> d
         {
             "post_info": {
                 "title": _caption(title, tags),
-                "privacy_level": config.TIKTOK_PRIVACY,
+                "privacy_level": privacy,
                 "disable_comment": False,
                 "disable_duet": False,
                 "disable_stitch": False,
@@ -208,21 +227,39 @@ def upload(video_path: Path, title: str, description: str, tags: list[str]) -> d
         if status in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX", "FAILED"):
             break
         time.sleep(3)
-    print(f"tiktok: publish_id={publish_id} status={status} privacy={config.TIKTOK_PRIVACY}")
+    print(f"tiktok: publish_id={publish_id} status={status} privacy={privacy}")
     return {"publish_id": publish_id, "status": status}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="TikTok 投稿")
     ap.add_argument("--auth", action="store_true", help="初回OAuth同意してtokenを保存")
+    ap.add_argument("--channel", help="channel.toml の TikTok token を使用")
     ap.add_argument("--video")
     ap.add_argument("--title", default="doci test")
     args = ap.parse_args()
+    token_file = Path(config.TIKTOK_TOKEN_FILE)
+    privacy = config.TIKTOK_PRIVACY
+    if args.channel:
+        from . import channel
+
+        spec = channel.load(args.channel)
+        token_file = spec.publish.tiktok.token
+        privacy = spec.publish.tiktok.privacy
     if args.auth:
-        _oauth_interactive()
+        _oauth_interactive(token_file)
         return
     if args.video:
-        print(upload(Path(args.video), args.title, "", []))
+        print(
+            upload(
+                Path(args.video),
+                args.title,
+                "",
+                [],
+                token_file=token_file,
+                privacy=privacy,
+            )
+        )
 
 
 if __name__ == "__main__":
