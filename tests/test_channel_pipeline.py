@@ -125,7 +125,9 @@ voice = "voice_b"
                 history.recent_topics(alpha),
                 ["Alpha title（Alpha angle）"],
             )
+            self.assertEqual(history.recent_titles(alpha), ["Alpha title"])
             self.assertEqual(history.recent_topics(beta), ["Beta title"])
+            self.assertEqual(history.recent_titles(beta), ["Beta title"])
             self.assertNotEqual(alpha.history_file, beta.history_file)
             alpha_row = json.loads(alpha.history_file.read_text(encoding="utf-8"))
             beta_row = json.loads(beta.history_file.read_text(encoding="utf-8"))
