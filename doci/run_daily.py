@@ -177,12 +177,12 @@ def run(
             from . import chart_bg
             theme = f"{script.get('title', '')} / {script.get('description', '')}"[:180]
             try:
-                spec = chart_bg.ensure(sm["chart"], theme, workdir, si)
+                chart_spec = chart_bg.ensure(sm["chart"], theme, workdir, si)
             except Exception as e:
                 _log(f"図表背景の選定/取得に失敗（背景なしで継続）: {e}")
-                spec = sm["chart"]
+                chart_spec = sm["chart"]
             scene_objs.append(compose.Scene(path=workdir, is_video=False,
-                                            caption=sm.get("caption", ""), chart_spec=spec))
+                                            caption=sm.get("caption", ""), chart_spec=chart_spec))
             _log(f"図表シーン (scene{si}, {sm['chart'].get('type')}) ← 背景付き・尺合わせ描画")
             continue
         img = workdir / f"scene_{si:02d}_{k}.png"

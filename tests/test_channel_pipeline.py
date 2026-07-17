@@ -234,6 +234,53 @@ factcheck = false
         self.assertIs(publish_mock.call_args.kwargs["spec"], spec)
         self.assertTrue(workdir.name.startswith("2026-07-16_a_"))
 
+    def test_run_daily_keeps_channel_spec_style_with_chart_scene(self) -> None:
+        # 図表シーンを含む場合、run() 内のローカル変数 spec (chart_bg.ensure の戻り値)
+        # が run() 引数の spec: ChannelSpec を上書きしないことを確認する回帰テスト。
+        spec = self._make_spec("alpha")
+        chart_payload = {"type": "bar", "title": "T"}
+        script = {
+            "title": "Title",
+            "description": "Description",
+            "tags": [],
+            "narration": "本題です。",
+            "scenes": [{"caption": "Scene", "chart": chart_payload}],
+        }
+
+        def fake_compose(_scenes, _wav, _duration, out_path, **_kwargs):
+            Path(out_path).write_bytes(b"video")
+            return Path(out_path)
+
+        def fake_thumbnail(_title, out_path, **_kwargs):
+            Path(out_path).write_bytes(b"thumbnail")
+            return Path(out_path)
+
+        with (
+            patch.object(config, "OUTPUT", self.output_dir),
+            patch.object(ai_text, "generate", return_value=script),
+            patch.object(
+                run_daily.voicevox,
+                "synthesize",
+                return_value=voicevox.TtsResult(
+                    wav_path=self.root / "fake.wav",
+                    duration=10.0,
+                    segments=[],
+                ),
+            ),
+            patch("doci.chart_bg.ensure", return_value=chart_payload),
+            patch.object(
+                run_daily.compose, "compose", side_effect=fake_compose
+            ) as compose_mock,
+            patch("doci.thumbnail.render", side_effect=fake_thumbnail) as thumbnail_mock,
+            patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail),
+            patch("doci.publish.publish", return_value=[]),
+        ):
+            run_daily.run(spec, "2026-07-16", "a", do_upload=True, video_scenes=0)
+
+        self.assertIs(compose_mock.call_args.kwargs["style"], spec.style)
+        self.assertIs(thumbnail_mock.call_args.kwargs["style"], spec.style.thumbnail)
+        self.assertIs(compose_mock.call_args.args[0][0].chart_spec, chart_payload)
+
 
 if __name__ == "__main__":
     unittest.main()
