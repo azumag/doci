@@ -307,6 +307,82 @@ def _probe_dur(path: Path) -> float:
         return 0.0
 
 
+def _render_chart_fallback_png(
+    spec: dict,
+    out_png: Path,
+    width: int,
+    height: int,
+    style: StyleSpec,
+) -> Path:
+    """Chrome/CDPを使えない時の最終手段として、Pillowだけで可読図表を描く。"""
+    from PIL import Image, ImageDraw, ImageFont
+
+    def font(size: int):
+        candidates = ([str(style.chart.font)] if style.chart.font else []) + JP_FONT_CANDIDATES
+        for candidate in candidates:
+            if candidate and Path(candidate).exists():
+                try:
+                    return ImageFont.truetype(candidate, size)
+                except OSError:
+                    continue
+        return ImageFont.load_default()
+
+    def chunks(value: object, size: int) -> list[str]:
+        text = str(value or "").strip()
+        return [text[i:i + size] for i in range(0, len(text), size)] or [""]
+
+    image = Image.new("RGB", (width, height), style.video.pad_color.replace("0x", "#"))
+    draw = ImageDraw.Draw(image)
+    margin = max(36, width // 18)
+    title_font = font(max(42, width // 18))
+    body_font = font(max(30, width // 27))
+    value_font = font(max(34, width // 23))
+    source_font = font(max(22, width // 38))
+    accent = style.chart.palette[0] if style.chart.palette else "#39c6ff"
+    y = margin
+    for line in chunks(spec.get("title", "データ"), 17):
+        draw.text((margin, y), line, font=title_font, fill="#ffffff")
+        y += int(title_font.size * 1.25)
+    y += max(24, height // 45)
+
+    rows = spec.get("data") or spec.get("items") or spec.get("events") or []
+    rows = rows[:6]
+    available = max(1, height - y - max(120, height // 9))
+    row_height = max(100, available // max(1, len(rows)))
+    for row in rows:
+        draw.rounded_rectangle(
+            (margin, y, width - margin, min(height - margin, y + row_height - 16)),
+            radius=18,
+            fill="#162332",
+            outline=accent,
+            width=3,
+        )
+        label = row.get("label", "") if isinstance(row, dict) else str(row)
+        value = ""
+        if isinstance(row, dict):
+            value = row.get("display") or row.get("value") or row.get("year") or ""
+        draw.text((margin + 24, y + 16), str(label), font=body_font, fill="#dcecff")
+        value_lines = chunks(value, 22)
+        value_y = y + 16 + int(body_font.size * 1.2)
+        for line in value_lines[:2]:
+            draw.text((margin + 24, value_y), line, font=value_font, fill=accent)
+            value_y += int(value_font.size * 1.15)
+        y += row_height
+
+    source = spec.get("source", "")
+    if source:
+        source_y = height - margin - int(source_font.size * 1.3)
+        draw.text(
+            (margin, source_y),
+            f"出典: {str(source)[:42]}",
+            font=source_font,
+            fill="#aebdca",
+        )
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    image.save(out_png)
+    return out_png
+
+
 def _build_scene_clip(
     scene: Scene,
     dur: float,
@@ -333,26 +409,59 @@ def _build_scene_clip(
         lead = getattr(charts, "_VID_LEAD", 0.6)
         adur = max(1.0, dur - lead)
         anim_path = tmp / f"chart_{idx:02d}.mp4"
-        if spec.get("type") == "timeline" and spec.get("_bgs"):
-            from . import chart_seq
-            anim = chart_seq.render(
-                spec,
-                anim_path,
-                duration=adur,
-                width=W,
-                height=H,
-                style=style.chart,
+        try:
+            if spec.get("type") == "timeline" and spec.get("_bgs"):
+                from . import chart_seq
+                anim = chart_seq.render(
+                    spec,
+                    anim_path,
+                    duration=adur,
+                    width=W,
+                    height=H,
+                    style=style.chart,
+                )
+            else:
+                anim = charts.render_chart_video(
+                    spec,
+                    anim_path,
+                    duration=adur,
+                    width=W,
+                    height=H,
+                    bg=spec.get("_bg"),
+                    style=style.chart,
+                )
+        except Exception as exc:  # noqa: BLE001 - CDP停止時も静止図表で動画を完成させる
+            static_path = tmp / f"chart_{idx:02d}.png"
+            print(
+                f"[doci] 図表アニメ生成失敗→静止図表へフォールバック: {str(exc)[:180]}",
+                flush=True,
             )
-        else:
-            anim = charts.render_chart_video(
-                spec,
-                anim_path,
-                duration=adur,
-                width=W,
-                height=H,
-                bg=spec.get("_bg"),
-                style=style.chart,
+            try:
+                charts.render_chart(
+                    spec,
+                    static_path,
+                    width=W,
+                    height=H,
+                    style=style.chart,
+                )
+            except Exception as static_exc:  # noqa: BLE001 - Chrome完全停止時
+                print(
+                    "[doci] Chrome静止図表も失敗→Pillow図表へフォールバック: "
+                    f"{str(static_exc)[:180]}",
+                    flush=True,
+                )
+                _render_chart_fallback_png(spec, static_path, W, H, style)
+            vf = (
+                f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color},"
+                f"fps={fps},setsar=1,format=yuv420p"
             )
+            cmd = [
+                "ffmpeg", "-y", "-loop", "1", "-i", str(static_path),
+                "-t", f"{dur}", "-vf", vf, *tail,
+            ]
+            _run(cmd)
+            return out
         vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color},"
               f"fps={fps},setsar=1,format=yuv420p,"

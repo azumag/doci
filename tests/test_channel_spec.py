@@ -86,6 +86,33 @@ voice = "narrator"
         )
         self.assertEqual(spec.publish.youtube.privacy, "public")
 
+    def test_reference_youtube_growth_matches_channel_theme(self) -> None:
+        spec = channel.load("youtube-growth")
+
+        self.assertEqual(spec.name, "YouTube攻略Ch")
+        self.assertEqual(spec.rotation, ["shorts", "video", "analytics"])
+        self.assertEqual(
+            {corner.label for corner in spec.corners.values()},
+            {"ショート攻略", "通常動画攻略", "分析・改善"},
+        )
+        self.assertTrue(
+            all(
+                corner.voice_key == "growth_advisor"
+                for corner in spec.corners.values()
+            )
+        )
+        self.assertEqual(spec.voice_for("shorts").speaker, 13)
+        self.assertEqual(spec.style.bgm.dir, spec.root / "bgm")
+        self.assertEqual(spec.publish.platforms, ("youtube",))
+        self.assertEqual(spec.publish.youtube.privacy, "unlisted")
+        self.assertEqual(
+            spec.publish.youtube.token,
+            (config.ROOT / "secrets/youtube-growth/youtube_token.json").resolve(),
+        )
+        self.assertTrue(spec.pipeline_get("research"))
+        self.assertTrue(spec.pipeline_get("factcheck"))
+        self.assertTrue(spec.pipeline_get("plan"))
+
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\
 [channel]

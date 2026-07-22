@@ -84,15 +84,22 @@ access_token_env = "IG_TOKEN_IDEOLOGY"
 
 ## 使い方
 
+現在のチャンネル:
+
+| ID | 名前 | 内容 | YouTube公開設定 |
+|---|---|---|---|
+| `ideology` | doci（ソ連/アメリカ） | 共産主義・資本主義の小噺 | public |
+| `youtube-growth` | YouTube攻略Ch | ショート・通常動画・分析改善 | unlisted |
+
 ```bash
 # 1本だけ生成（アップロードしない・動作確認）
-python -m doci.run_daily --no-upload
+python -m doci.run_daily --channel ideology --no-upload
 
 # コーナー指定 / 日付指定
-python -m doci.run_daily --corner communism --no-upload
+python -m doci.run_daily --channel ideology --corner communism --no-upload
 
-# 生成＋unlistedでアップロード（前回と交互にコーナー選択）
-python -m doci.run_daily
+# YouTube攻略Chを生成（アップロードしない）
+python -m doci.run_daily --channel youtube-growth --no-upload
 
 # チャンネル指定 / 全チャンネル逐次 / 一覧
 python -m doci.run_daily --channel ideology --no-upload

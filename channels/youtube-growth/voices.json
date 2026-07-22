@@ -1,0 +1,12 @@
+{
+  "growth_advisor": {
+    "voicevox_speaker": 13,
+    "label": "成長アドバイザー (青山龍星/ノーマル)",
+    "speed": 1.12,
+    "pitch": -0.01,
+    "intonation": 1.05,
+    "intonation_vary": true,
+    "volume": 1.0,
+    "note": "YouTube動画・ショートの改善を、落ち着きと説得力を保ちながらテンポよく伝える。"
+  }
+}

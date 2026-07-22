@@ -7,8 +7,11 @@ claude CLI の Web ツール、または codex exec(+MiniMax-M3)のシェル経�
 """
 from __future__ import annotations
 
+import json
+from urllib.parse import urlparse
+
 from . import config, llm
-from .channel import CornerSpec
+from .channel import ChannelSpec, CornerSpec
 
 # バックエンドごとの「Webで確認する」手順の言い回し。claude は従来どおり WebSearch/WebFetch
 # ツールを使わせる。codex はツールを持たないためシェルの curl 等での取得を明示的に指示する。
@@ -24,18 +27,41 @@ _PROMPT = """\
 あなたは日本語ショート動画の構成リサーチャーです。次のコーナー向けに、きょう扱う題材を1つ選び、Web検索で裏取りした具体的事実を集めてください。
 
 コーナー: {label}
+チャンネル固有の方針:
+{channel_guidance}
 最近すでに扱った題材（重複を避ける）: {past}
+YouTube Data APIで取得した公開動画候補（YouTube系チャンネルの場合のみ）:
+{video_candidates}
 
 やること:
 1. このコーナーに合う、具体的で語り甲斐のある題材を1つ選ぶ（抽象概念そのものでなく、出来事・人物・制度・数字に落ちるもの）。
 2. {web_howto}台本に織り込める「検証済みの具体事実」を5〜7個集める。
    - 人名・年号・数値・定義・固有の出来事・印象的な具体例を優先。
    - 不確かなものは入れない。各事実に出典URLを付ける。
+   - 公式ドキュメント、運営主体の発表、論文、公的統計などの一次資料を最優先する。
+     一次資料で確認できる内容を、まとめブログやSEO記事だけで裏付けたことにしない。
+   - プラットフォームの推薦ロジック、アルゴリズム内部、万能な成功基準、
+     「○%を超えれば拡散される」のような数値閾値は、公式の一次資料に明記されていない限り採用しない。
+{video_case_study_rule}
 {extra_rules}
 出力は **有効な JSON オブジェクトのみ**（前後に説明やコードフェンスを付けない）。文字列内の引用符・改行は必ずエスケープし、各 claim は1文に収める:
 {{"topic": "きょうの題材（短い日本語）",
   "angle": "視聴者がハッとする切り口（1文）",
-  "facts": [{{"claim": "検証済みの具体事実（日本語・1文）", "source_url": "...", "source_title": "..."}}]}}
+  "facts": [{{"claim": "検証済みの具体事実（日本語・1文）", "source_url": "...", "source_title": "..."}}],
+  "examples": [{{"title": "公開動画のタイトル", "channel": "チャンネル名", "url": "YouTube動画URL", "published_at": "公開日（確認できる場合）", "observed": "冒頭・構成・見せ方など公開画面から直接観察できたこと（日本語・1文）"}}]}}
+"""
+
+_YOUTUBE_CASE_STUDY_RULE = """\
+3. 「YouTubeの伸ばし方」を実際に解説している公開YouTube動画・運営者から、
+   今回の題材を扱う動画を2〜3本調べ、比較事例として examples に入れる。
+   - 検索結果の断片だけでなく、実際の動画ページ、説明欄、字幕など確認できた公開情報に基づく。
+     候補の description はYouTube Data APIで取得した動画の全文説明欄、transcript_excerpt は公開字幕である。
+   - タイトル、チャンネル、動画URL、公開日（確認できる場合）に加え、主張の共通点、
+     冒頭の見せ方、説明の順序、具体例の出し方など、公開内容から直接観察できる点を記録する。
+   - view_count と like_count は調査時点で変動する参考値にすぎない。数字だけから成功理由や推薦アルゴリズムの因果を断定しない。
+   - 公開動画は構成の事例であり、プラットフォーム仕様の根拠には使わない。仕様は上記の一次資料で裏付ける。
+   - 上に候補がある場合は実在確認済みの入口として使ってよいが、タイトルや説明文だけで内容を推測せず、
+     実際の動画内容を確認できたものだけを examples に採用する。
 """
 
 # codex は内部知識だけで済ませがちなため、実際に取得したページに基づけと念押しする一文を足す。
@@ -50,7 +76,7 @@ def _log(msg: str) -> None:
     print(f"[doci] {msg}", flush=True)
 
 
-def _attempt(prompt: str) -> dict:
+def _attempt(prompt: str, *, require_youtube_examples: bool = False) -> dict:
     backend = config.RESEARCH_BACKEND
     if backend == "codex":
         raw = llm.run_codex(
@@ -74,23 +100,132 @@ def _attempt(prompt: str) -> dict:
     data["facts"] = [f for f in facts if isinstance(f, dict) and f.get("claim") and f.get("source_url")]
     if not data["facts"]:
         raise ValueError("出典付きの事実がありませんでした")
+    examples = data.get("examples", [])
+    if not isinstance(examples, list):
+        examples = []
+    rejected_observations = ("タイトルから", "タイトルで", "検索結果", "推測")
+    data["examples"] = [
+        example
+        for example in examples
+        if isinstance(example, dict)
+        and example.get("title")
+        and example.get("channel")
+        and "確認できず" not in str(example.get("channel"))
+        and example.get("observed")
+        and not any(
+            marker in str(example.get("observed")) for marker in rejected_observations
+        )
+        and _is_youtube_video_url(str(example.get("url", "")))
+    ]
+    if require_youtube_examples and len(data["examples"]) < 2:
+        raise ValueError(
+            "実際の内容を確認できたYouTube解説動画の比較事例が2本未満です"
+        )
+    if require_youtube_examples:
+        data["facts"] = [
+            fact
+            for fact in data["facts"]
+            if _is_official_youtube_source(str(fact.get("source_url", "")))
+        ]
+        if len(data["facts"]) < 3:
+            raise ValueError("YouTube公式一次資料に基づく事実が3件未満です")
     return data
 
 
-def web_research(corner: CornerSpec, past_topics: list[str]) -> dict | None:
+def _is_youtube_video_url(url: str) -> bool:
+    """公開事例には YouTube の動画URLだけを残す。"""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def _is_official_youtube_source(url: str) -> bool:
+    """YouTubeの仕様根拠として採用できる公式ドメインだけを判定する。"""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    return (
+        host == "blog.youtube"
+        or host.endswith(".blog.youtube")
+        or (host == "support.google.com" and parsed.path.startswith("/youtube/"))
+    )
+
+
+def _needs_youtube_case_studies(channel_guidance: str) -> bool:
+    guidance = channel_guidance.casefold()
+    return "youtube" in guidance or "ショート" in channel_guidance
+
+
+def _youtube_video_candidates(
+    spec: ChannelSpec | None,
+    corner: CornerSpec,
+    enabled: bool,
+) -> list[dict[str, str]]:
+    if not enabled or spec is None:
+        return []
+    try:
+        from . import youtube
+
+        candidates = youtube.search_public_videos(
+            f"YouTube {corner.label} 伸ばし方",
+            token_file=spec.publish.youtube.token,
+            client_secret_file=spec.publish.youtube.client_secret,
+        )
+        enriched = youtube.add_public_transcripts(candidates)
+        transcript_count = sum(bool(row.get("transcript_excerpt")) for row in enriched)
+        _log(
+            f"YouTube公開動画候補 {len(enriched)}本 / 公開字幕取得 {transcript_count}本"
+        )
+        return enriched
+    except Exception as exc:  # noqa: BLE001 - Web検索へフォールバックできる補助入力
+        _log(f"YouTube公開動画候補のAPI取得失敗→Web検索で継続: {str(exc)[:160]}")
+        return []
+
+
+def web_research(
+    corner: CornerSpec,
+    past_topics: list[str],
+    spec: ChannelSpec | None = None,
+) -> dict | None:
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
     backend = config.RESEARCH_BACKEND
+    guidance_parts = []
+    for path in (corner.persona_path, corner.corner_path):
+        try:
+            guidance_parts.append(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    channel_guidance = "\n\n".join(guidance_parts) or "（追加方針なし）"
+    needs_youtube_examples = _needs_youtube_case_studies(channel_guidance)
+    video_candidates = _youtube_video_candidates(
+        spec, corner, needs_youtube_examples
+    )
     prompt = _PROMPT.format(
         label=corner.label,
+        channel_guidance=channel_guidance,
         past=past,
+        video_candidates=(
+            json.dumps(video_candidates, ensure_ascii=False, indent=2)
+            if video_candidates
+            else "（候補なし。Web検索で探す）"
+        ),
         web_howto=_WEB_HOWTO.get(backend, _WEB_HOWTO["claude"]),
+        video_case_study_rule=(
+            _YOUTUBE_CASE_STUDY_RULE if needs_youtube_examples else ""
+        ),
         extra_rules=_EXTRA_RULES.get(backend, _EXTRA_RULES["claude"]),
     )
     last_err: Exception | None = None
     for attempt in range(1, config.SCRIPT_RESEARCH_RETRIES + 1):
         try:
-            return _attempt(prompt)
+            return _attempt(
+                prompt, require_youtube_examples=needs_youtube_examples
+            )
         except (ValueError, RuntimeError) as e:  # JSON不正/不十分/CLI失敗を再試行
             last_err = e
             if attempt < config.SCRIPT_RESEARCH_RETRIES:
@@ -113,4 +248,19 @@ def brief_for_prompt(research: dict) -> str:
     )
     for f in research.get("facts", []):
         lines.append(f"- {f.get('claim', '')}")
+    examples = research.get("examples", [])
+    if examples:
+        lines.append(
+            "\n## 公開YouTube動画の比較事例（公開画面から観察した構成例。"
+            "仕様の根拠や成功原因の証明ではない）"
+        )
+        for example in examples:
+            details = [
+                str(example.get("title", "")),
+                str(example.get("channel", "")),
+                str(example.get("url", "")),
+            ]
+            if example.get("published_at"):
+                details.append(str(example["published_at"]))
+            lines.append(f"- {' / '.join(part for part in details if part)}: {example.get('observed', '')}")
     return "\n".join(lines)

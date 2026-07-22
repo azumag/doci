@@ -187,6 +187,52 @@ class StyleSystemTest(unittest.TestCase):
         self.assertIn("eq=saturation=0.8", filter_graph)
         self.assertIn("volume=0.07", filter_graph)
 
+    def test_chart_animation_failure_falls_back_to_static_chart(self) -> None:
+        scene = compose.Scene(
+            path=self.root / "unused.png",
+            is_video=False,
+            chart_spec={"type": "bar", "title": "比較", "data": []},
+        )
+        commands: list[list[str]] = []
+        with (
+            patch("doci.charts.render_chart_video", side_effect=RuntimeError("CDP pipe closed")),
+            patch("doci.charts.render_chart", return_value=self.root / "chart_00.png") as static_mock,
+            patch.object(compose, "_run", side_effect=lambda cmd, **_kwargs: commands.append(cmd)),
+        ):
+            out = compose._build_scene_clip(
+                scene, 2.0, 0, self.root, 400, 800, StyleSpec()
+            )
+
+        static_mock.assert_called_once()
+        self.assertEqual(out, self.root / "scene_00.mp4")
+        self.assertIn("-loop", commands[0])
+
+    def test_chart_chrome_failure_falls_back_to_pillow_png(self) -> None:
+        scene = compose.Scene(
+            path=self.root / "unused.png",
+            is_video=False,
+            chart_spec={
+                "type": "timeline",
+                "title": "改善の順序",
+                "events": [{"year": "1", "label": "指標を見る"}],
+                "source": "YouTube公式ヘルプ",
+            },
+        )
+        commands: list[list[str]] = []
+        with (
+            patch("doci.charts.render_chart_video", side_effect=RuntimeError("CDP pipe closed")),
+            patch("doci.charts.render_chart", side_effect=RuntimeError("Chrome failed")),
+            patch.object(compose, "_run", side_effect=lambda cmd, **_kwargs: commands.append(cmd)),
+        ):
+            compose._build_scene_clip(
+                scene, 2.0, 0, self.root, 400, 800, StyleSpec()
+            )
+
+        fallback = self.root / "chart_00.png"
+        self.assertTrue(fallback.exists())
+        self.assertGreater(fallback.stat().st_size, 0)
+        self.assertIn(str(fallback), commands[0])
+
     def test_credit_template_cannot_remove_voicevox_credit(self) -> None:
         spec = self._spec(
             StyleSpec(credits=CreditsStyle(template="Credits\n{asset_credit}"))

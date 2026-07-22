@@ -95,5 +95,34 @@ class MakePlanCodexBackendTest(unittest.TestCase):
         self.assertEqual(run_codex_mock.call_count, 2)
 
 
+class MakePlanOpenCodeGoBackendTest(unittest.TestCase):
+    def test_opencode_go_model_uses_direct_api_without_cli_state(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "テスト題材",
+                "beats": [
+                    {"role": "起", "gist": "a"},
+                    {"role": "承", "gist": "b"},
+                    {"role": "転", "gist": "c"},
+                    {"role": "結", "gist": "d"},
+                ],
+                "charts": [],
+            }
+        )
+        with (
+            mock.patch.object(config, "PLAN_BACKEND", "opencode"),
+            mock.patch.object(config, "PLAN_MODEL", "opencode-go/minimax-m3"),
+            mock.patch.object(
+                plan.ai_text, "_run_opencode_go", return_value=raw
+            ) as direct_mock,
+            mock.patch.object(plan.ai_text, "_run_opencode") as cli_mock,
+        ):
+            result = plan.make_plan(_CORNER, None)
+
+        direct_mock.assert_called_once()
+        cli_mock.assert_not_called()
+        self.assertEqual(result["topic"], "テスト題材")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
+import time
+from urllib.parse import parse_qs, urlparse
 
 from . import config
 
@@ -127,6 +130,149 @@ def account_info(
         }
         for item in data.get("items", [])
     ]
+
+
+def search_public_videos(
+    query: str,
+    *,
+    max_results: int = 6,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> list[dict[str, str]]:
+    """YouTube Data APIで公開動画の調査候補を取得する（アップロード操作なし）。"""
+    from googleapiclient.discovery import build
+
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ACCOUNT_SCOPES,
+    )
+    service = build("youtube", "v3", credentials=creds)
+    data = (
+        service.search()
+        .list(
+            part="snippet",
+            q=query,
+            type="video",
+            order="relevance",
+            relevanceLanguage="ja",
+            safeSearch="moderate",
+            maxResults=max(1, min(max_results, 25)),
+        )
+        .execute()
+    )
+    results: list[dict[str, str]] = []
+    video_ids: list[str] = []
+    for item in data.get("items", []):
+        video_id = item.get("id", {}).get("videoId", "")
+        snippet = item.get("snippet", {})
+        if not video_id or not snippet.get("title"):
+            continue
+        video_ids.append(video_id)
+        results.append(
+            {
+                "video_id": video_id,
+                "title": snippet["title"],
+                "channel": snippet.get("channelTitle", ""),
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "published_at": snippet.get("publishedAt", ""),
+                "description": snippet.get("description", ""),
+            }
+        )
+    if video_ids:
+        details = (
+            service.videos()
+            .list(
+                part="snippet,contentDetails,statistics",
+                id=",".join(video_ids),
+            )
+            .execute()
+        )
+        by_id = {item.get("id", ""): item for item in details.get("items", [])}
+        for result in results:
+            detail = by_id.get(result["video_id"], {})
+            snippet = detail.get("snippet", {})
+            statistics = detail.get("statistics", {})
+            content = detail.get("contentDetails", {})
+            result["description"] = snippet.get(
+                "description", result.get("description", "")
+            )
+            result["duration"] = str(content.get("duration", ""))
+            result["view_count"] = str(statistics.get("viewCount", ""))
+            result["like_count"] = str(statistics.get("likeCount", ""))
+    return results
+
+
+def _video_id(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be":
+        return parsed.path.strip("/").split("/", 1)[0]
+    if host == "youtube.com" or host.endswith(".youtube.com"):
+        if parsed.path == "/watch":
+            return parse_qs(parsed.query).get("v", [""])[0]
+        match = re.match(r"^/(?:shorts|embed)/([^/?]+)", parsed.path)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def fetch_public_transcript(
+    video_url: str,
+    *,
+    max_chars: int = 6000,
+    cache_dir: Path | None = None,
+) -> str:
+    """公開動画ページに埋め込まれた字幕トラックから日本語字幕を取得する。"""
+    from youtube_transcript_api import YouTubeTranscriptApi
+
+    video_id = _video_id(video_url)
+    if not video_id:
+        raise ValueError(f"YouTube動画URLではありません: {video_url}")
+    cache_root = Path(cache_dir or (config.OUTPUT / ".cache/youtube-transcripts"))
+    cache_path = cache_root / f"{video_id}.txt"
+    try:
+        cached = cache_path.read_text(encoding="utf-8")
+    except OSError:
+        cached = ""
+    if cached:
+        return cached[:max_chars]
+    rows = YouTubeTranscriptApi().fetch(video_id, languages=["ja"])
+    fragments = [
+        str(row.text).replace("\n", " ").strip()
+        for row in rows
+        if str(row.text).strip()
+    ]
+    transcript = re.sub(r"\s+", " ", " ".join(fragments)).strip()
+    if transcript:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(transcript, encoding="utf-8")
+    return transcript[:max_chars]
+
+
+def add_public_transcripts(
+    videos: list[dict[str, str]], *, limit: int = 3
+) -> list[dict[str, str]]:
+    """検索候補の先頭から公開字幕を付加する。字幕なし・取得失敗は候補として残す。"""
+    enriched: list[dict[str, str]] = []
+    for index, video in enumerate(videos):
+        item = dict(video)
+        if index < limit:
+            transcript = ""
+            for attempt in range(2):
+                try:
+                    transcript = fetch_public_transcript(
+                        item.get("url", ""), max_chars=2500
+                    )
+                    break
+                except Exception:  # noqa: BLE001 - 字幕なし/地域制限でも候補検索は継続
+                    if attempt == 0:
+                        time.sleep(1.0)
+            if transcript:
+                item["transcript_excerpt"] = transcript
+        enriched.append(item)
+    return enriched
 
 
 def upload(
