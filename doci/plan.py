@@ -71,6 +71,8 @@ def make_plan(corner: CornerSpec, research: dict | None) -> dict | None:
                 # Web取得は不要なタスクなので fetch ガードは無効化(min_web_fetches=0)。
                 # プランは chart_bg より出力が大きいため timeout は長めに取る。
                 raw = llm.run_codex(prompt, config.CODEX_MODEL, timeout=240, min_web_fetches=0)
+            elif config.PLAN_MODEL.startswith("opencode-go/"):
+                raw = ai_text._run_opencode_go(prompt, config.PLAN_MODEL)
             else:
                 raw = ai_text._run_opencode(prompt, config.PLAN_MODEL, "")
             data = llm.extract_json(raw)

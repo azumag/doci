@@ -52,7 +52,7 @@ sandbox_mode = "read-only"
 [model_providers.minimax]
 name = "MiniMax"
 base_url = "{base_url}"
-experimental_bearer_token = "{api_key}"
+env_http_headers = {{ Authorization = "DOCI_MINIMAX_AUTHORIZATION" }}
 wire_api = "responses"
 """
 
@@ -72,7 +72,6 @@ def _ensure_codex_home(model: str) -> Path:
         _CODEX_CONFIG_TOML.format(
             model=model,
             base_url=config.CODEX_MINIMAX_BASE_URL,
-            api_key=config.MINIMAX_API_KEY,
         ),
         encoding="utf-8",
     )
@@ -133,7 +132,11 @@ def run_codex(prompt: str, model: str, timeout: int = 600, min_web_fetches: int 
         model,
         "-",
     ]
-    env = {**os.environ, "CODEX_HOME": str(home)}
+    env = {
+        **os.environ,
+        "CODEX_HOME": str(home),
+        "DOCI_MINIMAX_AUTHORIZATION": f"Bearer {config.MINIMAX_API_KEY}",
+    }
     proc = subprocess.run(
         cmd,
         input=prompt,

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from doci.llm import _parse_codex_events
+from doci import config
+from doci.llm import _ensure_codex_home, _parse_codex_events
 
 
 def _line(obj: dict) -> str:
@@ -115,6 +119,31 @@ class ParseCodexEventsTest(unittest.TestCase):
         message, fetch_count = _parse_codex_events(stdout)
         self.assertEqual(message, "回答")
         self.assertEqual(fetch_count, 0)
+
+
+class CodexProviderConfigTest(unittest.TestCase):
+    def test_minimax_key_is_read_from_environment_not_written_to_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp)
+            secret = "test-secret-that-must-not-be-written"
+            with (
+                mock.patch.object(config, "CODEX_HOME", codex_home),
+                mock.patch.object(config, "MINIMAX_API_KEY", secret),
+                mock.patch.object(
+                    config,
+                    "CODEX_MINIMAX_BASE_URL",
+                    "https://api.minimax.example/v1",
+                ),
+            ):
+                _ensure_codex_home("MiniMax-M3")
+
+            generated = (codex_home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn(
+                'env_http_headers = { Authorization = "DOCI_MINIMAX_AUTHORIZATION" }',
+                generated,
+            )
+            self.assertNotIn("experimental_bearer_token", generated)
+            self.assertNotIn(secret, generated)
 
 
 if __name__ == "__main__":

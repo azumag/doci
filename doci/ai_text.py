@@ -320,7 +320,7 @@ def generate(
 
         _log(f"前段リサーチ ({config.RESEARCH_BACKEND}+Web)…")
         try:
-            research = research_mod.web_research(corner, past_topics)
+            research = research_mod.web_research(corner, past_topics, spec)
             if research:
                 _log(f"題材: {research.get('topic', '')} / 裏取り事実 {len(research.get('facts', []))}件")
         except Exception as e:  # noqa: BLE001
