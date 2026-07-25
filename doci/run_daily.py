@@ -39,6 +39,39 @@ def _log(msg: str) -> None:
     print(f"[doci] {msg}", flush=True)
 
 
+def _finalize_performance_application(
+    spec: ChannelSpec,
+    corner_key: str,
+    decision_id: str,
+    application_id: str | None,
+    video_id: str | None,
+    reservation_state: dict,
+) -> str | None:
+    if not application_id:
+        return None
+    if video_id:
+        # 外部投稿済みの事実を、失敗し得る履歴書込みより先に立てる。
+        # 書込み失敗時にapplicationをcancelして同じ仮説を再投稿しない。
+        reservation_state["external_published"] = True
+        history.apply_performance_decision(
+            spec,
+            corner_key,
+            decision_id,
+            application_id,
+            video_id,
+        )
+        return application_id
+    history.cancel_performance_decision(
+        spec,
+        corner_key,
+        decision_id,
+        application_id,
+        "YouTube投稿が成功しなかったため仮説を未消費に戻す",
+    )
+    reservation_state.pop("performance_application_id", None)
+    return None
+
+
 def _credits(spec: ChannelSpec, corner) -> str:
     """概要欄に付ける素材クレジット。VOICEVOX はキャラ名込みで表記必須（利用規約）。
     Pexels は必須ではないが明記する。"""
@@ -101,6 +134,47 @@ def _run_once(
     )
 
     # 1) 台本
+    performance_decision = None
+    performance_application_id: str | None = None
+    if spec.pipeline_get("performance_feedback", False):
+        try:
+            from . import performance
+
+            performance_decision = performance.refresh(spec, corner_key=corner.key)
+            if performance_decision["status"] == "active" and do_upload:
+                performance_application_id = history.reserve_performance_decision(
+                    spec,
+                    corner.key,
+                    performance_decision["decision_id"],
+                )
+                if performance_application_id:
+                    reservation_state.update(
+                        {
+                            "performance_spec": spec,
+                            "performance_corner": corner.key,
+                            "performance_decision_id": performance_decision[
+                                "decision_id"
+                            ],
+                            "performance_application_id": performance_application_id,
+                        }
+                    )
+                else:
+                    performance_decision = {
+                        **performance_decision,
+                        "status": "waiting",
+                        "reason": (
+                            "同じdecisionは別runが適用予約済み。新しい指標snapshotを待つ"
+                        ),
+                        "guidance": "",
+                    }
+            _log(
+                "実績フィードバック: "
+                f"{performance_decision['status']} "
+                f"(decision={performance_decision['decision_id']}; "
+                f"{performance_decision['reason']})"
+            )
+        except Exception as exc:  # readback不調でも通常生成は継続
+            _log(f"実績フィードバック取得失敗→なしで継続: {str(exc)[:240]}")
     _log("台本生成 (opus 4.8)…")
     cooldown_days = int(
         spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
@@ -141,6 +215,7 @@ def _run_once(
         day,
         history.recent_titles(spec),
         topic_guard=reserve_selected_topic,
+        performance_decision=performance_decision,
     )
     (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
@@ -361,6 +436,15 @@ def _run_once(
             _log(f"  {r.platform}: {r.status}{(' ' + (r.url or r.detail)) if (r.url or r.detail) else ''}")
             if r.platform == "youtube" and r.status == "ok":
                 video_id = r.id
+        if performance_application_id and performance_decision:
+            performance_application_id = _finalize_performance_application(
+                spec,
+                corner.key,
+                performance_decision["decision_id"],
+                performance_application_id,
+                video_id,
+                reservation_state,
+            )
         # 外部投稿が1件でも成功した後は、後続の履歴詳細保存が失敗しても
         # queued予約をcancelしない。公開済み題材の再投稿防止を優先する。
         if any(result.status == "ok" for result in pub_results):
@@ -384,6 +468,12 @@ def _run_once(
             "topic": selected_topic,
             "topic_concepts": history.topic_concepts(selected_topic),
             "reservation_id": reservation_id,
+            "performance_decision_id": (
+                performance_decision["decision_id"]
+                if performance_application_id and performance_decision
+                else None
+            ),
+            "performance_application_id": performance_application_id,
             "workdir": str(workdir),
             "description": script.get("description", ""),
             "duration_sec": round(tts.duration, 1),
@@ -435,6 +525,21 @@ def run(
                 reservation_state["corner"],
                 reservation_state["topic"],
                 reservation_id,
+                f"{type(exc).__name__}: {str(exc)[:400]}",
+            )
+        performance_application_id = reservation_state.get(
+            "performance_application_id"
+        )
+        if (
+            performance_application_id
+            and not reservation_state.get("finalized")
+            and not reservation_state.get("external_published")
+        ):
+            history.cancel_performance_decision(
+                reservation_state["performance_spec"],
+                reservation_state["performance_corner"],
+                reservation_state["performance_decision_id"],
+                performance_application_id,
                 f"{type(exc).__name__}: {str(exc)[:400]}",
             )
         raise

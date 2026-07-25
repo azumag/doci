@@ -30,6 +30,8 @@ _PROMPT = """\
 チャンネル固有の方針:
 {channel_guidance}
 最近すでに扱った題材（重複を避ける）: {past}
+このチャンネル自身の実績から得た形式仮説（空なら利用しない）:
+{performance_guidance}
 YouTube Data APIで取得した公開動画候補（YouTube系チャンネルの場合のみ）:
 {video_candidates}
 
@@ -190,6 +192,7 @@ def web_research(
     corner: CornerSpec,
     past_topics: list[str],
     spec: ChannelSpec | None = None,
+    performance_guidance: str = "",
 ) -> dict | None:
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
@@ -209,6 +212,7 @@ def web_research(
         label=corner.label,
         channel_guidance=channel_guidance,
         past=past,
+        performance_guidance=performance_guidance or "（比較可能な実績なし）",
         video_candidates=(
             json.dumps(video_candidates, ensure_ascii=False, indent=2)
             if video_candidates

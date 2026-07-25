@@ -1,0 +1,548 @@
+"""YouTube実績のreadbackと、次回生成へ渡す保守的なフィードバック。"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from . import channel, history, youtube
+from .channel import ChannelSpec
+
+SCHEMA_VERSION = 1
+MIN_ELIGIBLE_VIDEOS = 8
+MIN_ANALYTICS_VIEWS = 20
+MIN_PUBLIC_VIEWS = 50
+MIN_GROUP_SIZE = 2
+MIN_TRAIT_SUPPORT = 2
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def _history_by_video(spec: ChannelSpec) -> dict[str, dict]:
+    rows = _read_jsonl(spec.history_file)
+    return {
+        str(row["video_id"]): row
+        for row in rows
+        if row.get("video_id")
+    }
+
+
+def _snapshot_path(spec: ChannelSpec) -> Path:
+    return spec.output_dir / "performance.jsonl"
+
+
+def _decision_path(spec: ChannelSpec) -> Path:
+    return spec.output_dir / "performance_decision.json"
+
+
+def _snapshot_signature(snapshot: dict) -> str:
+    stable = {
+        "analytics": snapshot.get("analytics", {}),
+        "videos": snapshot.get("videos", []),
+    }
+    return hashlib.sha256(
+        json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _duration_bucket(value: object) -> str:
+    try:
+        seconds = float(value or 0)
+    except (TypeError, ValueError):
+        return ""
+    if seconds <= 0:
+        return ""
+    if seconds < 60:
+        return "under_60s"
+    if seconds < 180:
+        return "60_to_179s"
+    return "180s_or_more"
+
+
+def _format_traits(spec: ChannelSpec, recorded: dict) -> list[str]:
+    """題材語を含めず、生成物の再利用可能な形式属性だけを抽出する。"""
+    traits: list[str] = []
+    tier = str(recorded.get("tier") or "")
+    if tier:
+        traits.append(f"tier:{tier}")
+    duration = _duration_bucket(recorded.get("duration_sec"))
+    if duration:
+        traits.append(f"duration:{duration}")
+
+    workdir_raw = recorded.get("workdir")
+    if not workdir_raw:
+        return traits
+    workdir = Path(str(workdir_raw)).resolve()
+    output_root = spec.output_dir.resolve()
+    if not workdir.is_relative_to(output_root):
+        return traits
+    try:
+        script = json.loads((workdir / "script.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return traits
+    scenes = script.get("scenes")
+    if not isinstance(scenes, list):
+        return traits
+    scene_count = len(scenes)
+    if scene_count:
+        if scene_count <= 4:
+            scene_bucket = "1_to_4"
+        elif scene_count <= 8:
+            scene_bucket = "5_to_8"
+        else:
+            scene_bucket = "9_or_more"
+        traits.append(f"scenes:{scene_bucket}")
+    traits.append(
+        "chart:present"
+        if any(isinstance(scene, dict) and scene.get("chart") for scene in scenes)
+        else "chart:absent"
+    )
+    return traits
+
+
+def sync(
+    spec: ChannelSpec,
+    *,
+    now: datetime | None = None,
+    lookback_days: int = 90,
+) -> dict:
+    """履歴にある投稿動画のread-only指標を取得し、変化時だけsnapshotを追記する。"""
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    history_rows = _history_by_video(spec)
+    video_ids = list(history_rows)
+    details = youtube.video_details(
+        video_ids,
+        token_file=spec.publish.youtube.token,
+        client_secret_file=spec.publish.youtube.client_secret,
+    )
+    analytics_status: dict = {
+        "available": False,
+        "source": "youtube_analytics_api_v2",
+    }
+    analytics_rows: list[dict] = []
+    if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
+        start = (current.date() - timedelta(days=lookback_days)).isoformat()
+        end = current.date().isoformat()
+        try:
+            analytics_rows = youtube.video_analytics(
+                video_ids,
+                start_date=start,
+                end_date=end,
+                token_file=spec.publish.youtube.token,
+                client_secret_file=spec.publish.youtube.client_secret,
+            )
+            analytics_status.update(
+                {
+                    "available": True,
+                    "start_date": start,
+                    "end_date": end,
+                }
+            )
+        except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
+            analytics_status["reason"] = (
+                "Analytics readback失敗。Data API snapshotのみ保存: "
+                f"{str(exc)[:400]}"
+            )
+    else:
+        analytics_status["reason"] = (
+            "YouTube Analytics APIをOAuthクライアントのGoogle Cloud projectで"
+            "有効化し、yt-analytics.readonly scopeを明示的に許可する必要があります。"
+            "有効化後に `python -m doci.youtube --auth --analytics "
+            f"--channel {spec.id}` で再認証してください"
+        )
+    analytics_by_id = {
+        str(row.get("video_id")): row for row in analytics_rows if row.get("video_id")
+    }
+    videos: list[dict] = []
+    for detail in details:
+        video_id = str(detail.get("video_id") or "")
+        recorded = history_rows.get(video_id, {})
+        topic = str(recorded.get("topic") or history._row_topic(recorded))
+        videos.append(
+            {
+                "video_id": video_id,
+                "title": str(recorded.get("title") or detail.get("title") or ""),
+                "corner": str(recorded.get("corner") or ""),
+                "topic": topic,
+                "format_traits": _format_traits(spec, recorded),
+                "history_ts": str(recorded.get("ts") or ""),
+                "published_at": str(detail.get("published_at") or ""),
+                "privacy_status": str(detail.get("privacy_status") or ""),
+                "data_api": {
+                    "views": int(detail.get("views", 0) or 0),
+                    "likes": int(detail.get("likes", 0) or 0),
+                    "comments": int(detail.get("comments", 0) or 0),
+                    "duration": str(detail.get("duration") or ""),
+                },
+                "analytics": analytics_by_id.get(video_id),
+            }
+        )
+    videos.sort(key=lambda row: (row["history_ts"], row["video_id"]))
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "channel": spec.id,
+        "collected_at": current.isoformat(),
+        "source": "youtube_data_api_v3",
+        "analytics": analytics_status,
+        "videos": videos,
+    }
+    path = _snapshot_path(spec)
+    previous = _read_jsonl(path)
+    if previous and _snapshot_signature(previous[-1]) == _snapshot_signature(snapshot):
+        return previous[-1]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+    return snapshot
+
+
+def _format_cohort(row: dict) -> str:
+    duration = next(
+        (
+            str(feature)
+            for feature in row.get("format_traits") or []
+            if str(feature).startswith("duration:")
+        ),
+        "",
+    )
+    tier = next(
+        (
+            str(feature)
+            for feature in row.get("format_traits") or []
+            if str(feature).startswith("tier:")
+        ),
+        "",
+    )
+    return f"{duration}|{tier}" if duration and tier else ""
+
+
+def _largest_format_cohort(rows: list[dict]) -> tuple[list[dict], str]:
+    cohorts: dict[str, list[dict]] = {}
+    for row in rows:
+        cohort = _format_cohort(row)
+        if cohort:
+            cohorts.setdefault(cohort, []).append(row)
+    if not cohorts:
+        return [], ""
+    cohort, members = max(
+        cohorts.items(),
+        key=lambda item: (len(item[1]), item[0]),
+    )
+    return members, cohort
+
+
+def _ranked_rows(
+    snapshot: dict,
+    *,
+    corner_key: str | None = None,
+) -> tuple[list[dict], str, str]:
+    videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if not corner_key or row.get("corner") == corner_key
+    ]
+    analytics = [
+        {
+            **row,
+            "_score": float(row["analytics"]["average_view_percentage"]),
+        }
+        for row in videos
+        if isinstance(row.get("analytics"), dict)
+        and int(row["analytics"].get("views", 0) or 0) >= MIN_ANALYTICS_VIEWS
+        and row["analytics"].get("average_view_percentage") is not None
+    ]
+    analytics_cohort, cohort = _largest_format_cohort(analytics)
+    if len(analytics_cohort) >= MIN_ELIGIBLE_VIDEOS:
+        return (
+            sorted(analytics_cohort, key=lambda row: row["_score"]),
+            "youtube_analytics_api_v2.average_view_percentage",
+            cohort,
+        )
+    public = []
+    for row in videos:
+        metrics = row.get("data_api") or {}
+        views = int(metrics.get("views", 0) or 0)
+        if row.get("privacy_status") != "public" or views < MIN_PUBLIC_VIEWS:
+            continue
+        published = history._parse_ts(row.get("published_at") or row.get("history_ts"))
+        collected = history._parse_ts(snapshot.get("collected_at"))
+        age_days = max(
+            1.0,
+            ((collected - published).total_seconds() / 86400)
+            if collected and published
+            else 1.0,
+        )
+        public.append({**row, "_score": views / age_days})
+    public_cohort, public_format = _largest_format_cohort(public)
+    if analytics_cohort and len(analytics_cohort) >= len(public_cohort):
+        return (
+            sorted(analytics_cohort, key=lambda row: row["_score"]),
+            "youtube_analytics_api_v2.average_view_percentage",
+            cohort,
+        )
+    return (
+        sorted(public_cohort, key=lambda row: row["_score"]),
+        "youtube_data_api_v3.views_per_day",
+        public_format,
+    )
+
+
+def _traits(rows: list[dict]) -> Counter[str]:
+    traits: Counter[str] = Counter()
+    for row in rows:
+        for feature in row.get("format_traits") or []:
+            traits[str(feature)] += 1
+    return traits
+
+
+def _single_trait(upper: list[dict], lower: list[dict]) -> tuple[str, str]:
+    upper_traits = _traits(upper)
+    lower_traits = _traits(lower)
+    candidates: list[tuple[int, str, str]] = []
+    for trait in set(upper_traits) | set(lower_traits):
+        upper_count = upper_traits[trait]
+        lower_count = lower_traits[trait]
+        if upper_count >= MIN_TRAIT_SUPPORT and lower_count == 0:
+            candidates.append((upper_count, "positive", trait))
+        elif lower_count >= MIN_TRAIT_SUPPORT and upper_count == 0:
+            candidates.append((lower_count, "negative", trait))
+    if not candidates:
+        return "", ""
+    _support, direction, trait = max(
+        candidates,
+        key=lambda item: (item[0], item[1] == "positive", item[2]),
+    )
+    return direction, trait
+
+
+def _has_evaluation_result(snapshot: dict, video_id: str) -> bool:
+    row = next(
+        (
+            video
+            for video in snapshot.get("videos", [])
+            if str(video.get("video_id") or "") == video_id
+        ),
+        None,
+    )
+    if not row:
+        return False
+    analytics = row.get("analytics")
+    if (
+        isinstance(analytics, dict)
+        and int(analytics.get("views", 0) or 0) >= MIN_ANALYTICS_VIEWS
+        and analytics.get("average_view_percentage") is not None
+    ):
+        return True
+    metrics = row.get("data_api") or {}
+    return (
+        row.get("privacy_status") == "public"
+        and int(metrics.get("views", 0) or 0) >= MIN_PUBLIC_VIEWS
+    )
+
+
+def build_decision(
+    spec: ChannelSpec,
+    snapshot: dict,
+    *,
+    corner_key: str | None = None,
+) -> dict:
+    """小標本・非公開ゼロ値を学習させず、相対差だけを仮説へ変換する。"""
+    ranked, metric, format_cohort = _ranked_rows(
+        snapshot,
+        corner_key=corner_key,
+    )
+    decision_seed = {
+        "channel": spec.id,
+        "corner": corner_key,
+        "snapshot_at": snapshot.get("collected_at"),
+        "metric": metric,
+        "format_cohort": format_cohort,
+        "eligible": [row.get("video_id") for row in ranked],
+    }
+    decision_id = hashlib.sha256(
+        json.dumps(decision_seed, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    decision = {
+        "schema_version": SCHEMA_VERSION,
+        "decision_id": decision_id,
+        "channel": spec.id,
+        "corner": corner_key,
+        "snapshot_at": snapshot.get("collected_at"),
+        "metric": metric,
+        "format_cohort": format_cohort,
+        "eligible_video_ids": decision_seed["eligible"],
+        "min_samples": MIN_ELIGIBLE_VIDEOS,
+        "min_group_size": MIN_GROUP_SIZE,
+        "min_trait_support": MIN_TRAIT_SUPPORT,
+        "source_status": {
+            "data_api": {
+                "available": True,
+                "source": snapshot.get("source"),
+            },
+            "analytics": snapshot.get("analytics") or {"available": False},
+        },
+        "guardrails": [
+            "相関を因果と断定しない",
+            "高実績動画の題材そのものを再利用しない",
+            "topic cooldownを常に優先する",
+            "一度に試す変数は1つ",
+        ],
+    }
+    analytics_reason = str(
+        (snapshot.get("analytics") or {}).get("reason") or ""
+    )
+    source_suffix = f" / {analytics_reason}" if analytics_reason else ""
+    active_experiment = (
+        history.active_performance_experiment(spec, corner_key)
+        if corner_key
+        else None
+    )
+    if (
+        active_experiment
+        and active_experiment.get("video_id")
+        and _has_evaluation_result(
+            snapshot,
+            str(active_experiment["video_id"]),
+        )
+    ):
+        history.complete_performance_evaluation(spec, active_experiment)
+        active_experiment = None
+    if active_experiment:
+        applied_video_id = str(active_experiment.get("video_id") or "")
+        decision.update(
+            {
+                "status": (
+                    "waiting_for_result"
+                    if applied_video_id
+                    else "waiting_for_publish"
+                ),
+                "reason": (
+                    f"decision {active_experiment['performance_decision_id']} は"
+                    + (
+                        f"適用動画 {applied_video_id} が評価閾値に未到達"
+                        if applied_video_id
+                        else "別runで適用予約中"
+                    )
+                    + source_suffix
+                ),
+                "applied_decision_id": active_experiment[
+                    "performance_decision_id"
+                ],
+                "applied_video_id": applied_video_id or None,
+                "guidance": "",
+            }
+        )
+    elif len(ranked) < MIN_ELIGIBLE_VIDEOS:
+        decision.update(
+            {
+                "status": "insufficient_data",
+                "reason": (
+                    f"比較可能な動画が{len(ranked)}本。"
+                    f"最低{MIN_ELIGIBLE_VIDEOS}本必要"
+                    f"{source_suffix}"
+                ),
+                "guidance": "",
+            }
+        )
+    else:
+        group_size = max(MIN_GROUP_SIZE, len(ranked) // 4)
+        lower = ranked[:group_size]
+        upper = ranked[-group_size:]
+        direction, trait = _single_trait(upper, lower)
+        if not trait:
+            decision.update(
+                {
+                    "status": "insufficient_signal",
+                    "reason": (
+                        "上位・下位群を2本以上で分ける単一の形式特性がない"
+                        f"{source_suffix}"
+                    ),
+                    "guidance": "",
+                }
+            )
+        else:
+            positive = [trait] if direction == "positive" else []
+            negative = [trait] if direction == "negative" else []
+            decision.update(
+                {
+                    "status": "active",
+                    "reason": (
+                        "同一corner・同一尺・同一tier cohortの相対上位・下位群から"
+                        "単一の形式仮説を作成"
+                    ),
+                    "top_video_ids": [row["video_id"] for row in upper],
+                    "bottom_video_ids": [row["video_id"] for row in lower],
+                    "positive_traits": positive,
+                    "negative_traits": negative,
+                    "guidance": (
+                        f"実績snapshot {snapshot.get('collected_at')} / decision "
+                        f"{decision_id} / 指標 {metric}。"
+                        f"比較cohort: {corner_key or 'all'} / {format_cohort}。"
+                        f"相対上位に固有の形式特性: {', '.join(positive) or 'なし'}。"
+                        f"相対下位に固有の形式特性: {', '.join(negative) or 'なし'}。"
+                        "これは因果ではなく次回1本の実験仮説としてのみ使う。"
+                        "上位動画の題材は再利用せず、30日cooldownに通る新しい題材を選ぶ。"
+                        "変更変数は1つに絞り、同じ指標で再評価する。"
+                    ),
+                }
+            )
+            if history.performance_decision_used(spec, decision_id):
+                decision.update(
+                    {
+                        "status": "waiting",
+                        "reason": (
+                            "この実績snapshotの単一仮説は1本へ適用済み。"
+                            f"新しい指標snapshotを待つ{source_suffix}"
+                        ),
+                        "guidance": "",
+                    }
+                )
+    path = _decision_path(spec)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(decision, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return decision
+
+
+def refresh(spec: ChannelSpec, *, corner_key: str | None = None) -> dict:
+    snapshot = sync(spec)
+    return build_decision(spec, snapshot, corner_key=corner_key)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="YouTube投稿実績のread-only同期")
+    parser.add_argument("--channel", required=True)
+    parser.add_argument("--corner")
+    parser.add_argument("--sync", action="store_true")
+    args = parser.parse_args()
+    spec = channel.load(args.channel)
+    if args.sync:
+        decision = refresh(spec, corner_key=args.corner)
+    else:
+        snapshots = _read_jsonl(_snapshot_path(spec))
+        if not snapshots:
+            raise RuntimeError(
+                f"performance snapshotがありません。先に --sync --channel {spec.id}"
+            )
+        decision = build_decision(spec, snapshots[-1], corner_key=args.corner)
+    print(json.dumps(decision, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
