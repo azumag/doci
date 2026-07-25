@@ -75,12 +75,13 @@ def _credits(spec: ChannelSpec, corner) -> str:
     return "\n\n" + rendered.lstrip()
 
 
-def run(
+def _run_once(
     spec: ChannelSpec,
     day: str,
     corner_key: str | None,
     do_upload: bool,
     video_scenes: int,
+    reservation_state: dict,
 ) -> dict:
     if corner_key and corner_key not in spec.corners:
         raise ValueError(f"unknown corner for channel {spec.id}: {corner_key}")
@@ -101,7 +102,46 @@ def run(
 
     # 1) 台本
     _log("台本生成 (opus 4.8)…")
-    script = ai_text.generate(spec, corner, day, history.recent_titles(spec))
+    cooldown_days = int(
+        spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
+    )
+    reservation_id: str | None = None
+    selected_topic = ""
+
+    def reserve_selected_topic(topic: str) -> None:
+        nonlocal reservation_id, selected_topic
+        selected_topic = topic.strip()
+        try:
+            reservation_id = history.reserve_topic(
+                spec,
+                corner.key,
+                selected_topic,
+                cooldown_days=cooldown_days,
+                reserve=do_upload,
+            )
+            if reservation_id:
+                reservation_state.update(
+                    {
+                        "spec": spec,
+                        "corner": corner.key,
+                        "topic": selected_topic,
+                        "reservation_id": reservation_id,
+                    }
+                )
+        except history.TopicCooldownSkip as exc:
+            _log(f"題材スキップ: {exc.reason}")
+            raise
+        if cooldown_days > 0:
+            mode = "キュー予約" if do_upload else "dry-run照合"
+            _log(f"題材cooldown: {cooldown_days}日 / {mode}「{selected_topic}」")
+
+    script = ai_text.generate(
+        spec,
+        corner,
+        day,
+        history.recent_titles(spec),
+        topic_guard=reserve_selected_topic,
+    )
     (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
 
@@ -321,16 +361,29 @@ def run(
             _log(f"  {r.platform}: {r.status}{(' ' + (r.url or r.detail)) if (r.url or r.detail) else ''}")
             if r.platform == "youtube" and r.status == "ok":
                 video_id = r.id
+        # 外部投稿が1件でも成功した後は、後続の履歴詳細保存が失敗しても
+        # queued予約をcancelしない。公開済み題材の再投稿防止を優先する。
+        if any(result.status == "ok" for result in pub_results):
+            reservation_state["external_published"] = True
     else:
         _log("アップロードはスキップ (--no-upload)")
 
     # 6) 履歴
+    final_status = (
+        "published"
+        if any(result.status == "ok" for result in pub_results)
+        else "generated"
+    )
     history.record(
         spec,
         corner.key,
         script["title"],
         video_id,
         extra={
+            "status": final_status,
+            "topic": selected_topic,
+            "topic_concepts": history.topic_concepts(selected_topic),
+            "reservation_id": reservation_id,
             "workdir": str(workdir),
             "description": script.get("description", ""),
             "duration_sec": round(tts.duration, 1),
@@ -339,6 +392,7 @@ def run(
             "publish": [{"platform": r.platform, "status": r.status, "id": r.id} for r in pub_results],
         },
     )
+    reservation_state["finalized"] = True
     return {
         "channel": spec.id,
         "corner": corner.key,
@@ -350,6 +404,40 @@ def run(
         "platforms": route.platforms,
         "publish": [{"platform": r.platform, "status": r.status} for r in pub_results],
     }
+
+
+def run(
+    spec: ChannelSpec,
+    day: str,
+    corner_key: str | None,
+    do_upload: bool,
+    video_scenes: int,
+) -> dict:
+    reservation_state: dict = {}
+    try:
+        return _run_once(
+            spec,
+            day,
+            corner_key,
+            do_upload,
+            video_scenes,
+            reservation_state,
+        )
+    except BaseException as exc:
+        reservation_id = reservation_state.get("reservation_id")
+        if (
+            reservation_id
+            and not reservation_state.get("finalized")
+            and not reservation_state.get("external_published")
+        ):
+            history.cancel_topic(
+                reservation_state["spec"],
+                reservation_state["corner"],
+                reservation_state["topic"],
+                reservation_id,
+                f"{type(exc).__name__}: {str(exc)[:400]}",
+            )
+        raise
 
 
 def _list_channels() -> list[dict]:
@@ -401,20 +489,33 @@ def _run_all_channels(
             results.append(
                 {"channel": channel_id, "status": "ok", "result": result}
             )
+        except history.TopicCooldownSkip as exc:
+            results.append(
+                {
+                    "channel": channel_id,
+                    "status": "skipped",
+                    "reason": exc.reason,
+                }
+            )
         except Exception as exc:  # 1チャンネル失敗でも残りを逐次実行する
             _log(f"channel={channel_id} ERROR: {exc}")
             results.append(
                 {"channel": channel_id, "status": "error", "error": str(exc)}
             )
     succeeded = sum(item["status"] == "ok" for item in results)
+    skipped = sum(item["status"] == "skipped" for item in results)
+    failed = len(results) - succeeded - skipped
     summary = {
         "mode": "all_channels",
         "date": day,
         "succeeded": succeeded,
-        "failed": len(results) - succeeded,
+        "skipped": skipped,
+        "failed": failed,
         "channels": results,
     }
-    return summary, 0 if succeeded else 1
+    # 従来どおり一部チャンネルが成功すればジョブ全体は成功扱い。
+    # 全件cooldownスキップも意図した正常動作なのでexit 0にする。
+    return summary, 0 if (succeeded or skipped) else 1
 
 
 def main() -> int:
@@ -461,6 +562,19 @@ def main() -> int:
             do_upload=not args.no_upload,
             video_scenes=args.video_scenes,
         )
+    except history.TopicCooldownSkip as exc:
+        print(
+            json.dumps(
+                {
+                    "channel": spec.id,
+                    "status": "skipped",
+                    "reason": exc.reason,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
     except Exception as e:
         _log(f"ERROR: {e}")
         return 1

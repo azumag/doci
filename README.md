@@ -156,7 +156,7 @@ token = "secrets/sample/youtube_token.json"
 |---|---|
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
-| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media` |
+| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days` |
 | `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio` |
 | `style.thumbnail` | `font_family`, `title_color` |
 | `style.chart` | `palette`, `font` |
@@ -170,6 +170,9 @@ token = "secrets/sample/youtube_token.json"
 
 優先順位は「CLIの実行対象指定 → channel.toml → `.env` のグローバル既定値」。
 `PUBLISH_*=0` と `PUBLISH_DRY_RUN=1` は安全弁として常に優先する。
+`pipeline.topic_cooldown_days` は公開済み・キュー済みの近似題材を再利用しない期間で、
+既定は30日、`0`で無効化する。重複runは動画生成・投稿前に正常スキップされ、理由が
+チャンネル別 `history.jsonl` に記録される。
 
 個別レイヤのテスト:
 ```bash

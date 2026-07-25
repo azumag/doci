@@ -160,6 +160,7 @@ _PIPELINE_KEYS = {
     "factcheck",
     "plan",
     "asset_media",
+    "topic_cooldown_days",
 }
 _STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
@@ -552,6 +553,13 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     if not isinstance(pipeline, dict):
         raise ChannelConfigError("pipeline must be a table")
     _warn_unknown(pipeline, _PIPELINE_KEYS, "pipeline.")
+    cooldown_days = pipeline.get("topic_cooldown_days")
+    if cooldown_days is not None and (
+        isinstance(cooldown_days, bool)
+        or not isinstance(cooldown_days, int)
+        or cooldown_days < 0
+    ):
+        raise ChannelConfigError("pipeline.topic_cooldown_days must be a non-negative integer")
     style = data.get("style", {})
     publish = data.get("publish", {})
     if not isinstance(style, dict):

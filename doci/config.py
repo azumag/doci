@@ -102,6 +102,9 @@ WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 240)
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # リサーチの再試行回数。claude+Web が稀に不正JSONを返すため。高価なので控えめ。
 SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)
+# 公開済み/キュー済み題材の再利用を避ける既定期間。channel.toml の
+# pipeline.topic_cooldown_days でチャンネル単位に上書きでき、0で無効化する。
+TOPIC_COOLDOWN_DAYS = get_int("TOPIC_COOLDOWN_DAYS", 30)
 # ファクトチェックの再試行回数。MiniMax等が長い日本語JSONのエスケープを崩すことがあるため再試行する。
 SCRIPT_FACTCHECK_RETRIES = get_int("SCRIPT_FACTCHECK_RETRIES", 2)
 # --- 構成プラン: 起承転結＋図表策定（issue #2）。minimax が設計し qwen が執筆 ---

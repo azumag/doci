@@ -1,14 +1,43 @@
 """チャンネル別の生成履歴（重複回避・コーナーローテーション用）。"""
 from __future__ import annotations
 
+import fcntl
 import json
-from datetime import datetime, timezone
+import re
+import unicodedata
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
+from pathlib import Path
 
 from .channel import ChannelSpec
 
 
-def _read_all(spec: ChannelSpec) -> list[dict]:
-    path = spec.history_file
+@dataclass(frozen=True)
+class TopicMatch:
+    topic: str
+    ts: str
+    similarity: float
+    source: str
+
+
+class TopicCooldownSkip(RuntimeError):
+    """直近の公開済み/キュー済み題材と重複したため、今回の制作をスキップする。"""
+
+    def __init__(self, topic: str, match: TopicMatch, cooldown_days: int):
+        self.topic = topic
+        self.match = match
+        self.cooldown_days = cooldown_days
+        self.reason = (
+            f"題材「{topic}」は過去{cooldown_days}日以内の"
+            f"{match.source}題材「{match.topic}」と実質的に重複"
+            f"（類似度 {match.similarity:.2f}）"
+        )
+        super().__init__(self.reason)
+
+
+def _read_path(path: Path) -> list[dict]:
     if not path.exists():
         return []
     rows: list[dict] = []
@@ -23,14 +52,300 @@ def _read_all(spec: ChannelSpec) -> list[dict]:
     return rows
 
 
+def _read_all(spec: ChannelSpec) -> list[dict]:
+    return _read_path(spec.history_file)
+
+
+def _parse_ts(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _normalise_topic(value: str) -> str:
+    text = unicodedata.normalize("NFKC", value).casefold()
+    text = re.sub(r"\bctr\b", "クリック率", text)
+    return re.sub(r"[^0-9a-zぁ-んァ-ヶ一-龠]+", "", text)
+
+
+_CONCEPT_PATTERNS = {
+    "click_through_rate": (r"クリック率", r"clickthroughrate"),
+    "thumbnail": (r"サムネ", r"thumbnail"),
+    "title": (r"タイトル",),
+    "retention": (
+        r"視聴維持",
+        r"平均視聴時間",
+        r"冒頭30秒",
+        r"冒頭三十秒",
+        r"離脱",
+        r"retention",
+    ),
+    "traffic_source": (r"流入元", r"トラフィックソース"),
+    "impressions": (r"インプレッション",),
+    "analytics": (r"アナリティクス", r"studio"),
+    "shorts": (r"ショート", r"shorts"),
+    "related_video": (r"関連動画",),
+    "subscriber": (r"登録者", r"チャンネル登録"),
+    "ab_test": (r"abテスト", r"テストと比較"),
+}
+_BOILERPLATE = (
+    "初心者向け",
+    "youtube",
+    "ユーチューブ",
+    "チャンネル",
+    "動画",
+    "伸ばし方",
+    "改善",
+    "方法",
+    "設計",
+    "使い方",
+    "解説",
+    "本当の理由",
+)
+
+
+def topic_concepts(value: str) -> list[str]:
+    normalised = _normalise_topic(value)
+    return sorted(
+        concept
+        for concept, patterns in _CONCEPT_PATTERNS.items()
+        if any(re.search(pattern, normalised) for pattern in patterns)
+    )
+
+
+def _topic_fingerprint(value: str) -> str:
+    normalised = _normalise_topic(value)
+    canonical_groups = {
+        "retention": (
+            "視聴維持率",
+            "視聴維持",
+            "平均視聴時間",
+            "冒頭30秒",
+            "冒頭三十秒",
+            "離脱",
+        ),
+        "clickrate": ("クリック率", "clickthroughrate"),
+        "trafficsource": ("トラフィックソース", "流入元"),
+        "relatedvideo": ("関連動画",),
+    }
+    for canonical, phrases in canonical_groups.items():
+        for phrase in phrases:
+            normalised = normalised.replace(phrase, canonical)
+    for phrase in _BOILERPLATE:
+        normalised = normalised.replace(phrase, "")
+    return normalised
+
+
+def topic_similarity(left: str, right: str) -> float:
+    """YouTube領域の概念タグと表記揺れを併用する類似度。"""
+    a = _topic_fingerprint(left)
+    b = _topic_fingerprint(right)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if min(len(a), len(b)) >= 10 and (a in b or b in a):
+        return 0.98
+    if min(len(a), len(b)) < 8:
+        return SequenceMatcher(None, a, b).ratio()
+    a_grams = {a[index : index + 2] for index in range(len(a) - 1)}
+    b_grams = {b[index : index + 2] for index in range(len(b) - 1)}
+    overlap = len(a_grams & b_grams)
+    containment = overlap / min(len(a_grams), len(b_grams))
+    sequence = SequenceMatcher(None, a, b).ratio()
+    left_concepts = set(topic_concepts(left))
+    right_concepts = set(topic_concepts(right))
+    concept_score = 0.0
+    if left_concepts and right_concepts:
+        concept_overlap = len(left_concepts & right_concepts)
+        if concept_overlap and len(left_concepts | right_concepts) >= 2:
+            # 共通する一般概念が1つあるだけで別題材を止めない。集合全体に占める
+            # 一致率（Jaccard）で、同じ主題構造のときだけ強く判定する。
+            concept_score = concept_overlap / len(left_concepts | right_concepts)
+    return max(containment, sequence, concept_score)
+
+
+def _row_topic(row: dict) -> str:
+    topic = str(row.get("topic") or "").strip()
+    if topic:
+        return topic
+    workdir = row.get("workdir")
+    if workdir:
+        try:
+            script = json.loads((Path(str(workdir)) / "script.json").read_text(encoding="utf-8"))
+            topic = str((script.get("_research") or {}).get("topic") or "").strip()
+            if topic:
+                return topic
+        except (OSError, ValueError, TypeError):
+            pass
+    title = str(row.get("title") or "").strip()
+    description = str(row.get("description") or "").split("\n", 1)[0].strip()
+    return f"{title} {description}".strip()
+
+
+def _cooldown_candidates(
+    rows: list[dict], *, now: datetime, cooldown_days: int
+) -> list[tuple[dict, str, str]]:
+    cutoff = now - timedelta(days=cooldown_days)
+    candidates: list[tuple[dict, str, str]] = []
+    latest_reservations: dict[str, dict] = {}
+    for row in rows:
+        reservation_id = str(row.get("reservation_id") or "")
+        if reservation_id:
+            latest_reservations[reservation_id] = row
+    for row in rows:
+        ts = _parse_ts(row.get("ts"))
+        if ts is None or ts < cutoff or ts > now:
+            continue
+        status = str(row.get("status") or "")
+        reservation_id = str(row.get("reservation_id") or "")
+        if reservation_id and latest_reservations.get(reservation_id) is not row:
+            continue
+        is_published = status == "published" or (not status and bool(row.get("video_id")))
+        is_queued = status == "queued"
+        if not (is_published or is_queued):
+            continue
+        topic = _row_topic(row)
+        if topic:
+            candidates.append((row, topic, "公開済み" if is_published else "キュー済み"))
+    return candidates
+
+
+def reserve_topic(
+    spec: ChannelSpec,
+    corner: str,
+    topic: str,
+    *,
+    cooldown_days: int,
+    reserve: bool = True,
+    now: datetime | None = None,
+    similarity_threshold: float = 0.55,
+) -> str | None:
+    """題材を原子的に照合し、実投稿runならキューとして予約する。
+
+    重複時はスキップ行も同じロック内で追記するため、並行runでも
+    「照合は双方通過したが同じ題材を予約した」という競合を起こさない。
+    """
+    if cooldown_days <= 0:
+        return None
+    topic = topic.strip()
+    if not topic:
+        raise ValueError("cooldown判定に使う題材が空です")
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    path = spec.history_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as file:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+        file.seek(0)
+        rows: list[dict] = []
+        for line in file:
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        best: TopicMatch | None = None
+        for row, previous_topic, source in _cooldown_candidates(
+            rows, now=current, cooldown_days=cooldown_days
+        ):
+            similarity = topic_similarity(topic, previous_topic)
+            if similarity < similarity_threshold:
+                continue
+            candidate = TopicMatch(
+                topic=previous_topic,
+                ts=str(row.get("ts") or ""),
+                similarity=similarity,
+                source=source,
+            )
+            if best is None or candidate.similarity > best.similarity:
+                best = candidate
+        if best is not None:
+            exc = TopicCooldownSkip(topic, best, cooldown_days)
+            if reserve:
+                row = {
+                    "ts": current.isoformat(),
+                    "channel": spec.id,
+                    "corner": corner,
+                    "title": "",
+                    "video_id": None,
+                    "status": "skipped",
+                    "topic": topic,
+                    "topic_concepts": topic_concepts(topic),
+                    "skip_reason": exc.reason,
+                    "matched_topic": best.topic,
+                    "matched_ts": best.ts,
+                    "similarity": round(best.similarity, 4),
+                }
+                file.seek(0, 2)
+                file.write(json.dumps(row, ensure_ascii=False) + "\n")
+                file.flush()
+            raise exc
+        if not reserve:
+            return None
+        reservation_id = uuid.uuid4().hex
+        row = {
+            "ts": current.isoformat(),
+            "channel": spec.id,
+            "corner": corner,
+            "title": "",
+            "video_id": None,
+            "status": "queued",
+            "topic": topic,
+            "topic_concepts": topic_concepts(topic),
+            "reservation_id": reservation_id,
+        }
+        file.seek(0, 2)
+        file.write(json.dumps(row, ensure_ascii=False) + "\n")
+        file.flush()
+        return reservation_id
+
+
+def cancel_topic(
+    spec: ChannelSpec,
+    corner: str,
+    topic: str,
+    reservation_id: str,
+    reason: str,
+) -> None:
+    """制作失敗または投稿なしの予約を無効化する状態遷移を追記する。"""
+    record(
+        spec,
+        corner,
+        "",
+        extra={
+            "status": "cancelled",
+            "topic": topic,
+            "topic_concepts": topic_concepts(topic),
+            "reservation_id": reservation_id,
+            "cancel_reason": reason[:500],
+        },
+    )
+
+
+def _completed_rows(spec: ChannelSpec) -> list[dict]:
+    completed = []
+    for row in _read_all(spec):
+        status = str(row.get("status") or "")
+        if status in {"published", "generated"} or (
+            not status and bool(row.get("title"))
+        ):
+            completed.append(row)
+    return completed
+
+
 def last_corner(spec: ChannelSpec) -> str | None:
-    rows = _read_all(spec)
+    rows = _completed_rows(spec)
     return rows[-1].get("corner") if rows else None
 
 
 def last_run(spec: ChannelSpec) -> dict | None:
     """チャンネルの直近実行レコードを返す。履歴なしなら None。"""
-    rows = _read_all(spec)
+    rows = _completed_rows(spec)
     return rows[-1] if rows else None
 
 
@@ -75,4 +390,6 @@ def record(
     if extra:
         row.update(extra)
     with path.open("a", encoding="utf-8") as file:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX)
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
+        file.flush()
