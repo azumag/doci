@@ -327,6 +327,162 @@ def cancel_topic(
     )
 
 
+def _performance_decision_used_rows(rows: list[dict], decision_id: str) -> bool:
+    latest: dict[str, dict] = {}
+    for row in rows:
+        if str(row.get("performance_decision_id") or "") != decision_id:
+            continue
+        application_id = str(row.get("performance_application_id") or "")
+        if application_id:
+            latest[application_id] = row
+    return any(
+        str(row.get("status") or "")
+        in {
+            "performance_queued",
+            "performance_applied",
+            "performance_evaluated",
+            "generated",
+            "published",
+        }
+        for row in latest.values()
+    )
+
+
+def _active_performance_experiment_rows(
+    rows: list[dict],
+    corner: str,
+) -> dict | None:
+    seen: set[str] = set()
+    for row in reversed(rows):
+        application_id = str(row.get("performance_application_id") or "")
+        if not application_id or application_id in seen:
+            continue
+        seen.add(application_id)
+        if row.get("corner") != corner:
+            continue
+        if str(row.get("status") or "") in {
+            "performance_queued",
+            "performance_applied",
+            "published",
+        }:
+            return row
+    return None
+
+
+def active_performance_experiment(
+    spec: ChannelSpec,
+    corner: str,
+) -> dict | None:
+    """cornerで適用中または評価待ちの実験を返す。"""
+    return _active_performance_experiment_rows(_read_all(spec), corner)
+
+
+def performance_decision_used(spec: ChannelSpec, decision_id: str) -> bool:
+    """同じ実績snapshot由来の仮説が予約済みまたは1本へ適用済みか返す。"""
+    return _performance_decision_used_rows(_read_all(spec), decision_id)
+
+
+def reserve_performance_decision(
+    spec: ChannelSpec,
+    corner: str,
+    decision_id: str,
+) -> str | None:
+    """同一decisionを複数runへ適用しないよう、原子的に適用枠を予約する。"""
+    path = spec.history_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as file:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+        file.seek(0)
+        rows: list[dict] = []
+        for line in file:
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        if (
+            _performance_decision_used_rows(rows, decision_id)
+            or _active_performance_experiment_rows(rows, corner)
+        ):
+            return None
+        application_id = uuid.uuid4().hex
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "channel": spec.id,
+            "corner": corner,
+            "title": "",
+            "video_id": None,
+            "status": "performance_queued",
+            "performance_decision_id": decision_id,
+            "performance_application_id": application_id,
+        }
+        file.seek(0, 2)
+        file.write(json.dumps(row, ensure_ascii=False) + "\n")
+        file.flush()
+        return application_id
+
+
+def cancel_performance_decision(
+    spec: ChannelSpec,
+    corner: str,
+    decision_id: str,
+    application_id: str,
+    reason: str,
+) -> None:
+    """動画が完成しなかったdecision適用予約を再利用可能に戻す。"""
+    record(
+        spec,
+        corner,
+        "",
+        extra={
+            "status": "performance_cancelled",
+            "performance_decision_id": decision_id,
+            "performance_application_id": application_id,
+            "cancel_reason": reason[:500],
+        },
+    )
+
+
+def apply_performance_decision(
+    spec: ChannelSpec,
+    corner: str,
+    decision_id: str,
+    application_id: str,
+    video_id: str,
+) -> None:
+    """decision適用先のYouTube動画を、通常履歴保存とは独立して確定する。"""
+    record(
+        spec,
+        corner,
+        "",
+        video_id,
+        extra={
+            "status": "performance_applied",
+            "performance_decision_id": decision_id,
+            "performance_application_id": application_id,
+        },
+    )
+
+
+def complete_performance_evaluation(
+    spec: ChannelSpec,
+    applied: dict,
+) -> None:
+    """評価閾値に到達した実験を完了し、cornerの次実験を解禁する。"""
+    record(
+        spec,
+        str(applied.get("corner") or ""),
+        "",
+        str(applied.get("video_id") or "") or None,
+        extra={
+            "status": "performance_evaluated",
+            "performance_decision_id": applied.get("performance_decision_id"),
+            "performance_application_id": applied.get(
+                "performance_application_id"
+            ),
+        },
+    )
+
+
 def _completed_rows(spec: ChannelSpec) -> list[dict]:
     completed = []
     for row in _read_all(spec):

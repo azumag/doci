@@ -81,7 +81,11 @@ class ResearchPromptTest(unittest.TestCase):
                     research.llm, "run_claude", return_value=raw
                 ) as run_mock,
             ):
-                result = research.web_research(corner, [])
+                result = research.web_research(
+                    corner,
+                    [],
+                    performance_guidance="decision abc: retention形式を1変数だけ試す",
+                )
 
         prompt = run_mock.call_args.args[0]
         self.assertIn("裏技を断定しない人格", prompt)
@@ -92,6 +96,7 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertIn("動画を2〜3本", prompt)
         self.assertIn("主張の共通点", prompt)
         self.assertIn("因果を断定しない", prompt)
+        self.assertIn("decision abc", prompt)
         self.assertEqual(result["topic"], "題材")
         self.assertEqual(len(result["facts"]), 3)
         self.assertEqual(len(result["examples"]), 2)

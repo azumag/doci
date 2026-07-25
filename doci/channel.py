@@ -161,6 +161,7 @@ _PIPELINE_KEYS = {
     "plan",
     "asset_media",
     "topic_cooldown_days",
+    "performance_feedback",
 }
 _STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
@@ -560,6 +561,9 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         or cooldown_days < 0
     ):
         raise ChannelConfigError("pipeline.topic_cooldown_days must be a non-negative integer")
+    performance_feedback = pipeline.get("performance_feedback")
+    if performance_feedback is not None and not isinstance(performance_feedback, bool):
+        raise ChannelConfigError("pipeline.performance_feedback must be a boolean")
     style = data.get("style", {})
     publish = data.get("publish", {})
     if not isinstance(style, dict):

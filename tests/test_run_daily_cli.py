@@ -104,6 +104,10 @@ class RunDailyCliTest(unittest.TestCase):
             "corner": "video",
             "topic": "失敗した題材",
             "reservation_id": "reservation",
+            "performance_spec": spec,
+            "performance_corner": "video",
+            "performance_decision_id": "decision",
+            "performance_application_id": "application",
         }
 
         def fail_once(*args):
@@ -113,12 +117,21 @@ class RunDailyCliTest(unittest.TestCase):
         with (
             patch.object(run_daily, "_run_once", side_effect=fail_once),
             patch.object(run_daily.history, "cancel_topic") as cancel_mock,
+            patch.object(
+                run_daily.history,
+                "cancel_performance_decision",
+            ) as cancel_performance_mock,
         ):
             with self.assertRaisesRegex(RuntimeError, "tts failed"):
                 run_daily.run(spec, "2026-07-17", "video", True, 0)
 
         cancel_mock.assert_called_once()
         self.assertEqual(cancel_mock.call_args.args[3], "reservation")
+        cancel_performance_mock.assert_called_once()
+        self.assertEqual(
+            cancel_performance_mock.call_args.args[3],
+            "application",
+        )
 
     def test_run_keeps_queue_when_external_publish_already_succeeded(self) -> None:
         spec = SimpleNamespace(id="alpha")
@@ -130,6 +143,10 @@ class RunDailyCliTest(unittest.TestCase):
                     "corner": "video",
                     "topic": "公開済み題材",
                     "reservation_id": "reservation",
+                    "performance_spec": spec,
+                    "performance_corner": "video",
+                    "performance_decision_id": "decision",
+                    "performance_application_id": "application",
                     "external_published": True,
                 }
             )
@@ -138,10 +155,43 @@ class RunDailyCliTest(unittest.TestCase):
         with (
             patch.object(run_daily, "_run_once", side_effect=fail_after_publish),
             patch.object(run_daily.history, "cancel_topic") as cancel_mock,
+            patch.object(
+                run_daily.history,
+                "cancel_performance_decision",
+            ) as cancel_performance_mock,
         ):
             with self.assertRaisesRegex(OSError, "history write failed"):
                 run_daily.run(spec, "2026-07-17", "video", True, 0)
 
+        cancel_mock.assert_not_called()
+        cancel_performance_mock.assert_not_called()
+
+    def test_performance_publish_marks_external_before_history_write(self) -> None:
+        spec = SimpleNamespace(id="alpha")
+        state = {"performance_application_id": "application"}
+
+        with (
+            patch.object(
+                run_daily.history,
+                "apply_performance_decision",
+                side_effect=OSError("history write failed"),
+            ),
+            patch.object(
+                run_daily.history,
+                "cancel_performance_decision",
+            ) as cancel_mock,
+        ):
+            with self.assertRaisesRegex(OSError, "history write failed"):
+                run_daily._finalize_performance_application(
+                    spec,
+                    "video",
+                    "decision",
+                    "application",
+                    "youtube-video",
+                    state,
+                )
+
+        self.assertTrue(state["external_published"])
         cancel_mock.assert_not_called()
 
     def test_list_channels_includes_last_run_and_isolates_bad_config(self) -> None:

@@ -156,7 +156,7 @@ token = "secrets/sample/youtube_token.json"
 |---|---|
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
-| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days` |
+| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback` |
 | `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio` |
 | `style.thumbnail` | `font_family`, `title_color` |
 | `style.chart` | `palette`, `font` |
@@ -173,6 +173,15 @@ token = "secrets/sample/youtube_token.json"
 `pipeline.topic_cooldown_days` は公開済み・キュー済みの近似題材を再利用しない期間で、
 既定は30日、`0`で無効化する。重複runは動画生成・投稿前に正常スキップされ、理由が
 チャンネル別 `history.jsonl` に記録される。
+`pipeline.performance_feedback = true` は投稿履歴の動画をYouTube Data APIで
+read-only同期し、十分な比較標本がある場合だけ相対的な形式仮説を次回promptへ渡す。
+retention等のAnalytics指標には、OAuthクライアントのGoogle Cloud projectで
+YouTube Analytics APIを有効化したうえで追加scopeが必要。明示的に許可する場合のみ
+`python -m doci.youtube --auth --analytics --channel <id>` で再認証する。APIやscopeが
+未設定でもData API snapshotを残し、指標を推測せず通常生成を継続する。
+`python -m doci.performance --sync --channel <id> --corner <key>` でreadbackと判断根拠を
+確認できる。仮説は同一corner・同一尺・同一tierの最低8本を比較し、1回に1形式だけを
+YouTube投稿成功1本へ適用する。その動画が評価閾値に届くまで同じcornerの次実験は待機する。
 
 個別レイヤのテスト:
 ```bash

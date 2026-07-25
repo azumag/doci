@@ -58,3 +58,4 @@ token = "secrets/youtube-growth/youtube_token.json"
 research = true
 factcheck = true
 plan = true
+performance_feedback = true

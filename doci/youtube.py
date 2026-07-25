@@ -20,6 +20,10 @@ from . import config
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 ACCOUNT_SCOPES = [*SCOPES, "https://www.googleapis.com/auth/youtube.readonly"]
+ANALYTICS_SCOPES = [
+    *ACCOUNT_SCOPES,
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+]
 
 
 def _token_has_scopes(token_file: Path, required_scopes: list[str]) -> bool:
@@ -204,6 +208,118 @@ def search_public_videos(
     return results
 
 
+def video_details(
+    video_ids: list[str],
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> list[dict]:
+    """所有動画を含む動画別の公開統計・状態を読み取る（更新操作なし）。"""
+    from googleapiclient.discovery import build
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return []
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ACCOUNT_SCOPES,
+    )
+    service = build("youtube", "v3", credentials=creds)
+    results: list[dict] = []
+    for offset in range(0, len(ids), 50):
+        data = (
+            service.videos()
+            .list(
+                part="snippet,contentDetails,statistics,status",
+                id=",".join(ids[offset : offset + 50]),
+            )
+            .execute()
+        )
+        for item in data.get("items", []):
+            snippet = item.get("snippet", {})
+            statistics = item.get("statistics", {})
+            status = item.get("status", {})
+            results.append(
+                {
+                    "video_id": item.get("id", ""),
+                    "title": snippet.get("title", ""),
+                    "published_at": snippet.get("publishedAt", ""),
+                    "duration": item.get("contentDetails", {}).get("duration", ""),
+                    "privacy_status": status.get("privacyStatus", ""),
+                    "views": int(statistics.get("viewCount", 0) or 0),
+                    "likes": int(statistics.get("likeCount", 0) or 0),
+                    "comments": int(statistics.get("commentCount", 0) or 0),
+                }
+            )
+    return results
+
+
+def video_analytics(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> list[dict]:
+    """YouTube Analytics APIの動画別retention/watch指標を読み取る。"""
+    from googleapiclient.discovery import build
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return []
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    metrics = (
+        "views,estimatedMinutesWatched,averageViewDuration,"
+        "averageViewPercentage,likes,comments"
+    )
+    results: list[dict] = []
+    for offset in range(0, len(ids), 200):
+        data = (
+            service.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics=metrics,
+                dimensions="video",
+                filters=f"video=={','.join(ids[offset : offset + 200])}",
+                sort="-views",
+                maxResults=200,
+            )
+            .execute()
+        )
+        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        for values in data.get("rows", []):
+            row = dict(zip(headers, values))
+            results.append(
+                {
+                    "video_id": str(row.get("video", "")),
+                    "views": int(row.get("views", 0) or 0),
+                    "estimated_minutes_watched": float(
+                        row.get("estimatedMinutesWatched", 0) or 0
+                    ),
+                    "average_view_duration": float(
+                        row.get("averageViewDuration", 0) or 0
+                    ),
+                    "average_view_percentage": float(
+                        row.get("averageViewPercentage", 0) or 0
+                    ),
+                    "likes": int(row.get("likes", 0) or 0),
+                    "comments": int(row.get("comments", 0) or 0),
+                }
+            )
+    return results
+
+
 def _video_id(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -344,6 +460,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="YouTube アップロード")
     ap.add_argument("--auth", action="store_true", help="初回OAuth同意してtokenを保存")
     ap.add_argument(
+        "--analytics",
+        action="store_true",
+        help="--auth時にYouTube Analytics読み取りscopeも要求",
+    )
+    ap.add_argument(
         "--whoami",
         action="store_true",
         help="tokenが紐づくYouTubeチャンネルIDと表示名を確認",
@@ -368,7 +489,7 @@ def main() -> None:
             interactive=True,
             token_file=token_file,
             client_secret_file=client_secret_file,
-            scopes=ACCOUNT_SCOPES,
+            scopes=ANALYTICS_SCOPES if args.analytics else ACCOUNT_SCOPES,
         )
         print(f"認証完了: {token_file}")
         return

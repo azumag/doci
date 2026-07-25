@@ -314,7 +314,11 @@ def generate(
     day: str,
     past_topics: list[str],
     topic_guard: Callable[[str], None] | None = None,
+    performance_decision: dict | None = None,
 ) -> dict:
+    performance_guidance = str(
+        (performance_decision or {}).get("guidance") or ""
+    )
     # 1) 前段リサーチ（issue #6）: 題材選定＋Web裏取り。失敗してもリサーチ無しで続行。
     research = None
     if spec.pipeline_get("research", config.SCRIPT_RESEARCH):
@@ -322,7 +326,12 @@ def generate(
 
         _log(f"前段リサーチ ({config.RESEARCH_BACKEND}+Web)…")
         try:
-            research = research_mod.web_research(corner, past_topics, spec)
+            research = research_mod.web_research(
+                corner,
+                past_topics,
+                spec,
+                performance_guidance=performance_guidance,
+            )
             if research:
                 _log(f"題材: {research.get('topic', '')} / 裏取り事実 {len(research.get('facts', []))}件")
         except Exception as e:  # noqa: BLE001
@@ -350,7 +359,13 @@ def generate(
     # 2) 執筆（qwen3.7-plus 等）。リサーチの具体＋プランの構成/図表に沿わせる。
     #    稀に不完全JSONを返すため再生成で吸収。
     prompt = corners.build_prompt(
-        spec, corner, day, past_topics, research=research, plan=plan
+        spec,
+        corner,
+        day,
+        past_topics,
+        research=research,
+        plan=plan,
+        performance_guidance=performance_guidance,
     )
     script = None
     last_err: Exception | None = None
@@ -435,6 +450,8 @@ def generate(
     script["_date"] = day
     if research:
         script["_research"] = research
+    if performance_decision:
+        script["_performance_feedback"] = performance_decision
     return script
 
 

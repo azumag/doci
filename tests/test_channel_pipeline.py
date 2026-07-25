@@ -158,7 +158,7 @@ factcheck = false
             patch.object(config, "SCRIPT_RESEARCH", True),
             patch.object(config, "SCRIPT_PLAN", True),
             patch.object(config, "SCRIPT_FACTCHECK", True),
-            patch.object(ai_text, "_dispatch", return_value=raw),
+            patch.object(ai_text, "_dispatch", return_value=raw) as dispatch_mock,
         ):
             guarded_topics: list[str] = []
             script = ai_text.generate(
@@ -167,12 +167,23 @@ factcheck = false
                 "2026-07-16",
                 [],
                 topic_guard=guarded_topics.append,
+                performance_decision={
+                    "decision_id": "decision-1",
+                    "guidance": "retention形式を1変数だけ試す",
+                },
             )
 
         self.assertEqual(script["_channel"], "alpha")
         self.assertEqual(script["_corner"], "a")
         self.assertEqual(script["_speaker"], 41)
         self.assertEqual(guarded_topics, ["Title Description"])
+        self.assertEqual(
+            script["_performance_feedback"]["decision_id"], "decision-1"
+        )
+        self.assertIn(
+            "retention形式を1変数だけ試す",
+            dispatch_mock.call_args.args[0],
+        )
 
     def test_generate_guards_researched_topic_before_drafting(self) -> None:
         spec = self._make_spec(

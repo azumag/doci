@@ -27,6 +27,7 @@ def build_prompt(
     past_topics: list[str],
     research: dict | None = None,
     plan: dict | None = None,
+    performance_guidance: str = "",
 ) -> str:
     """チャンネルの persona / corner と共通または上書き規則を結合する。"""
     persona = corner.persona_path.read_text(encoding="utf-8")
@@ -35,6 +36,13 @@ def build_prompt(
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
     corner_body = corner_tpl.replace("{date}", date).replace("{past_topics}", past)
     prompt = f"{persona}\n\n{rules}\n\n{corner_body}\n"
+    if performance_guidance:
+        prompt += (
+            "\n## このチャンネル自身の実績から得た形式仮説\n"
+            f"{performance_guidance}\n"
+            "題材の再利用ではなく、次回1本の形式実験にだけ使うこと。"
+            "最近の題材とtopic cooldownを必ず優先する。\n"
+        )
     if research:
         from . import research as research_mod
 

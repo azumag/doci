@@ -44,7 +44,12 @@ class _VideosRequest:
                     "id": "abc123",
                     "snippet": {"description": "章立てを含む全文説明欄"},
                     "contentDetails": {"duration": "PT8M12S"},
-                    "statistics": {"viewCount": "12000", "likeCount": "430"},
+                    "statistics": {
+                        "viewCount": "12000",
+                        "likeCount": "430",
+                        "commentCount": "12",
+                    },
+                    "status": {"privacyStatus": "public"},
                 }
             ]
         }
@@ -110,6 +115,56 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(transcript, "冒頭で結論を見せる 次に実例を説明する")
         self.assertEqual(cached, transcript)
         api.fetch.assert_called_once_with("abc", languages=["ja"])
+
+    def test_video_details_returns_read_only_performance_fields(self) -> None:
+        service = _Service()
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_details(["abc123"])
+
+        self.assertEqual(results[0]["views"], 12000)
+        self.assertEqual(results[0]["likes"], 430)
+        self.assertEqual(results[0]["comments"], 12)
+        self.assertEqual(results[0]["privacy_status"], "public")
+        self.assertEqual(
+            service.videos_resource.kwargs["part"],
+            "snippet,contentDetails,statistics,status",
+        )
+
+    def test_video_analytics_maps_column_headers(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "views"},
+                {"name": "estimatedMinutesWatched"},
+                {"name": "averageViewDuration"},
+                {"name": "averageViewPercentage"},
+                {"name": "likes"},
+                {"name": "comments"},
+            ],
+            "rows": [["abc123", 80, 120.5, 90.0, 72.4, 5, 2]],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_analytics(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(results[0]["average_view_percentage"], 72.4)
+        self.assertEqual(results[0]["views"], 80)
+        self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video")
+        self.assertEqual(reports.query.call_args.kwargs["filters"], "video==abc123")
+        self.assertEqual(reports.query.call_args.kwargs["sort"], "-views")
+        self.assertEqual(reports.query.call_args.kwargs["maxResults"], 200)
 
 
 if __name__ == "__main__":
