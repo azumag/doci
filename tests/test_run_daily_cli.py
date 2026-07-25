@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from doci import run_daily
+from doci import history, run_daily
 
 
 class RunDailyCliTest(unittest.TestCase):
@@ -68,6 +68,81 @@ class RunDailyCliTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(summary["succeeded"], 0)
         self.assertEqual(summary["failed"], 2)
+
+    def test_all_channels_treats_topic_cooldown_as_normal_skip(self) -> None:
+        match = history.TopicMatch(
+            topic="既存テーマ",
+            ts="2026-07-01T00:00:00+00:00",
+            similarity=0.9,
+            source="公開済み",
+        )
+        skip = history.TopicCooldownSkip("重複テーマ", match, 30)
+        with (
+            patch.object(run_daily.channel, "discover", return_value=["alpha"]),
+            patch.object(
+                run_daily.channel,
+                "load",
+                return_value=SimpleNamespace(id="alpha"),
+            ),
+            patch.object(run_daily, "run", side_effect=skip),
+        ):
+            summary, exit_code = run_daily._run_all_channels(
+                "2026-07-17", do_upload=True, video_scenes=0
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(summary["succeeded"], 0)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["channels"][0]["status"], "skipped")
+        self.assertIn("過去30日以内", summary["channels"][0]["reason"])
+
+    def test_run_cancels_active_reservation_when_production_fails(self) -> None:
+        spec = SimpleNamespace(id="alpha")
+        state = {
+            "spec": spec,
+            "corner": "video",
+            "topic": "失敗した題材",
+            "reservation_id": "reservation",
+        }
+
+        def fail_once(*args):
+            args[-1].update(state)
+            raise RuntimeError("tts failed")
+
+        with (
+            patch.object(run_daily, "_run_once", side_effect=fail_once),
+            patch.object(run_daily.history, "cancel_topic") as cancel_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "tts failed"):
+                run_daily.run(spec, "2026-07-17", "video", True, 0)
+
+        cancel_mock.assert_called_once()
+        self.assertEqual(cancel_mock.call_args.args[3], "reservation")
+
+    def test_run_keeps_queue_when_external_publish_already_succeeded(self) -> None:
+        spec = SimpleNamespace(id="alpha")
+
+        def fail_after_publish(*args):
+            args[-1].update(
+                {
+                    "spec": spec,
+                    "corner": "video",
+                    "topic": "公開済み題材",
+                    "reservation_id": "reservation",
+                    "external_published": True,
+                }
+            )
+            raise OSError("history write failed")
+
+        with (
+            patch.object(run_daily, "_run_once", side_effect=fail_after_publish),
+            patch.object(run_daily.history, "cancel_topic") as cancel_mock,
+        ):
+            with self.assertRaisesRegex(OSError, "history write failed"):
+                run_daily.run(spec, "2026-07-17", "video", True, 0)
+
+        cancel_mock.assert_not_called()
 
     def test_list_channels_includes_last_run_and_isolates_bad_config(self) -> None:
         alpha = SimpleNamespace(id="alpha", name="Alpha")

@@ -160,11 +160,57 @@ factcheck = false
             patch.object(config, "SCRIPT_FACTCHECK", True),
             patch.object(ai_text, "_dispatch", return_value=raw),
         ):
-            script = ai_text.generate(spec, spec.corners["a"], "2026-07-16", [])
+            guarded_topics: list[str] = []
+            script = ai_text.generate(
+                spec,
+                spec.corners["a"],
+                "2026-07-16",
+                [],
+                topic_guard=guarded_topics.append,
+            )
 
         self.assertEqual(script["_channel"], "alpha")
         self.assertEqual(script["_corner"], "a")
         self.assertEqual(script["_speaker"], 41)
+        self.assertEqual(guarded_topics, ["Title Description"])
+
+    def test_generate_guards_researched_topic_before_drafting(self) -> None:
+        spec = self._make_spec(
+            "alpha",
+            pipeline="""\
+[pipeline]
+research = true
+plan = false
+factcheck = false
+""",
+        )
+        guarded_topics: list[str] = []
+
+        def reject(topic: str) -> None:
+            guarded_topics.append(topic)
+            raise RuntimeError("duplicate topic")
+
+        with (
+            patch(
+                "doci.research.web_research",
+                return_value={
+                    "topic": "既存と重複する題材",
+                    "facts": [{"claim": "fact", "source_url": "https://example.com"}],
+                },
+            ),
+            patch.object(ai_text, "_dispatch") as dispatch_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "duplicate topic"):
+                ai_text.generate(
+                    spec,
+                    spec.corners["a"],
+                    "2026-07-16",
+                    [],
+                    topic_guard=reject,
+                )
+
+        self.assertEqual(guarded_topics, ["既存と重複する題材"])
+        dispatch_mock.assert_not_called()
 
     def test_run_daily_scopes_workdir_voice_and_history_to_channel(self) -> None:
         spec = self._make_spec("alpha")

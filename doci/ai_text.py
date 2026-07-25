@@ -12,6 +12,7 @@ import argparse
 import json
 import re
 import subprocess
+from collections.abc import Callable
 import sys
 import time
 import urllib.error
@@ -312,6 +313,7 @@ def generate(
     corner: CornerSpec,
     day: str,
     past_topics: list[str],
+    topic_guard: Callable[[str], None] | None = None,
 ) -> dict:
     # 1) 前段リサーチ（issue #6）: 題材選定＋Web裏取り。失敗してもリサーチ無しで続行。
     research = None
@@ -326,6 +328,10 @@ def generate(
         except Exception as e:  # noqa: BLE001
             _log(f"リサーチ失敗→リサーチ無しで続行: {e}")
             research = None
+    if research and topic_guard:
+        # リサーチで題材が確定した時点で予約する。構成・執筆・音声・映像より前なので、
+        # 重複候補に制作コストを使わず、並行runも同じ題材を選べない。
+        topic_guard(str(research.get("topic") or ""))
 
     # 1.5) 構成プラン（issue #2）: minimax で起承転結＋図表を設計。失敗してもプラン無しで続行。
     plan = None
@@ -380,6 +386,13 @@ def generate(
 
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
+    if not research and topic_guard:
+        # リサーチがフォールバックしたrunでも、動画生成・投稿へ進む前に
+        # タイトルと概要の先頭行を題材としてcooldownを適用する。
+        topic_guard(
+            f"{script.get('title', '')} "
+            f"{str(script.get('description') or '').splitlines()[0] if script.get('description') else ''}"
+        )
 
     # 2.4) 救済: 執筆モデルが narration に図表マーカーをインラインした場合、本文から除去して
     #      相当する scene へ chart_id を移す（音声へのJSON混入と図表欠落を同時に防ぐ）。

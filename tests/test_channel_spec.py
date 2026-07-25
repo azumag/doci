@@ -112,6 +112,30 @@ voice = "narrator"
         self.assertTrue(spec.pipeline_get("research"))
         self.assertTrue(spec.pipeline_get("factcheck"))
         self.assertTrue(spec.pipeline_get("plan"))
+        self.assertEqual(
+            spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS),
+            30,
+        )
+
+    def test_rejects_invalid_topic_cooldown_days(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+topic_cooldown_days = -1
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "topic_cooldown_days"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
 
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\
