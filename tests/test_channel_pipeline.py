@@ -22,6 +22,7 @@ class ChannelPipelineTest(unittest.TestCase):
         channel_id: str,
         *,
         output_rules: str | None = None,
+        output_rules_addendum: str | None = None,
         pipeline: str = "",
     ) -> channel.ChannelSpec:
         root = self.channels_dir / channel_id
@@ -37,6 +38,11 @@ class ChannelPipelineTest(unittest.TestCase):
         (prompts / "corner_b.md").write_text("CORNER-B", encoding="utf-8")
         if output_rules is not None:
             (prompts / "output_rules.md").write_text(output_rules, encoding="utf-8")
+        if output_rules_addendum is not None:
+            (prompts / "output_rules_addendum.md").write_text(
+                output_rules_addendum,
+                encoding="utf-8",
+            )
         (root / "voices.json").write_text(
             json.dumps(
                 {
@@ -96,6 +102,35 @@ voice = "voice_b"
         self.assertIn("CORNER-A 2026-07-16 既出テーマ", prompt)
         self.assertIn(common_rules, prompt)
 
+    def test_missing_addendum_preserves_legacy_prompt_bytes(self) -> None:
+        spec = self._make_spec("alpha")
+        persona = spec.corners["a"].persona_path.read_text(encoding="utf-8")
+        rules = (config.PROMPTS / "output_rules.md").read_text(encoding="utf-8")
+        corner = "CORNER-A 2026-07-16 既出テーマ"
+
+        prompt = corners.build_prompt(
+            spec,
+            spec.corners["a"],
+            "2026-07-16",
+            ["既出テーマ"],
+        )
+
+        self.assertEqual(prompt, f"{persona}\n\n{rules}\n\n{corner}\n")
+
+    def test_channel_output_rules_addendum_follows_common_rules(self) -> None:
+        spec = self._make_spec(
+            "alpha",
+            output_rules_addendum="CHANNEL-ADDENDUM",
+        )
+        common_rules = (config.PROMPTS / "output_rules.md").read_text(encoding="utf-8")
+
+        prompt = corners.build_prompt(spec, spec.corners["a"], "2026-07-16", [])
+
+        self.assertIn(
+            f"{common_rules}\n\nCHANNEL-ADDENDUM\n\nCORNER-A",
+            prompt,
+        )
+
     def test_channel_output_rules_override_common_rules(self) -> None:
         spec = self._make_spec("alpha", output_rules="CHANNEL-RULES-ONLY")
 
@@ -105,6 +140,53 @@ voice = "voice_b"
         self.assertNotIn(
             (config.PROMPTS / "output_rules.md").read_text(encoding="utf-8"),
             prompt,
+        )
+
+    def test_youtube_growth_addendum_is_scoped_to_its_channel(self) -> None:
+        youtube_growth = channel.load("youtube-growth")
+        ideology = channel.load("ideology")
+        local_rules = (
+            "冒頭の二〜四文を短い「結論と次の一手」にします",
+            "共通ルールの「つかみは問いから」を適用しません",
+            "次に試す行動、測る数字、または判断基準を宣言的な文で示して締めます",
+            "「あなたはどう思いますか」「どうでしょうか」",
+        )
+
+        for corner in youtube_growth.corners.values():
+            with self.subTest(corner=corner.key):
+                prompt = corners.build_prompt(
+                    youtube_growth,
+                    corner,
+                    "2026-07-26",
+                    [],
+                )
+                for local_rule in local_rules:
+                    self.assertIn(local_rule, prompt)
+                    self.assertGreater(
+                        prompt.index(local_rule),
+                        prompt.index("つかみは問いから"),
+                    )
+
+        ideology_corner = ideology.corners["communism"]
+        ideology_prompt = corners.build_prompt(
+            ideology,
+            ideology_corner,
+            "2026-07-26",
+            [],
+        )
+        ideology_persona = ideology_corner.persona_path.read_text(encoding="utf-8")
+        common_rules = (config.PROMPTS / "output_rules.md").read_text(encoding="utf-8")
+        ideology_corner_body = ideology_corner.corner_path.read_text(
+            encoding="utf-8"
+        ).replace("{date}", "2026-07-26").replace(
+            "{past_topics}",
+            "（まだありません）",
+        )
+        for local_rule in local_rules:
+            self.assertNotIn(local_rule, ideology_prompt)
+        self.assertEqual(
+            ideology_prompt,
+            f"{ideology_persona}\n\n{common_rules}\n\n{ideology_corner_body}\n",
         )
 
     def test_history_is_isolated_by_channel(self) -> None:

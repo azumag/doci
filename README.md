@@ -170,6 +170,10 @@ token = "secrets/sample/youtube_token.json"
 
 優先順位は「CLIの実行対象指定 → channel.toml → `.env` のグローバル既定値」。
 `PUBLISH_*=0` と `PUBLISH_DRY_RUN=1` は安全弁として常に優先する。
+台本の出力規則は共通の `doci/prompts/output_rules.md`（またはチャンネル側の
+`prompts/output_rules.md` による全面上書き）の後へ、任意の
+`channels/<id>/prompts/output_rules_addendum.md` を追加できる。追加ファイルがない
+チャンネルのプロンプトは従来どおりとなる。
 `pipeline.topic_cooldown_days` は公開済み・キュー済みの近似題材を再利用しない期間で、
 既定は30日、`0`で無効化する。重複runは動画生成・投稿前に正常スキップされ、理由が
 チャンネル別 `history.jsonl` に記録される。

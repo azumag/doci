@@ -20,6 +20,10 @@ def _output_rules_path(spec: ChannelSpec) -> Path:
     return override if override.is_file() else config.PROMPTS / "output_rules.md"
 
 
+def _output_rules_addendum_path(spec: ChannelSpec) -> Path:
+    return spec.root / "prompts" / "output_rules_addendum.md"
+
+
 def build_prompt(
     spec: ChannelSpec,
     corner: CornerSpec,
@@ -29,13 +33,19 @@ def build_prompt(
     plan: dict | None = None,
     performance_guidance: str = "",
 ) -> str:
-    """チャンネルの persona / corner と共通または上書き規則を結合する。"""
+    """persona / 出力規則 / チャンネル追加規則 / corner を結合する。"""
     persona = corner.persona_path.read_text(encoding="utf-8")
     rules = _output_rules_path(spec).read_text(encoding="utf-8")
     corner_tpl = corner.corner_path.read_text(encoding="utf-8")
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
     corner_body = corner_tpl.replace("{date}", date).replace("{past_topics}", past)
-    prompt = f"{persona}\n\n{rules}\n\n{corner_body}\n"
+    addendum_path = _output_rules_addendum_path(spec)
+    if addendum_path.is_file():
+        addendum = addendum_path.read_text(encoding="utf-8")
+        prompt = f"{persona}\n\n{rules}\n\n{addendum}\n\n{corner_body}\n"
+    else:
+        # 追加規則がないチャンネルでは従来のプロンプトを1バイトも変えない。
+        prompt = f"{persona}\n\n{rules}\n\n{corner_body}\n"
     if performance_guidance:
         prompt += (
             "\n## このチャンネル自身の実績から得た形式仮説\n"
