@@ -48,13 +48,37 @@ class WriteTimeoutTest(unittest.TestCase):
                 ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
             ) as urlopen_mock,
         ):
-            result = ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus")
+            result = ai_text._run_opencode_go(
+                "prompt",
+                "opencode-go/qwen3.7-plus",
+                timeout=17,
+            )
 
         self.assertEqual(result, '{"title":"ok"}')
-        self.assertIsNone(urlopen_mock.call_args.kwargs["timeout"])
+        self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 17)
         request = urlopen_mock.call_args.args[0]
         self.assertEqual(request.headers["X-api-key"], "test-key")
         self.assertEqual(request.headers["User-agent"], "doci/1.0")
+
+    def test_opencode_go_default_uses_write_timeout(self) -> None:
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        events = b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n'
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ) as urlopen_mock,
+        ):
+            self.assertEqual(ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus"), "ok")
+
+        self.assertIsNone(urlopen_mock.call_args.kwargs["timeout"])
 
     def test_positive_value_is_kept(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
@@ -68,7 +92,19 @@ class WriteTimeoutTest(unittest.TestCase):
 
         self.assertEqual(run_mock.call_args.kwargs["timeout"], 900)
 
-    def test_zero_disables_claude_fallback_timeout(self) -> None:
+    def test_opencode_agent_remains_selectable_when_model_is_empty(self) -> None:
+        with (
+            mock.patch.object(config, "TEXT_BACKEND", "opencode"),
+            mock.patch.object(config, "TEXT_MODEL", "legacy-model"),
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
+            mock.patch.object(config, "OPENCODE_AGENT", "custom-agent"),
+            mock.patch.object(ai_text, "_run_opencode", return_value="{}") as run_mock,
+        ):
+            self.assertEqual(ai_text._dispatch("prompt"), "{}")
+
+        run_mock.assert_called_once_with("prompt", "", "custom-agent")
+
+    def test_zero_disables_explicit_claude_timeout(self) -> None:
         with (
             mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
             mock.patch.object(ai_text.llm, "run_claude", return_value="{}") as run_mock,

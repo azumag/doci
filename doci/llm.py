@@ -1,8 +1,8 @@
-"""claude CLI / codex exec の薄いラッパと JSON 抽出（台本リサーチ/ファクトチェック共通）。
+"""Codex exec と旧Claude CLIの薄いラッパ、JSON抽出（リサーチ/ファクトチェック共通）。
 
-`claude -p ... --output-format json` をヘッドレスで叩く。Web検索が要る段は
+Codex exec は明示設定時の経路。`claude -p ... --output-format json` は旧設定を明示した場合だけ叩く。Web検索が要る段は
 `allowed_tools=["WebSearch","WebFetch"]` を渡す（print モードで実検索が走ることを実測確認済）。
-`run_codex` は代替バックエンド（codex exec + MiniMax-M3 等）で、隔離 CODEX_HOME 配下の
+`run_codex` は本番バックエンド（codex exec + MiniMax-M3 等）で、隔離 CODEX_HOME 配下の
 sandbox からシェル(curl等)でWeb検索/取得させる。
 """
 from __future__ import annotations

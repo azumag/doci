@@ -11,6 +11,73 @@ from doci.channel import CornerSpec
 
 
 class ResearchPromptTest(unittest.TestCase):
+    def test_unknown_backend_fails_closed_without_claude(self) -> None:
+        with (
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode-go"),
+            mock.patch.object(research.llm, "run_claude") as claude_mock,
+        ):
+            with self.assertRaisesRegex(ValueError, "未対応のRESEARCH_BACKEND"):
+                research._attempt("prompt")
+        claude_mock.assert_not_called()
+
+    def test_opencode_go_without_retrieved_sources_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            persona = root / "persona.md"
+            corner_prompt = root / "corner.md"
+            persona.write_text("歴史解説者", encoding="utf-8")
+            corner_prompt.write_text("一次史料を優先", encoding="utf-8")
+            corner = CornerSpec(
+                key="history",
+                label="歴史",
+                persona_path=persona,
+                corner_path=corner_prompt,
+                voice_key="narrator",
+            )
+            raw = json.dumps(
+                {
+                    "topic": "題材",
+                    "facts": [{"claim": "確認済み", "source_url": "https://example.org/source"}],
+                },
+                ensure_ascii=False,
+            )
+            with (
+                mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+                mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+                mock.patch.object(research, "_search_reference_materials", return_value=[]),
+                mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
+                mock.patch.object(research.llm, "run_claude") as claude_mock,
+            ):
+                result = research.web_research(corner, [])
+
+        run_mock.assert_not_called()
+        claude_mock.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_opencode_go_normalizes_allowed_youtube_source_urls(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "題材",
+                "facts": [
+                    {
+                        "claim": "確認済み",
+                        "source_url": "https://www.youtube.com/watch?v=abc&t=3",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=raw),
+        ):
+            result = research._attempt(
+                "prompt",
+                allowed_source_urls={"youtube:abc"},
+            )
+
+        self.assertEqual(result["facts"][0]["source_url"], "https://www.youtube.com/watch?v=abc&t=3")
+
     def test_prompt_includes_channel_guidance_and_primary_source_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

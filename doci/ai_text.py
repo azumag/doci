@@ -1,8 +1,8 @@
-"""台本生成（opus 4.8）。
+"""台本生成（OpenCode Go / qwen3.7-plus）。
 
 Minimax は文章生成に使わない（方針）。
 バックエンド:
-  - claude_cli (既定/ローカル): 認証済みの `claude` CLI を print モードで呼ぶ
+  - claude_cli (旧・明示時のみ): 認証済みの `claude` CLI を print モードで呼ぶ
   - anthropic        (クラウド): Anthropic API (ANTHROPIC_API_KEY) を直叩き
   - opencode         (代替):     `opencode run --agent ...`
 """
@@ -81,8 +81,19 @@ def _opencode_go_key() -> str:
     return key
 
 
-def _run_opencode_go(prompt: str, model: str) -> str:
+def _opencode_go_model(model: str) -> str:
+    if not model or model.startswith(("claude-", "anthropic/")):
+        return config.OPENCODE_GO_DEFAULT_MODEL
+    return model
+
+
+def _run_opencode_go(
+    prompt: str,
+    model: str,
+    timeout: int | None = None,
+) -> str:
     """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
+    model = _opencode_go_model(model)
     if not model:
         raise RuntimeError("OPENCODE_MODEL が未設定です (TEXT_BACKEND=opencode_go)")
     provider, sep, model_id = model.partition("/")
@@ -117,8 +128,9 @@ def _run_opencode_go(prompt: str, model: str) -> str:
     text_parts: list[str] = []
     text_chars = 0
     stop_reason = ""
+    request_timeout = _write_timeout() if timeout is None else (timeout if timeout > 0 else None)
     try:
-        with urllib.request.urlopen(req, timeout=_write_timeout()) as resp:
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data:"):
@@ -218,7 +230,7 @@ def _dispatch(prompt: str) -> str:
     if backend == "anthropic":
         return _run_anthropic(prompt, model)
     if backend == "opencode_go":
-        return _run_opencode_go(prompt, config.OPENCODE_MODEL)
+        return _run_opencode_go(prompt, config.OPENCODE_MODEL or model)
     if backend == "opencode":
         return _run_opencode(prompt, config.OPENCODE_MODEL, config.OPENCODE_AGENT)
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")
@@ -383,22 +395,6 @@ def generate(
                 f"執筆失敗(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: "
                 f"{type(e).__name__}: {str(e)[:160]}"
             )
-    # フォールバック: 主バックエンド(例 opencode/qwen)が規定回数で揃わなかった場合、
-    # 稼働実績のある claude_cli で執筆をやり直す。qwen のハング/不調で通し全体が
-    # 「執筆失敗」で終わるのを防ぐ安全網（qwen はあくまで主のまま）。
-    if script is None and config.TEXT_BACKEND != "claude_cli":
-        _log(f"執筆({config.TEXT_BACKEND})が揃わず→claude_cli にフォールバック")
-        for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
-            try:
-                script = _validate(_extract_json(_run_claude_cli(prompt, config.FALLBACK_TEXT_MODEL)))
-                break
-            except (ValueError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
-                last_err = e
-                _log(
-                    f"claudeフォールバック失敗(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再試行: "
-                    f"{type(e).__name__}: {str(e)[:160]}"
-                )
-
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
     if not research and topic_guard:
@@ -428,7 +424,7 @@ def generate(
         if used:
             _log(f"図表を {used} シーンに配置")
 
-    # 3) 後段ファクトチェック（issue #6）: 別モデル(opus)＋Web検証で narration を自動修正。
+    # 3) 後段ファクトチェック（issue #6）: 別モデル＋Web検証で narration を自動修正。
     if spec.pipeline_get("factcheck", config.SCRIPT_FACTCHECK):
         from . import factcheck
 
@@ -456,7 +452,7 @@ def generate(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="台本生成 (opus 4.8)")
+    ap = argparse.ArgumentParser(description="台本生成 (OpenCode Go / qwen3.7-plus)")
     ap.add_argument("--channel", help="チャンネルID（未指定時は既定チャンネル）")
     ap.add_argument("--corner", help="コーナーID")
     ap.add_argument("--date", default=_date.today().isoformat())

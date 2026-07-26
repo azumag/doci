@@ -1,21 +1,25 @@
 """前段リサーチ (issue #6)。
 
-claude CLI の Web ツール、または codex exec(+MiniMax-M3)のシェル経由Web取得で、
-コーナーに合う「きょうの題材」を1つ選び、検証可能な具体事実（人名・年・数字・定義・具体例）を
-実ソースで裏取りして返す。下書き(minimax-m3)はこの「参考事実」を具体として織り込む。
+OpenCode Goで提示された候補・一次資料URLを整理する（codexは明示時のみWeb取得）経路で、
+コーナーに合う「きょうの題材」を1つ選び、提示資料から確認できる具体事実（人名・年・数字・定義・具体例）を
+参考事実として返す。下書き(OpenCode Go)はこの「参考事実」を具体として織り込む。
 出典は本文には出さない。
 """
 from __future__ import annotations
 
 import json
-from urllib.parse import urlparse
+import re
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.request import Request, urlopen
 
 from . import config, llm
 from .channel import ChannelSpec, CornerSpec
 
-# バックエンドごとの「Webで確認する」手順の言い回し。claude は従来どおり WebSearch/WebFetch
-# ツールを使わせる。codex はツールを持たないためシェルの curl 等での取得を明示的に指示する。
+# バックエンドごとの「Webで確認する」手順の言い回し。OpenCode Goは候補・一次資料URLを
+# 参照して整理し、codex はシェルの curl 等での取得を明示的に指示する。
 _WEB_HOWTO = {
+    "opencode_go": "提示された候補・一次資料URLを参照し、確認できた範囲だけを採用して",
     "claude": "WebSearch / WebFetch で確認し、",
     "codex": (
         "シェルで curl 等を使い、Web検索（例: https://duckduckgo.com/html/?q=... や "
@@ -34,6 +38,8 @@ _PROMPT = """\
 {performance_guidance}
 YouTube Data APIで取得した公開動画候補（YouTube系チャンネルの場合のみ）:
 {video_candidates}
+取得済み一次資料（本文抜粋。これらのURL以外を出典にしない）:
+{reference_materials}
 
 やること:
 1. このコーナーに合う、具体的で語り甲斐のある題材を1つ選ぶ（抽象概念そのものでなく、出来事・人物・制度・数字に落ちるもの）。
@@ -79,18 +85,102 @@ _YOUTUBE_CASE_STUDY_RULE = """\
 """
 
 # codex は内部知識だけで済ませがちなため、実際に取得したページに基づけと念押しする一文を足す。
-# claude は従来プロンプトと完全に同一にするため空のまま。
+# OpenCode Goは候補URLの内容に限定する。
 _EXTRA_RULES = {
+    "opencode_go": "   - 提示されたURLや候補の内容だけを根拠にし、確認できない事実・URLは作らないこと。\n",
     "claude": "",
     "codex": "   - 内部知識だけで書いてはいけない。必ず取得したページの内容に基づくこと。\n",
 }
+
+
+class _SearchResultParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[dict[str, str]] = []
+        self._href = ""
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        values = dict(attrs)
+        classes = (values.get("class") or "").split()
+        if "result__a" in classes and values.get("href"):
+            self._href = values["href"] or ""
+            self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._href:
+            title = " ".join("".join(self._text).split())
+            if title:
+                self.results.append({"url": self._href, "title": title})
+            self._href = ""
+            self._text = []
+
+
+def _decode_search_url(url: str) -> str:
+    parsed = urlparse(url if not url.startswith("//") else f"https:{url}")
+    if (parsed.hostname or "").endswith("duckduckgo.com"):
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        url = unquote(target)
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    return url
+
+
+def _page_excerpt(url: str) -> str:
+    try:
+        request = Request(url, headers={"User-Agent": "doci/1.0"})
+        with urlopen(request, timeout=8) as response:
+            body = response.read(12000).decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - source discovery is best effort
+        return ""
+    text = re.sub(r"<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>", " ", body, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return " ".join(text.split())[:1800]
+
+
+def _search_reference_materials(label: str) -> list[dict[str, str]]:
+    """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
+    search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(f"{label} 公式 一次資料")
+    try:
+        with urlopen(Request(search_url, headers={"User-Agent": "doci/1.0"}), timeout=12) as response:
+            html = response.read(180000).decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - research falls back safely when search is unavailable
+        return []
+    parser = _SearchResultParser()
+    parser.feed(html)
+    materials: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in parser.results[:8]:
+        url = _decode_search_url(row["url"])
+        if not url or url in seen:
+            continue
+        excerpt = _page_excerpt(url)
+        if not excerpt:
+            continue
+        seen.add(url)
+        materials.append({"url": url, "title": row["title"], "excerpt": excerpt})
+        if len(materials) >= 4:
+            break
+    return materials
 
 
 def _log(msg: str) -> None:
     print(f"[doci] {msg}", flush=True)
 
 
-def _attempt(prompt: str, *, require_youtube_examples: bool = False) -> dict:
+def _attempt(
+    prompt: str,
+    *,
+    require_youtube_examples: bool = False,
+    allowed_source_urls: set[str] | None = None,
+) -> dict:
     backend = config.RESEARCH_BACKEND
     if backend == "codex":
         raw = llm.run_codex(
@@ -99,20 +189,42 @@ def _attempt(prompt: str, *, require_youtube_examples: bool = False) -> dict:
             timeout=config.SCRIPT_LLM_TIMEOUT,
             min_web_fetches=2,
         )
-    else:
+    elif backend == "opencode_go":
+        from . import ai_text
+
+        if not allowed_source_urls:
+            raise ValueError(
+                "OpenCode Goリサーチは、実取得済みの候補URLがないため安全側にスキップします"
+            )
+        raw = ai_text._run_opencode_go(
+            prompt,
+            ai_text._opencode_go_model(config.RESEARCH_MODEL),
+            timeout=config.SCRIPT_LLM_TIMEOUT,
+        )
+    elif backend == "claude":
         raw = llm.run_claude(
             prompt,
             config.RESEARCH_MODEL,
             allowed_tools=["WebSearch", "WebFetch"],
             timeout=config.SCRIPT_LLM_TIMEOUT,
         )
+    else:
+        raise ValueError(f"未対応のRESEARCH_BACKENDです: {backend}")
     data = llm.extract_json(raw)
     facts = data.get("facts")
     if not data.get("topic") or not isinstance(facts, list) or not facts:
         raise ValueError(f"リサーチ結果が不十分です: {str(data)[:300]}")
     # 出典の無い事実は除外（裏取り済みのみ採用）
     data["facts"] = [f for f in facts if isinstance(f, dict) and f.get("claim") and f.get("source_url")]
+    if backend == "opencode_go":
+        data["facts"] = [
+            fact
+            for fact in data["facts"]
+            if _normalized_source_url(str(fact.get("source_url"))) in allowed_source_urls
+        ]
     if not data["facts"]:
+        if backend == "opencode_go":
+            raise ValueError("許可済みURLに紐づく出典付きの事実がありませんでした")
         raise ValueError("出典付きの事実がありませんでした")
     examples = data.get("examples", [])
     if not isinstance(examples, list):
@@ -153,6 +265,24 @@ def _is_youtube_video_url(url: str) -> bool:
     except ValueError:
         return False
     return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def _normalized_source_url(url: str) -> str:
+    """比較用にクエリ・表記揺れを除いた許可済みURLキーを返す。"""
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/", 1)[0]
+        return f"youtube:{video_id}" if video_id else ""
+    if host == "youtube.com" or host.endswith(".youtube.com"):
+        video_id = parse_qs(parsed.query).get("v", [""])[0]
+        return f"youtube:{video_id}" if video_id else ""
+    if not parsed.scheme or not host:
+        return ""
+    return f"{parsed.scheme.lower()}://{host}{parsed.path.rstrip('/')}"
 
 
 def _is_official_youtube_source(url: str) -> bool:
@@ -220,6 +350,24 @@ def web_research(
     video_candidates = _youtube_video_candidates(
         spec, corner, needs_youtube_examples
     )
+    allowed_source_urls = {
+        normalized
+        for row in video_candidates
+        if isinstance(row, dict) and row.get("url")
+        for normalized in [_normalized_source_url(str(row.get("url")))]
+        if normalized
+    }
+    reference_materials = _search_reference_materials(corner.label) if backend == "opencode_go" else []
+    allowed_source_urls.update(
+        normalized
+        for row in reference_materials
+        if row.get("url")
+        for normalized in [_normalized_source_url(str(row.get("url")))]
+        if normalized
+    )
+    if backend == "opencode_go" and not allowed_source_urls:
+        _log("OpenCode Goリサーチ: 実取得済み候補・資料がないため安全側にスキップ")
+        return None
     prompt = _PROMPT.format(
         label=corner.label,
         channel_guidance=channel_guidance,
@@ -229,6 +377,11 @@ def web_research(
             json.dumps(video_candidates, ensure_ascii=False, indent=2)
             if video_candidates
             else "（候補なし。Web検索で探す）"
+        ),
+        reference_materials=(
+            json.dumps(reference_materials, ensure_ascii=False, indent=2)
+            if reference_materials
+            else "（取得できた資料なし）"
         ),
         web_howto=_WEB_HOWTO.get(backend, _WEB_HOWTO["claude"]),
         video_case_study_rule=(
@@ -240,7 +393,9 @@ def web_research(
     for attempt in range(1, config.SCRIPT_RESEARCH_RETRIES + 1):
         try:
             return _attempt(
-                prompt, require_youtube_examples=needs_youtube_examples
+                prompt,
+                require_youtube_examples=needs_youtube_examples,
+                allowed_source_urls=allowed_source_urls,
             )
         except (ValueError, RuntimeError) as e:  # JSON不正/不十分/CLI失敗を再試行
             last_err = e

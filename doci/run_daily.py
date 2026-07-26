@@ -1,4 +1,4 @@
-"""日次オーケストレータ: コーナー選択→台本(opus4.8)→音声(VOICEVOX)→映像(Minimax)→
+"""日次オーケストレータ: コーナー選択→台本(OpenCode Go)→音声(VOICEVOX)→映像(Minimax)→
 合成(ffmpeg)→YouTubeアップロード(チャンネル別公開判定)→履歴記録。1回で1本生成。
 """
 from __future__ import annotations
@@ -269,7 +269,7 @@ def _run_once(
             )
         except Exception as exc:  # readback不調でも通常生成は継続
             _log(f"実績フィードバック取得失敗→なしで継続: {str(exc)[:240]}")
-    _log("台本生成 (opus 4.8)…")
+    _log("台本生成 (OpenCode Go / qwen3.7-plus)…")
     cooldown_days = int(
         spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
     )

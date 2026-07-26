@@ -58,11 +58,12 @@ def get_bool(key: str, default: bool = False) -> bool:
 
 
 # --- text ---
-TEXT_BACKEND = get("TEXT_BACKEND", "claude_cli")
-TEXT_MODEL = get("TEXT_MODEL", "claude-opus-4-8")
-# 執筆主バックエンド(opencode/qwen)が規定回数で揃わなかった時の claude_cli フォールバック専用モデル。
-# TEXT_MODEL(opus、chart_bg等の他用途と共有)とは別に、フォールバックは軽量な sonnet を使う。
-FALLBACK_TEXT_MODEL = get("FALLBACK_TEXT_MODEL", "claude-sonnet-5")
+OPENCODE_GO_DEFAULT_MODEL = "opencode-go/qwen3.7-plus"
+# 運用の既定経路はOpenCode Go直API。Claudeは明示的に選んだ旧経路以外では呼ばない。
+TEXT_BACKEND = get("TEXT_BACKEND", "opencode_go")
+TEXT_MODEL = get("TEXT_MODEL", OPENCODE_GO_DEFAULT_MODEL)
+# 旧設定との互換性のため値は残すが、本文生成の自動フォールバックには使わない。
+FALLBACK_TEXT_MODEL = get("FALLBACK_TEXT_MODEL", "")
 OPENCODE_AGENT = get("OPENCODE_AGENT", "")
 # provider/model 形式（例: opencode-go/minimax-m3）。指定時は --agent より優先。
 OPENCODE_MODEL = get("OPENCODE_MODEL", "")
@@ -76,17 +77,18 @@ OPENCODE_GO_BASE_URL = get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v
 OPENCODE_GO_MAX_TOKENS = get_int("OPENCODE_GO_MAX_TOKENS", 65536)
 
 # --- 台本品質: 前段リサーチ＋後段ファクトチェック (issue #6) ---
-# SCRIPT_RESEARCH: 下書き前に claude CLI(Webツール)で題材を選び実ソースで裏取りした
+# SCRIPT_RESEARCH: 下書き前に OpenCode Goで題材を選び参考資料を整理した
 #   「参考事実」を作り、下書きに具体を織り込ませる。SCRIPT_FACTCHECK: 下書き後に
-#   別モデル(opus)で事実主張を検証し narration を自動修正する。いずれも既定OFF。
+#   同じ経路で事実主張を検証し narration を自動修正する。いずれも既定OFF。
 SCRIPT_RESEARCH = get_bool("SCRIPT_RESEARCH", False)
 SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
-RESEARCH_MODEL = get("RESEARCH_MODEL", "claude-sonnet-4-6")
-FACTCHECK_MODEL = get("FACTCHECK_MODEL", "claude-opus-4-8")
-# バックエンドを claude CLI から codex exec(+MiniMax-M3)へ切替可能にする。値は claude | codex。
-RESEARCH_BACKEND = get("RESEARCH_BACKEND", "claude")
-FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", "claude")
-CHART_BG_BACKEND = get("CHART_BG_BACKEND", "claude")
+RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_DEFAULT_MODEL)
+FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_DEFAULT_MODEL)
+# リサーチ・検証・図表背景はOpenCode Goを既定にする。codex は明示時の選択肢、
+# claude は既存設定を明示した場合だけ使える後方互換経路。
+RESEARCH_BACKEND = get("RESEARCH_BACKEND", "opencode_go")
+FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", "opencode_go")
+CHART_BG_BACKEND = get("CHART_BG_BACKEND", "opencode_go")
 # 構成プラン(plan.make_plan)のバックエンド。値は opencode | codex。直契約MiniMaxを
 # opencode-goゲートウェイ経由でなく codex exec 経由で使えるようにする。
 PLAN_BACKEND = get("PLAN_BACKEND", "opencode")
@@ -100,7 +102,7 @@ SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
 WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 240)
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
-# リサーチの再試行回数。claude+Web が稀に不正JSONを返すため。高価なので控えめ。
+# リサーチの再試行回数。外部Web取得が稀に不正JSONを返すため。高価なので控えめ。
 SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)
 # 公開済み/キュー済み題材の再利用を避ける既定期間。channel.toml の
 # pipeline.topic_cooldown_days でチャンネル単位に上書きでき、0で無効化する。

@@ -1,6 +1,6 @@
 """図表シーンの背景素材を「テーマ＋図表内容」に合わせて都度選定・取得する。
 
-LLM(CHART_BG_BACKEND設定。既定 claude、または codex exec+MiniMax-M3)が各項目の
+LLM(CHART_BG_BACKEND設定。既定 OpenCode Go、codex/Claudeは旧設定を明示した場合のみ)が各項目の
 英語検索クエリと media(image/video)を返し、Pexels から取得。
 結果は workdir に scene_NN_chart_bg.json としてキャッシュし、再レンダで使い回す。
 timeline は各出来事ごとに1背景（順次切替用）、それ以外は1背景。
@@ -53,10 +53,20 @@ def select(spec: dict, theme: str) -> list[dict]:
     )
     if config.CHART_BG_BACKEND == "codex":
         # Web取得は不要なタスクなので fetch ガードは無効化(min_web_fetches=0)。
-        # timeout はサンドボックス起動オーバーヘッド分だけ claude より長めに取る。
+        # timeout はサンドボックス起動オーバーヘッドを見込む。
         txt = llm.run_codex(prompt, config.CODEX_MODEL, timeout=180, min_web_fetches=0)
-    else:
+    elif config.CHART_BG_BACKEND == "opencode_go":
+        from . import ai_text
+
+        txt = ai_text._run_opencode_go(
+            prompt,
+            ai_text._opencode_go_model(config.TEXT_MODEL),
+            timeout=120,
+        )
+    elif config.CHART_BG_BACKEND == "claude":
         txt = llm.run_claude(prompt, config.TEXT_MODEL, timeout=120)
+    else:
+        raise ValueError(f"未対応のCHART_BG_BACKENDです: {config.CHART_BG_BACKEND}")
     data = llm.extract_json(txt)
     raw = data.get("backgrounds") or []
     out: list[dict] = []
