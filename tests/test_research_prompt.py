@@ -29,6 +29,10 @@ class ResearchPromptTest(unittest.TestCase):
                 {
                     "topic": "題材",
                     "angle": "切り口",
+                    "youtube_creator_audience": "YouTube制作者",
+                    "youtube_creator_problem": "ショートの冒頭離脱を視聴者維持率で診断する",
+                    "viewer_action": "YouTube Studioで冒頭の維持率を確認する",
+                    "theme_fit": "clear",
                     "facts": [
                         {
                             "claim": "検証済みの事実",
@@ -96,6 +100,8 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertIn("動画を2〜3本", prompt)
         self.assertIn("主張の共通点", prompt)
         self.assertIn("因果を断定しない", prompt)
+        self.assertIn("youtube_creator_audience", prompt)
+        self.assertIn("迷った場合は必ず ambiguous", prompt)
         self.assertIn("decision abc", prompt)
         self.assertEqual(result["topic"], "題材")
         self.assertEqual(len(result["facts"]), 3)
@@ -105,6 +111,8 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertIn("公開YouTube動画の比較事例", brief)
         self.assertIn("伸びたショートの例", brief)
         self.assertIn("成功原因の証明ではない", brief)
+        self.assertIn("対象者: YouTube制作者", brief)
+        self.assertIn("視聴後の操作", brief)
 
     def test_non_youtube_channel_does_not_request_video_examples(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

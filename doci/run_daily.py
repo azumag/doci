@@ -1,11 +1,12 @@
 """日次オーケストレータ: コーナー選択→台本(opus4.8)→音声(VOICEVOX)→映像(Minimax)→
-合成(ffmpeg)→YouTubeアップロード(unlisted)→履歴記録。1回で1本生成。
+合成(ffmpeg)→YouTubeアップロード(チャンネル別公開判定)→履歴記録。1回で1本生成。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -72,6 +73,96 @@ def _finalize_performance_application(
     return None
 
 
+def _reconcile_youtube_review(spec: ChannelSpec, do_upload: bool) -> None:
+    """実投稿runの冒頭でだけ確認Issueを処理する。失敗しても生成は継続する。"""
+    review_spec = spec.publish.youtube.review
+    if not (
+        review_spec.enabled
+        and do_upload
+        and config.PUBLISH_YOUTUBE
+        and not config.PUBLISH_DRY_RUN
+    ):
+        return
+    try:
+        from . import youtube_review
+
+        cycle_id = os.environ.get("DOCI_REVIEW_CYCLE_ID", "")
+        retry_ids = youtube_review.load_retry_plan(spec, cycle_id)
+        if retry_ids is None:
+            events = youtube_review.reconcile(spec)
+        else:
+            outcome = youtube_review.reconcile_result(
+                spec,
+                only_video_ids=set(retry_ids),
+            )
+            youtube_review.save_retry_plan(
+                spec,
+                cycle_id,
+                outcome.failed_video_ids,
+            )
+            events = list(outcome.events)
+        if not events:
+            _log("YouTube確認Issue: 未処理の決定なし")
+        for event in events:
+            _log(f"YouTube確認Issue: {event}")
+    except Exception as exc:  # 確認系の不調でも新規生成は止めない
+        _log(f"YouTube確認Issueの取得・反映失敗→生成は継続: {str(exc)[:240]}")
+
+
+def _reconcile_all_youtube_reviews() -> tuple[dict, int]:
+    """3時間ジョブの生成処理から独立して、全チャンネルの確認Issueを取得する。"""
+    results: list[dict] = []
+    if not config.PUBLISH_YOUTUBE or config.PUBLISH_DRY_RUN:
+        return {
+            "mode": "reconcile_youtube_reviews",
+            "status": "skipped",
+            "reason": "YouTube publication is disabled or dry-run",
+            "channels": results,
+        }, 0
+
+    from . import youtube_review
+
+    cycle_id = os.environ.get("DOCI_REVIEW_CYCLE_ID", "")
+    for channel_id in channel.discover():
+        try:
+            spec = channel.load(channel_id)
+            if not spec.publish.youtube.review.enabled:
+                continue
+            outcome = youtube_review.reconcile_result(spec)
+            youtube_review.save_retry_plan(
+                spec,
+                cycle_id,
+                outcome.failed_video_ids,
+            )
+            events = list(outcome.events)
+            results.append(
+                {
+                    "channel": channel_id,
+                    "status": "error" if outcome.failed_count else "ok",
+                    "events": events,
+                    "failed_count": outcome.failed_count,
+                    "failed_video_ids": list(outcome.failed_video_ids),
+                }
+            )
+        except Exception as exc:
+            _log(f"channel={channel_id} YouTube確認Issue ERROR: {exc}")
+            results.append(
+                {
+                    "channel": channel_id,
+                    "status": "error",
+                    "error": str(exc)[:240],
+                    "failed_count": 1,
+                }
+            )
+    failed = sum(int(item.get("failed_count", 0)) for item in results)
+    return {
+        "mode": "reconcile_youtube_reviews",
+        "status": "error" if failed else "ok",
+        "failed": failed,
+        "channels": results,
+    }, 1 if failed else 0
+
+
 def _credits(spec: ChannelSpec, corner) -> str:
     """概要欄に付ける素材クレジット。VOICEVOX はキャラ名込みで表記必須（利用規約）。
     Pexels は必須ではないが明記する。"""
@@ -118,6 +209,9 @@ def _run_once(
 ) -> dict:
     if corner_key and corner_key not in spec.corners:
         raise ValueError(f"unknown corner for channel {spec.id}: {corner_key}")
+    review_spec = spec.publish.youtube.review
+    if os.environ.get("DOCI_REVIEW_RECONCILED") != "1":
+        _reconcile_youtube_review(spec, do_upload)
     corner = (
         spec.corners[corner_key]
         if corner_key
@@ -217,6 +311,19 @@ def _run_once(
         topic_guard=reserve_selected_topic,
         performance_decision=performance_decision,
     )
+    from . import youtube_review
+
+    youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)
+    if theme_assessment is not None:
+        script["_youtube_theme_review"] = theme_assessment.to_dict()
+        if theme_assessment.eligible_for_public:
+            _log("YouTube主題ガード: 3項目と主題適合が明確→public")
+        else:
+            _log(
+                "YouTube主題ガード: "
+                + " / ".join(theme_assessment.reasons)
+                + "→unlistedで確認Issueへ"
+            )
     (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
 
@@ -419,6 +526,8 @@ def _run_once(
 
     # 5) アップロード（route.platforms と各 PUBLISH_* で出し分け: issue #3）
     video_id = None
+    review_issue_url = None
+    review_issue_error = None
     pub_results: list = []
     if do_upload:
         from . import publish
@@ -431,11 +540,42 @@ def _run_once(
             route=route,
             spec=spec,
             thumbnail=thumbnail_path,
+            youtube_privacy=youtube_privacy,
         )
         for r in pub_results:
             _log(f"  {r.platform}: {r.status}{(' ' + (r.url or r.detail)) if (r.url or r.detail) else ''}")
             if r.platform == "youtube" and r.status == "ok":
                 video_id = r.id
+        if (
+            video_id
+            and review_spec.enabled
+            and youtube_privacy == "unlisted"
+            and theme_assessment is not None
+        ):
+            try:
+                youtube_review.queue_pending(
+                    spec,
+                    video_id,
+                    script["title"],
+                    theme_assessment,
+                )
+            except Exception as exc:
+                review_issue_error = str(exc)[:240]
+                _log(
+                    "YouTube確認outbox記録失敗→限定公開を維持し要手動確認: "
+                    f"{review_issue_error}"
+                )
+            else:
+                try:
+                    issue = youtube_review.ensure_issue(spec, video_id)
+                    review_issue_url = issue.url
+                    _log(f"YouTube確認Issue: #{issue.number} {issue.url}")
+                except Exception as exc:  # 次の3時間実行でoutboxから再試行する
+                    review_issue_error = str(exc)[:240]
+                    _log(
+                        "YouTube確認Issue作成失敗→限定公開を維持し次回再試行: "
+                        f"{review_issue_error}"
+                    )
         if performance_application_id and performance_decision:
             performance_application_id = _finalize_performance_application(
                 spec,
@@ -480,6 +620,12 @@ def _run_once(
             "tier": route.tier,
             "platforms": route.platforms,
             "publish": [{"platform": r.platform, "status": r.status, "id": r.id} for r in pub_results],
+            "youtube_privacy": youtube_privacy if video_id else None,
+            "youtube_theme_review": (
+                theme_assessment.to_dict() if theme_assessment is not None else None
+            ),
+            "youtube_review_issue": review_issue_url,
+            "youtube_review_issue_error": review_issue_error,
         },
     )
     reservation_state["finalized"] = True
@@ -493,6 +639,8 @@ def _run_once(
         "tier": route.tier,
         "platforms": route.platforms,
         "publish": [{"platform": r.platform, "status": r.status} for r in pub_results],
+        "youtube_privacy": youtube_privacy if video_id else None,
+        "youtube_review_issue": review_issue_url,
     }
 
 
@@ -637,6 +785,11 @@ def main() -> int:
         action="store_true",
         help="チャンネル一覧と直近実行を表示",
     )
+    target.add_argument(
+        "--reconcile-youtube-reviews",
+        action="store_true",
+        help="全チャンネルのYouTube確認Issueだけを取得・反映",
+    )
     ap.add_argument(
         "--corner",
         help="指定が無ければチャンネル履歴の前回と交互",
@@ -648,6 +801,10 @@ def main() -> int:
     if args.list_channels:
         print(json.dumps(_list_channels(), ensure_ascii=False, indent=2))
         return 0
+    if args.reconcile_youtube_reviews:
+        result, exit_code = _reconcile_all_youtube_reviews()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return exit_code
     if args.all_channels:
         if args.corner:
             ap.error("--corner は --all-channels と同時に指定できません")

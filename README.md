@@ -69,6 +69,13 @@ privacy = "unlisted"
 client_secret = "secrets/ideology/client_secret.json"
 token = "secrets/ideology/youtube_token.json"
 
+[publish.youtube.review]
+enabled = false
+repository = "owner/repository"
+publish_label = "公開承認"
+hold_label = "保留"
+keep_unlisted_label = "限定公開で保持"
+
 [publish.tiktok]
 token = "secrets/ideology/tiktok_token.json"
 privacy = "SELF_ONLY"
@@ -89,7 +96,7 @@ access_token_env = "IG_TOKEN_IDEOLOGY"
 | ID | 名前 | 内容 | YouTube公開設定 |
 |---|---|---|---|
 | `ideology` | doci（ソ連/アメリカ） | 共産主義・資本主義の小噺 | public |
-| `youtube-growth` | YouTube攻略Ch | ショート・通常動画・分析改善 | unlisted |
+| `youtube-growth` | YouTube攻略Ch | ショート・通常動画・分析改善 | 主題ガード通過時 public / それ以外 unlisted |
 
 ```bash
 # 1本だけ生成（アップロードしない・動作確認）
@@ -164,7 +171,8 @@ token = "secrets/sample/youtube_token.json"
 | `style.bgm` | `dir`, `volume`, `rotation` |
 | `style.credits` | `template` |
 | `publish` | `platforms` |
-| `publish.youtube` | `privacy`, `client_secret`, `token` |
+| `publish.youtube` | `privacy`, `client_secret`, `token`, `review` |
+| `publish.youtube.review` | `enabled`, `repository`, `publish_label`, `hold_label`, `keep_unlisted_label` |
 | `publish.tiktok` | `token`, `privacy` |
 | `publish.instagram` | `user_id`, `access_token_env` |
 
@@ -186,6 +194,52 @@ YouTube Analytics APIを有効化したうえで追加scopeが必要。明示的
 `python -m doci.performance --sync --channel <id> --corner <key>` でreadbackと判断根拠を
 確認できる。仮説は同一corner・同一尺・同一tierの最低8本を比較し、1回に1形式だけを
 YouTube投稿成功1本へ適用する。その動画が評価閾値に届くまで同じcornerの次実験は待機する。
+
+### YouTube攻略Ch の主題確認
+
+`youtube-growth` は、企画に次の3点が明記され、主題適合も `clear` の場合だけ自動で
+`public` 投稿する。
+この運用を有効にするチャンネルの `publish.youtube.privacy` は、確認待ちの安全な
+基準値として `unlisted` を必須とし、未指定時もグローバル設定に関係なく `unlisted` になる。
+最終状態はこの基準値を暗黙上書きするのではなく、
+上記判定による `public` または `unlisted` のどちらかとして明示的に決まる。
+
+- 対象者がYouTube制作者
+- 解決する具体的なYouTube上の課題または指標
+- 視聴後にYouTube Studioまたは次の動画制作で取れる操作
+
+1点でも欠ける、主題が曖昧、リサーチが失敗した、またはタイトルからYouTube攻略と
+確認できない場合も生成は止めず、`unlisted` で投稿して動画ごとのGitHub Issueを作る。
+Issueでは `公開承認` / `保留` / `限定公開で保持` のうち1ラベルだけを決定として使う。
+`公開承認` の場合だけYouTubeを公開へ変更し、動画URLをIssueへ記録して自動クローズする。
+ほかの2ラベル、ラベル無し、複数ラベル、限定公開からの経過時間では公開設定を変更しない。
+
+公開設定の変更には `youtube.force-ssl` scope が必要なため、運用開始前に対象チャンネルを
+次のコマンドで再認証する。`--analytics` は既存の実績分析scopeも同時に維持するために指定する。
+
+```bash
+python -m doci.youtube --auth --analytics --manage --channel youtube-growth
+```
+
+決定ラベルはリポジトリ設定で事前に作成する。dociはラベルを自動作成せず、GitHub操作には
+既存 `gh` 認証を使う。実行時に `gh api user` から確認した認証ユーザー以外が作成した
+同形式のIssueは追跡対象にしない。Issue作成intentにはその認証ユーザー名をoutboxへ
+耐久記録し、作成結果が不明な間に認証ユーザーが変わった場合は重複作成せずfail-closedにする。
+トークンや秘密値は設定・ログ・Issue本文へ保存しない。
+3時間ごとの既存 `--all-channels` launchd 実行は、VOICEVOX起動や動画生成より前に
+`--reconcile-youtube-reviews` を実行して確認Issueを取得する。動画単位の処理失敗も
+CLIの非zero終了へ伝搬し、その場合は後続のチャンネルrunでも生成前に再試行する。限定公開アップロードは
+Issue作成より先に `output/<channel>/youtube_review_outbox.jsonl` へ耐久記録されるため、
+Issue作成や後続の履歴保存に失敗しても次の3時間実行で再試行される。
+Issue作成結果が不明な動画だけはSearch index反映前の重複作成を避け、同一cron内では
+再試行せず次の3時間cycleまで待つ。
+`保留` は3時間周期に1回だけIssueを再取得し、動画状態もoutbox状態も変更・追記しない。
+記録済みの確認Issue番号は作成者単位のGraphQL batchで直接取得し、無関係なIssue総数に
+依存しない。公開・限定公開保持の変更直前だけ対象Issueを個別再取得する。
+`限定公開で保持` の決定は動画を変更せず、確定コメントを残してIssueをクローズする。
+`保留` とラベル無しはopenのまま次の3時間確認へ残す。
+未決Issueを経過時間で打ち切ることはなく、outboxは各動画の最新状態を残したままatomicに
+圧縮する。同一cron内の選択的再試行planも並行cycleを分離しつつ最大64ファイルに制限する。
 
 個別レイヤのテスト:
 ```bash
@@ -213,7 +267,8 @@ VOICEVOX を service container（2話者内蔵・常時稼働不要）で起動�
 - `doci/voicevox.py` 音声合成（文ごとの再生長＝字幕タイミング付き）
 - `doci/minimax.py` 画像/動画（非同期ポーリング）
 - `doci/compose.py` ffmpeg 合成（9:16・字幕焼込み）
-- `doci/youtube.py` アップロード（unlisted）
+- `doci/youtube.py` アップロード・公開設定更新
+- `doci/youtube_review.py` 主題ガード・限定公開Issue確認
 - `channels/<id>/` チャンネル定義・ペルソナ・声・BGM
 - `doci/prompts/output_rules.md` 全チャンネル共通の出力規則
 - `doci/run_daily.py` オーケストレータ

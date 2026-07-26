@@ -85,12 +85,24 @@ class StyleSpec:
 
 
 @dataclass(frozen=True)
+class YouTubeReviewSpec:
+    """限定公開動画を GitHub Issue で確認する運用設定。"""
+
+    enabled: bool = False
+    repository: str = ""
+    publish_label: str = "公開承認"
+    hold_label: str = "保留"
+    keep_unlisted_label: str = "限定公開で保持"
+
+
+@dataclass(frozen=True)
 class YouTubePublishSpec:
     privacy: str = field(default_factory=lambda: config.YOUTUBE_PRIVACY)
     client_secret: Path = field(
         default_factory=lambda: _repo_path(config.YOUTUBE_CLIENT_SECRET_FILE)
     )
     token: Path = field(default_factory=lambda: _repo_path(config.YOUTUBE_TOKEN_FILE))
+    review: YouTubeReviewSpec = field(default_factory=YouTubeReviewSpec)
 
 
 @dataclass(frozen=True)
@@ -178,7 +190,14 @@ _VIDEO_STYLE_KEYS = {"pad_color", "filter"}
 _BGM_STYLE_KEYS = {"dir", "volume", "rotation"}
 _CREDITS_STYLE_KEYS = {"template"}
 _PUBLISH_KEYS = {"platforms", "youtube", "tiktok", "instagram"}
-_YOUTUBE_PUBLISH_KEYS = {"privacy", "client_secret", "token"}
+_YOUTUBE_PUBLISH_KEYS = {"privacy", "client_secret", "token", "review"}
+_YOUTUBE_REVIEW_KEYS = {
+    "enabled",
+    "repository",
+    "publish_label",
+    "hold_label",
+    "keep_unlisted_label",
+}
 _TIKTOK_PUBLISH_KEYS = {"token", "privacy"}
 _INSTAGRAM_PUBLISH_KEYS = {"user_id", "access_token_env"}
 _PUBLISH_PLATFORMS = {"youtube", "tiktok", "instagram"}
@@ -399,6 +418,50 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
     _warn_unknown(youtube, _YOUTUBE_PUBLISH_KEYS, "publish.youtube.")
     _warn_unknown(tiktok, _TIKTOK_PUBLISH_KEYS, "publish.tiktok.")
     _warn_unknown(instagram, _INSTAGRAM_PUBLISH_KEYS, "publish.instagram.")
+    review = _publish_table(youtube, "review")
+    _warn_unknown(
+        review,
+        _YOUTUBE_REVIEW_KEYS,
+        "publish.youtube.review.",
+    )
+
+    review_enabled = review.get("enabled", False)
+    if not isinstance(review_enabled, bool):
+        raise ChannelConfigError("publish.youtube.review.enabled must be a boolean")
+    review_repository = _string(
+        review,
+        "repository",
+        "",
+        "publish.youtube.review.",
+    ).strip()
+    if review_enabled and not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        review_repository,
+    ):
+        raise ChannelConfigError(
+            "publish.youtube.review.repository must be owner/name when enabled"
+        )
+    review_labels = {
+        key: _string(
+            review,
+            key,
+            default,
+            "publish.youtube.review.",
+        ).strip()
+        for key, default in (
+            ("publish_label", "公開承認"),
+            ("hold_label", "保留"),
+            ("keep_unlisted_label", "限定公開で保持"),
+        )
+    }
+    if any(not value for value in review_labels.values()):
+        raise ChannelConfigError(
+            "publish.youtube.review decision labels must not be empty"
+        )
+    if len(set(review_labels.values())) != len(review_labels):
+        raise ChannelConfigError(
+            "publish.youtube.review decision labels must be distinct"
+        )
 
     platforms = data.get("platforms", ["youtube", "tiktok", "instagram"])
     if not isinstance(platforms, list) or not all(
@@ -440,15 +503,32 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
         config.YOUTUBE_TOKEN_FILE,
         "YouTube token",
     )
+    youtube_privacy = _string(
+        youtube,
+        "privacy",
+        "unlisted" if review_enabled else config.YOUTUBE_PRIVACY,
+        "publish.youtube.",
+    )
+    if review_enabled and youtube_privacy != "unlisted":
+        raise ChannelConfigError(
+            "publish.youtube.privacy must be unlisted when "
+            "publish.youtube.review.enabled is true; review decides the "
+            "final public or unlisted upload state"
+        )
 
     return PublishSpec(
         platforms=tuple(platforms),
         youtube=YouTubePublishSpec(
-            privacy=_string(
-                youtube, "privacy", config.YOUTUBE_PRIVACY, "publish.youtube."
-            ),
+            privacy=youtube_privacy,
             client_secret=youtube_client_secret,
             token=youtube_token,
+            review=YouTubeReviewSpec(
+                enabled=review_enabled,
+                repository=review_repository,
+                publish_label=review_labels["publish_label"],
+                hold_label=review_labels["hold_label"],
+                keep_unlisted_label=review_labels["keep_unlisted_label"],
+            ),
         ),
         tiktok=TikTokPublishSpec(
             token=_publish_path(tiktok, "token", config.TIKTOK_TOKEN_FILE),

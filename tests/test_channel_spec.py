@@ -105,6 +105,15 @@ voice = "narrator"
         self.assertEqual(spec.style.bgm.dir, spec.root / "bgm")
         self.assertEqual(spec.publish.platforms, ("youtube",))
         self.assertEqual(spec.publish.youtube.privacy, "unlisted")
+        self.assertTrue(spec.publish.youtube.review.enabled)
+        self.assertEqual(
+            spec.publish.youtube.review.repository,
+            "azumag/doci",
+        )
+        self.assertEqual(
+            spec.publish.youtube.review.publish_label,
+            "公開承認",
+        )
         self.assertEqual(
             spec.publish.youtube.token,
             (config.ROOT / "secrets/youtube-growth/youtube_token.json").resolve(),
@@ -353,6 +362,72 @@ access_token_env = "EAAB token value"
 
         with self.assertRaisesRegex(channel.ChannelConfigError, "environment variable name"):
             channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_rejects_enabled_youtube_review_without_safe_repository(self) -> None:
+        self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube.review]
+enabled = true
+repository = "not-an-owner-repo"
+''')
+
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError,
+            "owner/name",
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_review_requires_unlisted_staging_privacy(self) -> None:
+        self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube]
+privacy = "private"
+[publish.youtube.review]
+enabled = true
+repository = "owner/repo"
+''')
+
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError,
+            "must be unlisted",
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_review_defaults_to_unlisted_independent_of_global_privacy(
+        self,
+    ) -> None:
+        self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube.review]
+enabled = true
+repository = "owner/repo"
+''')
+
+        with patch.object(config, "YOUTUBE_PRIVACY", "private"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+
+        self.assertEqual(spec.publish.youtube.privacy, "unlisted")
 
     def test_ideology_uses_legacy_youtube_files_until_migrated(self) -> None:
         self._write_channel(

@@ -89,6 +89,7 @@ def _do_upload(
     platform: str, video: Path, title: str, description: str, tags: list[str], route,
     publish_spec: PublishSpec,
     thumbnail: Path | None = None,
+    youtube_privacy: str | None = None,
 ) -> PublishResult:
     if platform == "youtube":
         from . import youtube
@@ -101,7 +102,7 @@ def _do_upload(
             title,
             desc,
             ytags,
-            settings.privacy,
+            youtube_privacy or settings.privacy,
             token_file=settings.token,
             client_secret_file=settings.client_secret,
         )
@@ -156,6 +157,7 @@ def publish(
     spec: ChannelSpec | None = None,
     dry_run: bool | None = None,
     thumbnail: Path | None = None,
+    youtube_privacy: str | None = None,
 ) -> list[PublishResult]:
     """route に従い有効プラットフォームへ投稿。各結果を返す（例外は投げない）。"""
     dry = config.PUBLISH_DRY_RUN if dry_run is None else dry_run
@@ -187,6 +189,7 @@ def publish(
                     route,
                     publish_spec,
                     thumbnail,
+                    youtube_privacy,
                 )
             )
         except Exception as e:  # noqa: BLE001 1つ失敗しても他は続行

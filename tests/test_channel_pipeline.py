@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from doci import ai_text, channel, config, corners, history, run_daily, voicevox
+from doci import (
+    ai_text,
+    channel,
+    config,
+    corners,
+    history,
+    publish,
+    run_daily,
+    voicevox,
+    youtube_review,
+)
 
 
 class ChannelPipelineTest(unittest.TestCase):
@@ -304,6 +316,222 @@ factcheck = false
 
         self.assertEqual(guarded_topics, ["既存と重複する題材"])
         dispatch_mock.assert_not_called()
+
+    def test_generate_preserves_theme_review_research_fields(self) -> None:
+        spec = self._make_spec(
+            "review-research",
+            pipeline="""\
+[pipeline]
+research = true
+plan = false
+factcheck = false
+""",
+        )
+        research = {
+            "topic": "YouTubeショートの冒頭離脱を改善する",
+            "angle": "視聴維持率を使って冒頭を比較する",
+            "youtube_creator_audience": "YouTube制作者",
+            "youtube_creator_problem": "YouTubeの視聴維持率が冒頭で落ちる課題",
+            "viewer_action": "YouTube Studioで視聴維持率を確認して冒頭を編集する",
+            "theme_fit": "clear",
+            "theme_fit_reason": "YouTube Studioの視聴維持率改善を扱うため",
+            "facts": [
+                {
+                    "claim": "確認対象の事実",
+                    "source_url": "https://example.com/source",
+                }
+            ],
+        }
+        raw = json.dumps(
+            {
+                "title": "YouTubeショートの冒頭離脱を直す",
+                "description": "YouTubeの視聴維持率を改善します。",
+                "tags": [],
+                "narration": "YouTube Studioの視聴維持率を見て冒頭を編集します。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        with (
+            patch("doci.research.web_research", return_value=research),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+        ):
+            script = ai_text.generate(
+                spec,
+                spec.corners["a"],
+                "2026-07-26",
+                [],
+            )
+
+        self.assertEqual(script["_research"], research)
+        for key in (
+            "youtube_creator_audience",
+            "youtube_creator_problem",
+            "viewer_action",
+            "theme_fit",
+            "theme_fit_reason",
+        ):
+            self.assertEqual(script["_research"][key], research[key])
+
+    def _run_review_pipeline(
+        self,
+        spec: channel.ChannelSpec,
+        script: dict,
+        video_id: str,
+    ):
+        def fake_fetch_image(_prompt, out_path, **_kwargs):
+            Path(out_path).write_bytes(b"image")
+            return Path(out_path)
+
+        def fake_compose(_scenes, _wav, _duration, out_path, **_kwargs):
+            Path(out_path).write_bytes(b"video")
+            return Path(out_path)
+
+        def fake_thumbnail(_title, out_path, **_kwargs):
+            Path(out_path).write_bytes(b"thumbnail")
+            return Path(out_path)
+
+        uploaded = publish.PublishResult(
+            "youtube",
+            "ok",
+            url=f"https://youtu.be/{video_id}",
+            id=video_id,
+        )
+        with (
+            patch.dict(os.environ, {"DOCI_REVIEW_RECONCILED": ""}),
+            patch.object(config, "OUTPUT", self.output_dir),
+            patch.object(
+                run_daily,
+                "_reconcile_youtube_review",
+            ) as reconcile_mock,
+            patch.object(ai_text, "generate", return_value=script),
+            patch.object(
+                run_daily.voicevox,
+                "synthesize",
+                return_value=voicevox.TtsResult(
+                    wav_path=self.root / "fake.wav",
+                    duration=10.0,
+                    segments=[],
+                ),
+            ),
+            patch.object(run_daily.assets, "fetch_video", side_effect=fake_fetch_image),
+            patch.object(run_daily.assets, "fetch_image", side_effect=fake_fetch_image),
+            patch.object(run_daily.compose, "compose", side_effect=fake_compose),
+            patch("doci.thumbnail.render", side_effect=fake_thumbnail),
+            patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail),
+            patch("doci.publish.publish", return_value=[uploaded]) as publish_mock,
+            patch.object(youtube_review, "queue_pending") as queue_mock,
+            patch.object(
+                youtube_review,
+                "ensure_issue",
+                return_value=SimpleNamespace(
+                    number=42,
+                    url="https://github.com/owner/repo/issues/42",
+                ),
+            ) as ensure_mock,
+        ):
+            result = run_daily.run(
+                spec,
+                "2026-07-26",
+                "a",
+                do_upload=True,
+                video_scenes=0,
+            )
+
+        return result, reconcile_mock, publish_mock, queue_mock, ensure_mock
+
+    def _review_script(self, *, viewer_action: str) -> dict:
+        return {
+            "title": "YouTubeショートの冒頭離脱を直す",
+            "description": "YouTubeの視聴維持率を改善します。",
+            "tags": [],
+            "narration": "YouTube Studioの視聴維持率を見て冒頭を編集します。",
+            "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            "_research": {
+                "topic": "YouTubeショートの冒頭離脱を改善する",
+                "angle": "視聴維持率を使って冒頭を比較する",
+                "youtube_creator_audience": "YouTube制作者",
+                "youtube_creator_problem": "YouTubeの視聴維持率が冒頭で落ちる課題",
+                "viewer_action": viewer_action,
+                "theme_fit": "clear",
+                "theme_fit_reason": "YouTube Studioの視聴維持率改善を扱うため",
+            },
+        }
+
+    def _review_spec(self, channel_id: str) -> channel.ChannelSpec:
+        return self._make_spec(
+            channel_id,
+            pipeline="""\
+[publish]
+platforms = ["youtube"]
+
+[publish.youtube]
+privacy = "unlisted"
+client_secret = "client.json"
+token = "token.json"
+
+[publish.youtube.review]
+enabled = true
+repository = "owner/repo"
+publish_label = "公開承認"
+hold_label = "保留"
+keep_unlisted_label = "限定公開で保持"
+
+[pipeline]
+research = false
+plan = false
+factcheck = false
+""",
+        )
+
+    def test_run_daily_routes_missing_action_to_unlisted_issue_workflow(self) -> None:
+        spec = self._review_spec("review-unlisted")
+        script = self._review_script(viewer_action="")
+
+        result, reconcile_mock, publish_mock, queue_mock, ensure_mock = (
+            self._run_review_pipeline(
+                spec,
+                script,
+                "unlisted123",
+            )
+        )
+
+        reconcile_mock.assert_called_once_with(spec, True)
+        self.assertEqual(
+            publish_mock.call_args.kwargs["youtube_privacy"],
+            "unlisted",
+        )
+        queue_mock.assert_called_once()
+        self.assertEqual(queue_mock.call_args.args[:3], (spec, "unlisted123", script["title"]))
+        self.assertFalse(queue_mock.call_args.args[3].eligible_for_public)
+        ensure_mock.assert_called_once_with(spec, "unlisted123")
+        self.assertEqual(
+            result["youtube_review_issue"],
+            "https://github.com/owner/repo/issues/42",
+        )
+
+    def test_run_daily_routes_complete_theme_fields_directly_to_public(self) -> None:
+        spec = self._review_spec("review-public")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+
+        result, reconcile_mock, publish_mock, queue_mock, ensure_mock = (
+            self._run_review_pipeline(
+                spec,
+                script,
+                "public123",
+            )
+        )
+
+        reconcile_mock.assert_called_once_with(spec, True)
+        self.assertEqual(
+            publish_mock.call_args.kwargs["youtube_privacy"],
+            "public",
+        )
+        queue_mock.assert_not_called()
+        ensure_mock.assert_not_called()
+        self.assertEqual(result["youtube_privacy"], "public")
+        self.assertIsNone(result["youtube_review_issue"])
 
     def test_run_daily_scopes_workdir_voice_and_history_to_channel(self) -> None:
         spec = self._make_spec("alpha")
