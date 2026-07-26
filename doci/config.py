@@ -107,9 +107,9 @@ CODEX_MODEL = get("CODEX_MODEL", "MiniMax-M3")
 CODEX_MINIMAX_BASE_URL = get("CODEX_MINIMAX_BASE_URL", "https://api.minimax.io/v1")
 # リサーチ/チェックは Web検索＋長尺narrationで時間がかかる。0以下は全バックエンド共通で無制限。
 SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
-# 執筆(opencode/qwen 等)専用の全体上限。無音ハングを避けるため5分を既定にする。
+# 執筆(opencode/qwen 等)専用の全体上限。長文ストリームを許容しつつ無音ハングを防ぐため15分を既定にする。
 # 長文を必ず待つ運用では WRITE_LLM_TIMEOUT=0 を明示する。
-WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 300)
+WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 900)
 
 
 def script_llm_timeout() -> int | None:

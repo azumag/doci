@@ -208,9 +208,26 @@ def _run_opencode_go(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"OpenCode Go API failed (HTTP {exc.code}): {detail}") from exc
+    except RuntimeError as exc:
+        if deadline_expired.is_set() and not received_terminal:
+            candidate = "".join(text_parts)
+            try:
+                llm.extract_json(candidate)
+            except (ValueError, TypeError):
+                pass
+            else:
+                _log("OpenCode Go APIは時間上限到達時点で完全なJSONを返したため採用")
+                return candidate
+        raise
     except (TimeoutError, OSError, ValueError) as exc:
         if deadline_expired.is_set() and not received_terminal:
-            raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
+            candidate = "".join(text_parts)
+            try:
+                llm.extract_json(candidate)
+            except (ValueError, TypeError):
+                raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
+            _log("OpenCode Go APIは時間上限到達時点で完全なJSONを返したため採用")
+            return candidate
         raise
     finally:
         if deadline_timer is not None:
@@ -508,6 +525,9 @@ def generate(
                 spec,
                 performance_guidance=performance_guidance,
                 backend_override="opencode_go",
+                focus_text=(
+                    f"{script.get('title', '')}\n{script.get('narration', '')}"
+                ),
             )
         except Exception as e:  # noqa: BLE001
             _log(f"ファクトチェック用リサーチ失敗→原文維持: {e}")
