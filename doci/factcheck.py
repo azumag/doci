@@ -17,6 +17,7 @@ class UnsupportedFactcheckBackendError(ValueError):
 # 参照し、codex はシェルの curl 等での取得を明示的に指示する。
 _WEB_HOWTO = {
     "opencode_go": "提示された参考資料と台本内の根拠を参照し、確認できない断定は弱める。",
+    "opencode": "提示された参考資料と台本内の根拠を参照し、確認できない断定は弱める。",
     "claude": "必要なら WebSearch / WebFetch で裏取りする。",
     "codex": (
         "必要ならシェルで curl を使い、Web検索（https://duckduckgo.com/html/?q=... や "
@@ -81,7 +82,16 @@ def _attempt(prompt: str, backend: str) -> dict:
         raw = ai_text._run_opencode_go(
             prompt,
             ai_text._opencode_go_model(config.FACTCHECK_MODEL),
-            timeout=config.SCRIPT_LLM_TIMEOUT,
+            timeout=config.script_llm_timeout(),
+        )
+    elif backend == "opencode":
+        from . import ai_text
+
+        raw = ai_text._run_opencode(
+            prompt,
+            config.OPENCODE_MODEL or config.FACTCHECK_MODEL,
+            config.OPENCODE_AGENT,
+            timeout=config.script_llm_timeout(),
         )
     elif backend == "claude":
         raw = llm.run_claude(
@@ -107,7 +117,7 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
     if not narration.strip():
         return None
     backend = config.FACTCHECK_BACKEND
-    if backend not in {"codex", "opencode_go", "claude"}:
+    if backend not in {"codex", "opencode", "opencode_go", "claude"}:
         raise UnsupportedFactcheckBackendError(f"未対応のFACTCHECK_BACKENDです: {backend}")
     if backend == "opencode_go" and not (research and research.get("facts")):
         _log(

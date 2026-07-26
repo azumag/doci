@@ -15,6 +15,16 @@ from doci import ai_text, config
 
 
 class WriteTimeoutTest(unittest.TestCase):
+    def test_opencode_go_rejects_other_provider_qualified_models(self) -> None:
+        self.assertEqual(
+            ai_text._opencode_go_model("minimax/m3"),
+            config.OPENCODE_GO_DEFAULT_MODEL,
+        )
+        self.assertEqual(
+            ai_text._opencode_go_model("opencode-go/qwen3.7-plus"),
+            "opencode-go/qwen3.7-plus",
+        )
+
     def test_zero_disables_opencode_cli_timeout(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
         with (
@@ -154,6 +164,30 @@ class WriteTimeoutTest(unittest.TestCase):
             self.assertEqual(ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus"), "ok")
 
         self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 300)
+
+    def test_explicit_unlimited_opencode_go_timeout_keeps_idle_guard(self) -> None:
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        events = b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n'
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 17),
+            mock.patch.object(config, "WRITE_LLM_IDLE_TIMEOUT", 7),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ) as urlopen_mock,
+        ):
+            self.assertEqual(
+                ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus", timeout=None),
+                "ok",
+            )
+
+        self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 7)
 
     def test_opencode_go_keeps_idle_guard_when_both_limits_are_zero(self) -> None:
         class FakeResponse(BytesIO):

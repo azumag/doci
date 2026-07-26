@@ -75,6 +75,8 @@ class AuxiliaryBackendDefaultTest(unittest.TestCase):
     def test_nonlegacy_text_backend_does_not_implicitly_select_claude(self) -> None:
         with mock.patch.object(config, "TEXT_BACKEND", "opencode_go"):
             self.assertEqual(config._default_aux_backend(), "opencode_go")
+        with mock.patch.object(config, "TEXT_BACKEND", "opencode"):
+            self.assertEqual(config._default_aux_backend(), "opencode")
 
 
 class SelectOpenCodeBackendTest(unittest.TestCase):
@@ -96,6 +98,22 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
 
         run_mock.assert_called_once()
         self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_GO_DEFAULT_MODEL)
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 120)
+        claude_mock.assert_not_called()
+        self.assertEqual(result, [{"query": "old library shelves", "media": "image"}])
+
+    def test_uses_opencode_cli_without_calling_claude(self) -> None:
+        config.CHART_BG_BACKEND = "opencode"
+        raw = json.dumps({"backgrounds": [{"query": "old library shelves", "media": "image"}]})
+        spec = {"type": "stat", "value": "42", "caption": "テスト値"}
+        with (
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+            mock.patch.object(chart_bg.llm, "run_claude") as claude_mock,
+        ):
+            result = chart_bg.select(spec, "テストテーマ")
+
+        run_mock.assert_called_once()
+        self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_MODEL or config.TEXT_MODEL)
         self.assertEqual(run_mock.call_args.kwargs["timeout"], 120)
         claude_mock.assert_not_called()
         self.assertEqual(result, [{"query": "old library shelves", "media": "image"}])

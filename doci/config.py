@@ -103,6 +103,8 @@ def _default_aux_backend() -> str:
         return "claude"
     if TEXT_BACKEND == "codex":
         return "codex"
+    if TEXT_BACKEND == "opencode":
+        return "opencode"
     return "opencode_go"
 
 

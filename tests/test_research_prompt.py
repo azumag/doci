@@ -178,6 +178,21 @@ class ResearchPromptTest(unittest.TestCase):
         )
         excerpt_mock.assert_called_once_with("https://support.google.com/youtube/help")
 
+    def test_reference_materials_respects_single_search_budget(self) -> None:
+        with (
+            mock.patch.object(research, "_wikipedia_search_results", return_value=[]) as wiki_mock,
+            mock.patch.object(research, "_safe_urlopen") as open_mock,
+        ):
+            research._search_reference_materials("YouTube Studio", search_timeout=0.001)
+
+        # The shared deadline can stop the second network stage instead of granting
+        # Wikipedia, DDG, and page fetches independent full timeouts.
+        self.assertLessEqual(wiki_mock.call_args.kwargs["timeout"], 0.001)
+        self.assertTrue(open_mock.call_args_list)
+        self.assertTrue(
+            all(call.kwargs["timeout"] <= 0.001 for call in open_mock.call_args_list)
+        )
+
     def test_reference_search_includes_channel_guidance(self) -> None:
         response = mock.MagicMock()
         response.__enter__.return_value = response
@@ -617,6 +632,26 @@ class ResearchPromptTest(unittest.TestCase):
             )
 
         self.assertEqual(result["facts"][0]["source_url"], "https://www.youtube.com/watch?v=abc&t=3")
+
+    def test_opencode_cli_backend_does_not_call_claude(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "題材",
+                "facts": [{"claim": "確認済み", "source_url": "https://example.org/source"}],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode"),
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+            mock.patch.object(research.llm, "run_claude") as claude_mock,
+        ):
+            result = research._attempt("prompt")
+
+        run_mock.assert_called_once()
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], config.script_llm_timeout())
+        claude_mock.assert_not_called()
+        self.assertEqual(result["facts"][0]["claim"], "確認済み")
 
     def test_prompt_includes_channel_guidance_and_primary_source_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

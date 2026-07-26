@@ -36,6 +36,7 @@ class UnsupportedResearchBackendError(ValueError):
 # 参照して整理し、codex はシェルの curl 等での取得を明示的に指示する。
 _WEB_HOWTO = {
     "opencode_go": "提示された候補・一次資料URLを参照し、確認できた範囲だけを採用して",
+    "opencode": "提示された候補・一次資料URLを参照し、確認できた範囲だけを採用して",
     "claude": "WebSearch / WebFetch で確認し、",
     "codex": (
         "シェルで curl 等を使い、Web検索（例: https://duckduckgo.com/html/?q=... や "
@@ -111,6 +112,7 @@ _YOUTUBE_CASE_STUDY_RULE = """\
 # OpenCode Goは候補URLの内容に限定する。
 _EXTRA_RULES = {
     "opencode_go": "   - 提示されたURLや候補の内容だけを根拠にし、確認できない事実・URLは作らないこと。\n",
+    "opencode": "   - 提示されたURLや候補の内容だけを根拠にし、確認できない事実・URLは作らないこと。\n",
     "claude": "",
     "codex": "   - 内部知識だけで書いてはいけない。必ず取得したページの内容に基づくこと。\n",
 }
@@ -581,10 +583,12 @@ def _sanitize_url(text: str) -> str:
     return " ".join(text.split())[:1800]
 
 
-def _page_excerpt(url: str) -> str:
+def _page_excerpt(url: str, timeout: float = 8) -> str:
+    if timeout <= 0:
+        return ""
     try:
         request = Request(url, headers={"User-Agent": "doci/1.0"})
-        with _safe_urlopen(request, timeout=8, trusted_only=True) as response:
+        with _safe_urlopen(request, timeout=timeout, trusted_only=True) as response:
             body = _decode_response_body(response, response.read(120000))
             if not body:
                 return ""
@@ -614,7 +618,7 @@ def _decode_response_body(response, body: bytes) -> str:  # type: ignore[no-unty
         return body.decode("utf-8", errors="replace")
 
 
-def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
+def _wikipedia_search_results(query: str, timeout: float = 8) -> list[dict[str, str]]:
     """DDGが利用できない場合の軽量な検索フォールバック。"""
     params = urlencode(
         {
@@ -627,10 +631,12 @@ def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
         }
     )
     url = f"https://ja.wikipedia.org/w/api.php?{params}"
+    if timeout <= 0:
+        return []
     try:
         with _safe_urlopen(
             Request(url, headers={"User-Agent": "doci/1.0"}),
-            timeout=8,
+            timeout=timeout,
             trusted_only=True,
         ) as response:
             body = _decode_response_body(response, response.read(120000))
@@ -677,6 +683,7 @@ def _search_reference_materials(
     channel_guidance: str = "",
     search_hint: str = "",
     past_topics: list[str] | None = None,
+    search_timeout: float | None = None,
 ) -> list[dict[str, str]]:
     """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
     terms = [label]
@@ -692,9 +699,25 @@ def _search_reference_materials(
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
     fallback_terms = [label, *_query_terms(search_hint, 2)]
-    wikipedia_rows = _wikipedia_search_results(
-        " ".join(dict.fromkeys(term for term in fallback_terms if term))
+    deadline = (
+        time.monotonic() + search_timeout
+        if search_timeout is not None and search_timeout > 0
+        else None
     )
+
+    def remaining(default: float) -> float:
+        if deadline is None:
+            return default
+        return max(0.0, min(default, deadline - time.monotonic()))
+
+    wikipedia_query = " ".join(dict.fromkeys(term for term in fallback_terms if term))
+    if search_timeout is None:
+        wikipedia_rows = _wikipedia_search_results(wikipedia_query)
+    else:
+        wikipedia_rows = _wikipedia_search_results(
+            wikipedia_query,
+            timeout=remaining(8),
+        )
     # Wikipediaは一般背景の補助資料として最大2件に抑え、公式ヘルプ等の
     # 検索結果が常に残るようにする。
     for row in wikipedia_rows[:2]:
@@ -711,9 +734,12 @@ def _search_reference_materials(
     parser = _SearchResultParser()
     search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
     try:
+        ddg_timeout = remaining(12)
+        if ddg_timeout <= 0:
+            raise TimeoutError("資料検索の時間予算を使い切りました")
         with _safe_urlopen(
             Request(search_url, headers={"User-Agent": "doci/1.0"}),
-            timeout=12,
+            timeout=ddg_timeout,
             trusted_only=True,
         ) as response:
             search_html = _decode_response_body(response, response.read(180000))
@@ -738,12 +764,26 @@ def _search_reference_materials(
     # 取得は同期パイプライン上で行うが、最大8件を並列化して全体の待ち時間を
     # 検索12秒 + 本文取得の目安9秒以内に抑える（本文取得は各8秒の総予算）。
     executor = ThreadPoolExecutor(max_workers=4)
-    futures = {
-        executor.submit(_page_excerpt, row["url"]): row
-        for row in rows[:4]
-    }
+    page_timeout = remaining(8)
+    if search_timeout is None:
+        futures = {
+            executor.submit(_page_excerpt, row["url"]): row
+            for row in rows[:4]
+        }
+    else:
+        futures = (
+            {
+                executor.submit(_page_excerpt, row["url"], timeout=page_timeout): row
+                for row in rows[:4]
+            }
+            if page_timeout > 0
+            else {}
+        )
     try:
-        for future in as_completed(futures, timeout=9):
+        completion_timeout = remaining(9)
+        if completion_timeout <= 0:
+            raise FuturesTimeoutError()
+        for future in as_completed(futures, timeout=completion_timeout):
             row = futures[future]
             try:
                 excerpt = future.result()
@@ -789,18 +829,26 @@ def _attempt(
             timeout=config.script_llm_timeout(),
             min_web_fetches=2,
         )
-    elif backend == "opencode_go":
+    elif backend in {"opencode", "opencode_go"}:
         from . import ai_text
 
-        if not allowed_source_urls:
+        if backend == "opencode_go" and not allowed_source_urls:
             raise ValueError(
                 "OpenCode Goリサーチは、実取得済みの候補URLがないため安全側にスキップします"
             )
-        raw = ai_text._run_opencode_go(
-            prompt,
-            ai_text._opencode_go_model(config.RESEARCH_MODEL),
-            timeout=config.SCRIPT_LLM_TIMEOUT,
-        )
+        if backend == "opencode_go":
+            raw = ai_text._run_opencode_go(
+                prompt,
+                ai_text._opencode_go_model(config.RESEARCH_MODEL),
+                timeout=config.script_llm_timeout(),
+            )
+        else:
+            raw = ai_text._run_opencode(
+                prompt,
+                config.OPENCODE_MODEL or config.RESEARCH_MODEL,
+                config.OPENCODE_AGENT,
+                timeout=config.script_llm_timeout(),
+            )
     elif backend == "claude":
         raw = llm.run_claude(
             prompt,
@@ -974,7 +1022,7 @@ def web_research(
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
     backend = backend_override or config.RESEARCH_BACKEND
-    if backend not in {"codex", "opencode_go", "claude"}:
+    if backend not in {"codex", "opencode", "opencode_go", "claude"}:
         raise UnsupportedResearchBackendError(f"未対応のRESEARCH_BACKENDです: {backend}")
     guidance_parts = []
     for path in (corner.persona_path, corner.corner_path):
@@ -1010,12 +1058,13 @@ def web_research(
         if normalized
     }
     reference_materials = []
-    if backend == "opencode_go":
+    if backend in {"opencode", "opencode_go"}:
         reference_materials = _search_reference_materials(
             corner.label,
             channel_guidance=channel_guidance,
             search_hint=focus_text,
             past_topics=past_topics,
+            search_timeout=config.script_llm_timeout(),
         )
     allowed_source_urls.update(
         normalized

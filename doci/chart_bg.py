@@ -71,6 +71,15 @@ def select(spec: dict, theme: str) -> list[dict]:
             ai_text._opencode_go_model(config.TEXT_MODEL),
             timeout=120,
         )
+    elif config.CHART_BG_BACKEND == "opencode":
+        from . import ai_text
+
+        txt = ai_text._run_opencode(
+            prompt,
+            config.OPENCODE_MODEL or config.TEXT_MODEL,
+            config.OPENCODE_AGENT,
+            timeout=120,
+        )
     elif config.CHART_BG_BACKEND == "claude":
         txt = llm.run_claude(
             prompt, config.legacy_claude_model(config.TEXT_MODEL), timeout=120

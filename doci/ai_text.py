@@ -93,15 +93,27 @@ def _opencode_go_key() -> str:
 
 
 def _opencode_go_model(model: str) -> str:
+    """OpenCode Go APIへ渡せるモデル名だけを許可する。
+
+    bare model はゲートウェイの既定プロバイダとして後方互換に受け入れるが、
+    provider-qualified な別プロバイダ名をそのまま送ると、Go APIではなく別の
+    認証経路を暗黙に要求するため、既定のQwenへ安全に戻す。
+    """
     if not model or model.startswith(("claude-", "anthropic/")):
         return config.OPENCODE_GO_DEFAULT_MODEL
+    provider, separator, _ = model.partition("/")
+    if separator and provider != "opencode-go":
+        return config.OPENCODE_GO_DEFAULT_MODEL
     return model
+
+
+_DEFAULT_OPENCODE_GO_TIMEOUT = object()
 
 
 def _run_opencode_go(
     prompt: str,
     model: str,
-    timeout: int | None = None,
+    timeout: int | None | object = _DEFAULT_OPENCODE_GO_TIMEOUT,
 ) -> str:
     """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
     model = _opencode_go_model(model)
@@ -137,7 +149,10 @@ def _run_opencode_go(
     text_parts: list[str] = []
     text_chars = 0
     stop_reason = ""
-    deadline_timeout = _whole_write_timeout() if timeout is None else (timeout if timeout > 0 else None)
+    if timeout is _DEFAULT_OPENCODE_GO_TIMEOUT:
+        deadline_timeout = _whole_write_timeout()
+    else:
+        deadline_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
     # 全体上限とidle上限を同時に0にすると、Claudeフォールバックなしの既定経路が
     # 無音SSEで復帰不能になるため、明示的な全体無制限時にもidleだけは残す。
     idle_timeout = (
@@ -357,6 +372,8 @@ def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
     if backend == "anthropic":
         return _run_anthropic(prompt, model, timeout=timeout)
     if backend == "opencode_go":
+        if timeout is None:
+            return _run_opencode_go(prompt, config.OPENCODE_MODEL or model)
         return _run_opencode_go(prompt, config.OPENCODE_MODEL or model, timeout=timeout)
     if backend == "opencode":
         # agent-only の既存設定では TEXT_MODEL の既定値を混ぜず、
@@ -588,24 +605,24 @@ def generate(
         if used:
             _log(f"図表を {used} シーンに配置")
 
-    # 2.9) OpenCode Goファクトチェックだけを有効にした場合は、下書き後に
+    # 2.9) OpenCode系ファクトチェックだけを有効にした場合は、下書き後に
     # 資料取得だけを行う。research=false の題材選定・cooldown意味は変えない。
     factcheck_research = research
     if (
         factcheck_enabled
-        and config.FACTCHECK_BACKEND == "opencode_go"
+        and config.FACTCHECK_BACKEND in {"opencode", "opencode_go"}
         and not research
     ):
         from . import research as research_mod
 
-        _log("ファクトチェック用リサーチ (opencode_go+Web)…")
+        _log(f"ファクトチェック用リサーチ ({config.FACTCHECK_BACKEND}+Web)…")
         try:
             factcheck_research = research_mod.web_research(
                 corner,
                 past_topics,
                 spec,
                 performance_guidance=performance_guidance,
-                backend_override="opencode_go",
+                backend_override=config.FACTCHECK_BACKEND,
                 focus_text=(
                     f"{script.get('title', '')}\n{script.get('narration', '')}"
                 ),

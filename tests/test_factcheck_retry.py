@@ -69,6 +69,23 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertEqual(result["narration"], "確認後の全文です。")
 
+    def test_opencode_cli_backend_does_not_call_claude(self) -> None:
+        raw = '{"narration": "確認後の全文です。", "changed": false, "issues": []}'
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode"),
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+            mock.patch.object(factcheck.llm, "run_claude") as claude_mock,
+        ):
+            result = factcheck.verify_and_correct(
+                "検証対象のナレーション原文",
+                research={"facts": [{"claim": "確認済み", "source_url": "https://example.org/source"}]},
+            )
+
+        run_mock.assert_called_once()
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], config.script_llm_timeout())
+        claude_mock.assert_not_called()
+        self.assertEqual(result["narration"], "確認後の全文です。")
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
             mock.patch.object(factcheck.llm, "run_claude") as claude_mock,
