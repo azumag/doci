@@ -35,7 +35,9 @@ def _write_timeout() -> int | None:
 
 
 def _run_claude_cli(prompt: str, model: str) -> str:
-    return llm.run_claude(prompt, model, timeout=_write_timeout())
+    return llm.run_claude(
+        prompt, config.legacy_claude_model(model), timeout=_write_timeout()
+    )
 
 
 def _run_anthropic(prompt: str, model: str) -> str:
@@ -44,7 +46,7 @@ def _run_anthropic(prompt: str, model: str) -> str:
         raise RuntimeError("ANTHROPIC_API_KEY が未設定です (TEXT_BACKEND=anthropic)")
     body = json.dumps(
         {
-            "model": model,
+            "model": config.legacy_claude_model(model),
             "max_tokens": 2000,
             "messages": [{"role": "user", "content": prompt}],
         }

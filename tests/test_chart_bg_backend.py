@@ -103,6 +103,18 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
 
         self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_GO_DEFAULT_MODEL)
 
+    def test_explicit_claude_backend_uses_legacy_model_when_text_default_is_qwen(self) -> None:
+        config.CHART_BG_BACKEND = "claude"
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "TEXT_MODEL", config.OPENCODE_GO_DEFAULT_MODEL),
+            mock.patch.object(config, "LEGACY_CLAUDE_MODEL", "claude-opus-4-8"),
+            mock.patch.object(chart_bg.llm, "run_claude", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], "claude-opus-4-8")
+
 
 if __name__ == "__main__":
     unittest.main()

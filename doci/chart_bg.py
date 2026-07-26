@@ -64,7 +64,9 @@ def select(spec: dict, theme: str) -> list[dict]:
             timeout=120,
         )
     elif config.CHART_BG_BACKEND == "claude":
-        txt = llm.run_claude(prompt, config.TEXT_MODEL, timeout=120)
+        txt = llm.run_claude(
+            prompt, config.legacy_claude_model(config.TEXT_MODEL), timeout=120
+        )
     else:
         raise ValueError(f"未対応のCHART_BG_BACKENDです: {config.CHART_BG_BACKEND}")
     data = llm.extract_json(txt)

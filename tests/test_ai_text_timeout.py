@@ -113,6 +113,15 @@ class WriteTimeoutTest(unittest.TestCase):
 
         self.assertIsNone(run_mock.call_args.kwargs["timeout"])
 
+    def test_legacy_claude_path_does_not_receive_opencode_model_default(self) -> None:
+        with (
+            mock.patch.object(config, "LEGACY_CLAUDE_MODEL", "claude-opus-4-8"),
+            mock.patch.object(ai_text.llm, "run_claude", return_value="{}") as run_mock,
+        ):
+            ai_text._run_claude_cli("prompt", "opencode-go/qwen3.7-plus")
+
+        self.assertEqual(run_mock.call_args.args[1], "claude-opus-4-8")
+
 
 if __name__ == "__main__":
     unittest.main()

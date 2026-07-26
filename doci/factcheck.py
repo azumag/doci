@@ -82,7 +82,7 @@ def _attempt(prompt: str, backend: str) -> dict:
     elif backend == "claude":
         raw = llm.run_claude(
             prompt,
-            config.FACTCHECK_MODEL,
+            config.legacy_claude_model(config.FACTCHECK_MODEL),
             allowed_tools=["WebSearch", "WebFetch"],
             timeout=config.SCRIPT_LLM_TIMEOUT,
         )
@@ -106,7 +106,7 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
     if backend == "opencode_go" and not (research and research.get("facts")):
         _log(
             "OpenCode Goファクトチェック: 検証済み資料がないため原文を維持"
-            "（SCRIPT_RESEARCH=1でリサーチを有効化してください）"
+            "（リサーチが無効、または資料取得に失敗しました）"
         )
         return None
     prompt = _PROMPT.format(

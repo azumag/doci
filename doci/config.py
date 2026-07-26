@@ -57,8 +57,18 @@ def get_bool(key: str, default: bool = False) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+def legacy_claude_model(model: str) -> str:
+    """明示されたClaude旧経路にだけClaude互換モデル名を渡す。"""
+    if model.startswith(("claude-", "anthropic/")):
+        return model
+    return LEGACY_CLAUDE_MODEL
+
+
 # --- text ---
 OPENCODE_GO_DEFAULT_MODEL = "opencode-go/qwen3.7-plus"
+# Claudeは明示された旧経路だけで使う。TEXT_MODEL等の既定値がOpenCode Goモデルでも、
+# 旧経路を明示した利用者がモデル名を設定し忘れた場合に不正なモデル名を渡さない。
+LEGACY_CLAUDE_MODEL = get("CLAUDE_MODEL", "claude-opus-4-8")
 # 運用の既定経路はOpenCode Go直API。Claudeは明示的に選んだ旧経路以外では呼ばない。
 TEXT_BACKEND = get("TEXT_BACKEND", "opencode_go")
 TEXT_MODEL = get("TEXT_MODEL", OPENCODE_GO_DEFAULT_MODEL)
