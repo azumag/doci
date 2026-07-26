@@ -13,6 +13,14 @@ from pathlib import Path
 from . import assets, config, llm
 
 
+class UnsupportedChartBackendError(ValueError):
+    """CHART_BG_BACKEND の設定値が未対応であることを示す。"""
+
+
+def _log(message: str) -> None:
+    print(f"[doci] {message}", flush=True)
+
+
 def _items_desc(spec: dict) -> tuple[str, int]:
     t = spec.get("type")
     if t == "timeline":
@@ -68,7 +76,9 @@ def select(spec: dict, theme: str) -> list[dict]:
             prompt, config.legacy_claude_model(config.TEXT_MODEL), timeout=120
         )
     else:
-        raise ValueError(f"未対応のCHART_BG_BACKENDです: {config.CHART_BG_BACKEND}")
+        raise UnsupportedChartBackendError(
+            f"未対応のCHART_BG_BACKENDです: {config.CHART_BG_BACKEND}"
+        )
     data = llm.extract_json(txt)
     raw = data.get("backgrounds") or []
     out: list[dict] = []
@@ -119,10 +129,12 @@ def ensure(spec: dict, theme: str, workdir: Path, idx: int) -> dict:
     else:
         try:
             sel = select(spec, theme)
-        except ValueError as exc:
-            if not str(exc).startswith("未対応のCHART_BG_BACKEND"):
-                raise
+        except UnsupportedChartBackendError:
             # 設定値の取り違えで日次生成全体を落とさず、背景なしの図表へ安全に劣化する。
+            _log(
+                "警告: 未対応のCHART_BG_BACKEND="
+                f"{config.CHART_BG_BACKEND}。背景なしの図表へフォールバックします"
+            )
             _, needed = _items_desc(spec)
             sel = [{"query": theme, "media": "image"} for _ in range(needed)]
         # 単一背景(stat/compare/bar)は Chrome に背景画像として埋め込むため image 固定。

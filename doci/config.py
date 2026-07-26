@@ -112,9 +112,6 @@ SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
 WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 900)
 # 全体上限を無効にしても、無音の接続を無限に保持しないためのソケット待機上限。
 WRITE_LLM_IDLE_TIMEOUT = get_int("WRITE_LLM_IDLE_TIMEOUT", 300)
-# 下書き再試行を含む執筆段全体の予算。個別試行の残り時間をこの上限で絞り、
-# Claudeフォールバックなしでも複数コーナーを長時間占有し続けないようにする。
-SCRIPT_DRAFT_TOTAL_TIMEOUT = get_int("SCRIPT_DRAFT_TOTAL_TIMEOUT", WRITE_LLM_TIMEOUT)
 
 
 def script_llm_timeout() -> int | None:
@@ -124,6 +121,11 @@ def script_llm_timeout() -> int | None:
 
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
+# 下書き再試行を含む執筆段全体の予算。個別試行の残り時間をこの上限で絞り、
+# Claudeフォールバックなしでも複数コーナーを長時間占有し続けないようにする。
+SCRIPT_DRAFT_TOTAL_TIMEOUT = get_int(
+    "SCRIPT_DRAFT_TOTAL_TIMEOUT", WRITE_LLM_TIMEOUT * max(1, SCRIPT_DRAFT_RETRIES)
+)
 # リサーチの再試行回数。外部Web取得が稀に不正JSONを返すため。高価なので控えめ。
 SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)
 # 公開済み/キュー済み題材の再利用を避ける既定期間。channel.toml の
