@@ -187,7 +187,7 @@ def _run_opencode_go(
                         continue
                     if payload == "[DONE]":
                         received_terminal = True
-                        continue
+                        break
                     try:
                         event = json.loads(payload)
                     except json.JSONDecodeError:
@@ -204,6 +204,7 @@ def _run_opencode_go(
                         stop_reason = delta.get("stop_reason") or stop_reason
                         if stop_reason:
                             received_terminal = True
+                            break
                     elapsed = time.monotonic() - started
                     if elapsed >= next_progress:
                         _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")

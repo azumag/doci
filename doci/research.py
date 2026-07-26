@@ -188,6 +188,16 @@ _TRUSTED_SOURCE_HOSTS = (
     "wikimedia.org",
     "who.int",
     "un.org",
+    "ourworldindata.org",
+    "plato.stanford.edu",
+    "iep.utm.edu",
+    "britannica.com",
+    "loc.gov",
+    "history.state.gov",
+    "oecd.org",
+    "worldbank.org",
+    "imf.org",
+    "wikidata.org",
 )
 
 
