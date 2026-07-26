@@ -30,7 +30,7 @@ class ResearchPromptTest(unittest.TestCase):
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.return_value = (
-            b'<a class="result__a" href="/l/?uddg=https%3A%2F%2Fwww.youtube.com%2Fhelp">'
+            b'<a class="result__a" href="/l/?uddg=https%3A%2F%2Fsupport.google.com%2Fyoutube%2Fhelp">'
             b"YouTube Help</a>"
         )
         with (
@@ -43,13 +43,13 @@ class ResearchPromptTest(unittest.TestCase):
             materials,
             [
                 {
-                    "url": "https://www.youtube.com/help",
+                    "url": "https://support.google.com/youtube/help",
                     "title": "YouTube Help",
                     "excerpt": "一次資料の本文",
                 }
             ],
         )
-        excerpt_mock.assert_called_once_with("https://www.youtube.com/help")
+        excerpt_mock.assert_called_once_with("https://support.google.com/youtube/help")
 
     def test_reference_search_includes_recent_topics_and_guidance(self) -> None:
         response = mock.MagicMock()
@@ -109,6 +109,57 @@ class ResearchPromptTest(unittest.TestCase):
                     timeout=3,
                     trusted_only=True,
                 )
+
+    def test_error_and_non_html_responses_are_rejected(self) -> None:
+        class FakeResponse:
+            def __init__(self, status: int, content_type: str) -> None:
+                self.status = status
+                self.content_type = content_type
+
+            def getheader(self, name: str, default=None):  # type: ignore[no-untyped-def]
+                return self.content_type if name == "Content-Type" else default
+
+            def close(self) -> None:
+                return None
+
+        class FakeConnection:
+            sock = None
+
+            def __init__(self, response) -> None:  # type: ignore[no-untyped-def]
+                self.response = response
+
+            def request(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                return None
+
+            def getresponse(self):  # type: ignore[no-untyped-def]
+                return self.response
+
+            def close(self) -> None:
+                return None
+
+        for response, message in (
+            (FakeResponse(403, "text/html"), "HTTPステータス"),
+            (FakeResponse(200, "application/pdf"), "HTML/テキスト以外"),
+        ):
+            with self.subTest(message=message):
+                with (
+                    mock.patch.object(
+                        research,
+                        "_public_target",
+                        return_value=("support.google.com", 443, "93.184.216.34"),
+                    ),
+                    mock.patch.object(
+                        research,
+                        "_PinnedHTTPSConnection",
+                        return_value=FakeConnection(response),
+                    ),
+                ):
+                    with self.assertRaisesRegex(ValueError, message):
+                        research._safe_urlopen(
+                            research.Request("https://support.google.com/youtube/help"),
+                            timeout=3,
+                            trusted_only=True,
+                        )
 
     def test_search_url_decode_does_not_double_unquote(self) -> None:
         self.assertEqual(

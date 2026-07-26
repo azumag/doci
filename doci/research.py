@@ -159,10 +159,9 @@ _TRUSTED_SOURCE_HOSTS = (
     "html.duckduckgo.com",
     "duckduckgo.com",
     "blog.youtube",
-    "youtube.com",
-    "google.com",
-    "wikipedia.org",
-    "wikimedia.org",
+    "support.google.com",
+    "developers.google.com",
+    "policies.google.com",
     "who.int",
     "un.org",
 )
@@ -343,6 +342,19 @@ def _safe_urlopen(request: Request, timeout: float, *, trusted_only: bool = Fals
             connection.close()
             current_url = next_url
             continue
+        content_type = (response.getheader("Content-Type", "") or "").lower()
+        if not 200 <= response.status < 300:
+            response.close()
+            connection.close()
+            raise ValueError(f"資料URLのHTTPステータスを拒否しました: {response.status}")
+        if not (
+            content_type.startswith("text/")
+            or content_type.startswith("application/xhtml+xml")
+            or content_type.startswith("application/json")
+        ):
+            response.close()
+            connection.close()
+            raise ValueError("HTML/テキスト以外の資料URLを拒否しました")
         return _PinnedResponse(connection, response, current_url, deadline)
     raise ValueError("資料URLのリダイレクト回数が上限を超えました")
 
@@ -418,6 +430,9 @@ def _search_reference_materials(
     for row in parser.results[:8]:
         url = _decode_search_url(row["url"], search_url)
         if not url or url in seen:
+            continue
+        hostname = (urlparse(url).hostname or "").lower()
+        if not _is_trusted_source_host(hostname):
             continue
         seen.add(url)
         rows.append({"url": url, "title": row["title"]})
