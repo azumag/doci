@@ -31,10 +31,8 @@ _extract_json = llm.extract_json
 
 
 def _write_timeout() -> int | None:
-    """CLI/ソケットの待機上限。全体上限0でも無音idle上限を適用する。"""
-    if config.WRITE_LLM_TIMEOUT > 0:
-        return config.WRITE_LLM_TIMEOUT
-    return config.WRITE_LLM_IDLE_TIMEOUT if config.WRITE_LLM_IDLE_TIMEOUT > 0 else None
+    """CLI/APIの全体待機上限。0は明示的な長文待機モード。"""
+    return _whole_write_timeout()
 
 
 def _whole_write_timeout() -> int | None:

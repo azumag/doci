@@ -13,18 +13,17 @@ from doci import ai_text, config
 
 
 class WriteTimeoutTest(unittest.TestCase):
-    def test_zero_uses_idle_timeout_for_opencode_cli(self) -> None:
+    def test_zero_disables_opencode_cli_timeout(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(config, "OUTPUT", Path(tmp)),
             mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
-            mock.patch.object(config, "WRITE_LLM_IDLE_TIMEOUT", 300),
             mock.patch.object(ai_text.subprocess, "run", return_value=completed) as run_mock,
         ):
             ai_text._run_opencode("prompt", "opencode-go/qwen3.7-plus", "")
 
-        self.assertEqual(run_mock.call_args.kwargs["timeout"], 300)
+        self.assertIsNone(run_mock.call_args.kwargs["timeout"])
 
     def test_opencode_go_stream_returns_text_without_thinking(self) -> None:
         events = b"".join(
@@ -134,15 +133,14 @@ class WriteTimeoutTest(unittest.TestCase):
 
         run_mock.assert_called_once_with("prompt", "", "custom-agent")
 
-    def test_zero_uses_idle_timeout_for_explicit_claude(self) -> None:
+    def test_zero_disables_explicit_claude_timeout(self) -> None:
         with (
             mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
-            mock.patch.object(config, "WRITE_LLM_IDLE_TIMEOUT", 300),
             mock.patch.object(ai_text.llm, "run_claude", return_value="{}") as run_mock,
         ):
             ai_text._run_claude_cli("prompt", "claude-sonnet-5")
 
-        self.assertEqual(run_mock.call_args.kwargs["timeout"], 300)
+        self.assertIsNone(run_mock.call_args.kwargs["timeout"])
 
     def test_legacy_claude_path_does_not_receive_opencode_model_default(self) -> None:
         with (

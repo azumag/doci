@@ -296,6 +296,7 @@ class ResearchPromptTest(unittest.TestCase):
             video_case_study_rule="",
             extra_rules="",
             factcheck_focus="",
+            topic_selection_rule="",
             external_materials=json.dumps(external, ensure_ascii=False),
         )
         self.assertEqual(prompt.count("</source_materials>"), 1)
