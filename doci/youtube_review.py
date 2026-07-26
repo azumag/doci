@@ -28,14 +28,24 @@ _SECRET_RE = re.compile(
     r"|Bearer\s+\S+",
     re.IGNORECASE,
 )
-_NEGATION_MARKERS = (
-    "ではない",
-    "ではなく",
-    "無関係",
-    "関係ない",
-    "関係がない",
-    "対象外",
-    "向けではない",
+_SUBJECT_REJECTION_MARKERS = (
+    "youtubeとは関係ない",
+    "youtubeと関係ない",
+    "youtubeとは無関係",
+    "youtubeと無関係",
+    "youtubeが主題ではない",
+    "youtubeは主題ではない",
+    "youtube制作者向けではない",
+    "youtube向けではない",
+    "youtube運用向けではない",
+    "youtube制作者は対象外",
+    "youtube制作者を対象としない",
+    "youtubeが対象ではない",
+    "youtubeショートとは関係ない",
+    "youtubeショートと関係ない",
+    "youtube動画とは関係ない",
+    "youtube動画と関係ない",
+    "youtube動画とは無関係",
 )
 _YOUTUBE_CONTEXT_MARKERS = (
     "youtube",
@@ -148,6 +158,7 @@ class TrackingIssue:
     labels: tuple[str, ...]
     url: str
     state: str
+    author: str
 
 
 @dataclass(frozen=True)
@@ -166,9 +177,9 @@ def _text(value: object, limit: int = 500) -> str:
     return " ".join(value.split())[:limit]
 
 
-def _contains_negation(*values: str) -> bool:
+def _rejects_youtube_subject(*values: str) -> bool:
     folded = " ".join(values).casefold()
-    return any(marker in folded for marker in _NEGATION_MARKERS)
+    return any(marker in folded for marker in _SUBJECT_REJECTION_MARKERS)
 
 
 def _contains_any(value: str, markers: tuple[str, ...]) -> bool:
@@ -202,13 +213,13 @@ def assess(script: dict) -> ThemeAssessment:
         len(problem) >= 8
         and bool(problem_markers)
         and _contains_any(problem, _PROBLEM_SIGNAL_MARKERS)
-        and not _contains_negation(problem)
+        and not _rejects_youtube_subject(problem)
     )
     action_clear = (
         len(viewer_action) >= 8
         and _contains_any(viewer_action, _ACTION_TARGET_MARKERS)
         and _contains_any(viewer_action, _ACTION_MARKERS)
-        and not _contains_negation(viewer_action)
+        and not _rejects_youtube_subject(viewer_action)
     )
     planned_subject = " ".join((topic, angle))
     generated_subject = " ".join((title, description, narration))
@@ -228,7 +239,7 @@ def assess(script: dict) -> ThemeAssessment:
     subject_clear = (
         context_clear
         and focus_consistent
-        and not _contains_negation(
+        and not _rejects_youtube_subject(
             audience,
             problem,
             viewer_action,
@@ -313,48 +324,66 @@ def _parse_issue(row: dict) -> TrackingIssue | None:
         for label in labels
         if isinstance(label, dict) and label.get("name")
     )
+    author = row.get("author")
+    if not isinstance(author, dict):
+        author = row.get("user")
     return TrackingIssue(
         number=int(row["number"]),
         video_id=match.group(1),
         title=str(row.get("title") or ""),
         body=body,
         labels=label_names,
-        url=str(row.get("url") or ""),
+        url=str(row.get("html_url") or row.get("url") or ""),
         state=str(row.get("state") or "").upper(),
+        author=str(author.get("login") or "") if isinstance(author, dict) else "",
     )
 
 
 def _issue_json_fields() -> str:
-    return "number,title,body,labels,url,state"
+    return "number,title,body,labels,url,state,author"
+
+
+def _expected_issue_author(review: YouTubeReviewSpec) -> str:
+    """このリポジトリではowner自身のgh認証で運用Issueを作成する。"""
+    return review.repository.split("/", 1)[0]
 
 
 def _find_issue(
     review: YouTubeReviewSpec,
     video_id: str,
 ) -> TrackingIssue | None:
-    """全Issue走査を避け、動画IDを含む候補だけを検索してmarkerで確定する。"""
+    """検索indexを使わず、owner作成の直近IssueをREST一覧からmarkerで確定する。"""
+    expected_author = _expected_issue_author(review)
     raw = _run_gh(
         [
-            "issue",
-            "list",
-            "--repo",
-            review.repository,
-            "--state",
-            "all",
-            "--search",
-            f"{video_id} in:title,body",
-            "--limit",
-            "100",
-            "--json",
-            _issue_json_fields(),
+            "api",
+            f"repos/{review.repository}/issues",
+            "--method",
+            "GET",
+            "-f",
+            "state=all",
+            "-f",
+            f"creator={expected_author}",
+            "-f",
+            "per_page=100",
+            "-f",
+            "sort=created",
+            "-f",
+            "direction=desc",
         ]
     )
     rows = json.loads(raw or "[]")
     if not isinstance(rows, list):
         raise RuntimeError("GitHub Issue検索結果の形式が不正です")
     for row in rows:
+        if isinstance(row, dict) and row.get("pull_request"):
+            continue
         issue = _parse_issue(row) if isinstance(row, dict) else None
-        if issue is not None and issue.video_id == video_id:
+        if (
+            issue is not None
+            and issue.video_id == video_id
+            and issue.author.casefold() == expected_author.casefold()
+        ):
             return issue
     return None
 
@@ -472,6 +501,7 @@ def _create_issue(
         labels=(),
         url=url,
         state="OPEN",
+        author=_expected_issue_author(review),
     )
 
 
@@ -569,7 +599,7 @@ def _with_issue(record: ReviewRecord, issue: TrackingIssue) -> ReviewRecord:
         video_id=record.video_id,
         title=record.title,
         assessment=record.assessment,
-        status=record.status,
+        status="pending" if record.status == "issue_creating" else record.status,
         issue_number=issue.number,
         issue_url=issue.url,
     )
@@ -591,21 +621,45 @@ def _ensure_issue_locked(
     record: ReviewRecord,
 ) -> tuple[ReviewRecord, TrackingIssue]:
     review = spec.publish.youtube.review
-    issue = (
-        _get_issue(review, record.issue_number)
-        if record.issue_number is not None
-        else _find_issue(review, record.video_id)
-    )
+    expected_author = _expected_issue_author(review)
+    if record.issue_number is not None:
+        issue = _get_issue(review, record.issue_number)
+        if issue is None:
+            raise RuntimeError(
+                "記録済みの確認Issueから追跡markerを確認できません。"
+                "重複作成を避けるため自動再作成しません"
+            )
+    else:
+        issue = _find_issue(review, record.video_id)
+    if issue is None and record.status == "issue_creating":
+        # direct REST一覧で作成済みIssueが無いことを1run後に確認できたため、
+        # pendingへ戻す。次の3時間runでだけ再試行し、直後の重複作成を避ける。
+        _append_record(spec, _with_status(record, "pending"))
+        raise RuntimeError(
+            "確認Issueの作成結果を確認できませんでした。"
+            "重複作成を避け、次回runで作成を再試行します"
+        )
     if issue is None:
         # operation lock内で検索→作成するため、同一ホストの並行runは重複作成しない。
-        issue = _create_issue(
+        intent = _with_status(record, "issue_creating")
+        _append_record(spec, intent)
+        record = intent
+        created = _create_issue(
             review,
             record.video_id,
             record.title,
             record.assessment,
         )
+        issue = _get_issue(review, created.number)
+        if issue is None:
+            raise RuntimeError(
+                "作成した確認IssueをAPIで検証できません。"
+                "outboxの作成中状態から次回再確認します"
+            )
     if issue.video_id != record.video_id:
         raise RuntimeError("確認Issueの動画IDがoutboxと一致しません")
+    if issue.author.casefold() != expected_author.casefold():
+        raise RuntimeError("確認Issueの作成者が設定リポジトリownerと一致しません")
     updated = _with_issue(record, issue)
     if updated != record:
         _append_record(spec, updated)

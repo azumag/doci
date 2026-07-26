@@ -117,6 +117,43 @@ class ThemeAssessmentTest(unittest.TestCase):
 
         self.assertEqual(result.privacy, "unlisted")
 
+    def test_explanatory_contrast_in_narration_does_not_force_unlisted(
+        self,
+    ) -> None:
+        script = _assessment_script()
+        script["narration"] = (
+            "YouTubeショートの離脱はアルゴリズムの問題ではなく、"
+            "冒頭の視聴維持率を確認して次の一本で変更する課題です。"
+        )
+
+        result = youtube_review.assess(script)
+
+        self.assertEqual(result.privacy, "public")
+
+    def test_explicit_subject_rejection_anywhere_keeps_video_unlisted(
+        self,
+    ) -> None:
+        cases = (
+            ("topic", "YouTube動画とは関係ない視聴維持率の話"),
+            ("title", "YouTubeが主題ではない視聴維持率の話"),
+            (
+                "narration",
+                "YouTubeが主題ではない睡眠企画ですが、"
+                "YouTubeショートの視聴維持率と冒頭離脱を確認します。",
+            ),
+        )
+        for field, value in cases:
+            script = _assessment_script()
+            if field == "topic":
+                script["_research"]["topic"] = value
+            else:
+                script[field] = value
+
+            with self.subTest(field=field):
+                result = youtube_review.assess(script)
+
+            self.assertEqual(result.privacy, "unlisted")
+
     def test_off_topic_narration_cannot_pass_on_youtube_self_declaration(self) -> None:
         script = _assessment_script(
             topic="YouTubeショートで睡眠の幸福を語る",
@@ -215,6 +252,7 @@ class IssueWorkflowTest(unittest.TestCase):
         state: str = "OPEN",
         video_id: str = "abc123XYZ",
         number: int = 42,
+        author: str = "owner",
     ) -> youtube_review.TrackingIssue:
         return youtube_review.TrackingIssue(
             number=number,
@@ -224,6 +262,7 @@ class IssueWorkflowTest(unittest.TestCase):
             labels=labels,
             url=f"https://github.com/owner/repo/issues/{number}",
             state=state,
+            author=author,
         )
 
     def _queue(self, video_id: str = "abc123XYZ") -> None:
@@ -558,7 +597,7 @@ class IssueWorkflowTest(unittest.TestCase):
             42,
         )
 
-    def test_issue_search_is_targeted_and_bounded(self) -> None:
+    def test_issue_lookup_is_owner_scoped_direct_and_bounded(self) -> None:
         with mock.patch.object(
             youtube_review,
             "_run_gh",
@@ -567,8 +606,157 @@ class IssueWorkflowTest(unittest.TestCase):
             youtube_review._find_issue(self.review, "abc123XYZ")
 
         args = gh_mock.call_args.args[0]
-        self.assertIn("abc123XYZ in:title,body", args)
-        self.assertEqual(args[args.index("--limit") + 1], "100")
+        self.assertIn("api", args)
+        self.assertIn("creator=owner", args)
+        self.assertIn("per_page=100", args)
+        self.assertNotIn("--search", args)
+
+    def test_issue_lookup_ignores_matching_marker_from_another_author(self) -> None:
+        row = {
+            "number": 42,
+            "title": "forged",
+            "body": "<!-- doci-youtube-review video_id=abc123XYZ -->",
+            "labels": [],
+            "html_url": "https://github.com/owner/repo/issues/42",
+            "state": "open",
+            "user": {"login": "attacker"},
+        }
+        with mock.patch.object(
+            youtube_review,
+            "_run_gh",
+            return_value=json.dumps([row]),
+        ):
+            issue = youtube_review._find_issue(self.review, "abc123XYZ")
+
+        self.assertIsNone(issue)
+
+    def test_issue_creation_intent_prevents_duplicate_after_link_fsync_failure(
+        self,
+    ) -> None:
+        self._queue()
+        created = self._issue()
+        original_append = youtube_review._append_record
+        failed_once = False
+
+        def fail_link_once(spec, record):
+            nonlocal failed_once
+            if record.issue_number is not None and not failed_once:
+                failed_once = True
+                raise OSError("link fsync failed")
+            return original_append(spec, record)
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                side_effect=[None, created],
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_create_issue",
+                return_value=created,
+            ) as create_mock,
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=created,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_append_record",
+                side_effect=fail_link_once,
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "link fsync failed"):
+                youtube_review.ensure_issue(self.spec, created.video_id)
+            self.assertEqual(
+                youtube_review._latest_records(self.spec)[created.video_id].status,
+                "issue_creating",
+            )
+            recovered = youtube_review.ensure_issue(self.spec, created.video_id)
+
+        self.assertEqual(recovered, created)
+        create_mock.assert_called_once()
+
+    def test_new_issue_author_is_verified_before_linking(self) -> None:
+        self._queue()
+        created = self._issue()
+        forged = self._issue(author="attacker")
+        with (
+            mock.patch.object(youtube_review, "_find_issue", return_value=None),
+            mock.patch.object(
+                youtube_review,
+                "_create_issue",
+                return_value=created,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=forged,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "作成者"):
+                youtube_review.ensure_issue(self.spec, created.video_id)
+
+        record = youtube_review._latest_records(self.spec)[created.video_id]
+        self.assertEqual(record.status, "issue_creating")
+        self.assertIsNone(record.issue_number)
+
+    def test_missing_marker_on_recorded_issue_never_creates_a_duplicate(
+        self,
+    ) -> None:
+        self._queue()
+        existing = self._issue()
+        with mock.patch.object(
+            youtube_review,
+            "_find_issue",
+            return_value=existing,
+        ):
+            youtube_review.ensure_issue(self.spec, existing.video_id)
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=None,
+            ),
+            mock.patch.object(youtube_review, "_create_issue") as create_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "自動再作成しません"):
+                youtube_review.ensure_issue(self.spec, existing.video_id)
+
+        create_mock.assert_not_called()
+
+    def test_failed_creation_is_retried_only_after_a_direct_lookup_run(
+        self,
+    ) -> None:
+        self._queue()
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                side_effect=[None, None],
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_create_issue",
+                side_effect=RuntimeError("create failed"),
+            ) as create_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "create failed"):
+                youtube_review.ensure_issue(self.spec, "abc123XYZ")
+            self.assertEqual(
+                youtube_review._latest_records(self.spec)["abc123XYZ"].status,
+                "issue_creating",
+            )
+            with self.assertRaisesRegex(RuntimeError, "次回run"):
+                youtube_review.ensure_issue(self.spec, "abc123XYZ")
+
+        self.assertEqual(
+            youtube_review._latest_records(self.spec)["abc123XYZ"].status,
+            "pending",
+        )
+        create_mock.assert_called_once()
 
     def test_error_redaction_removes_github_token_shapes(self) -> None:
         value = "failed with ghp_abcdefghijklmnopqrstuvwxyz123456"

@@ -24,6 +24,8 @@ ANALYTICS_SCOPES = [
     *ACCOUNT_SCOPES,
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
+MANAGE_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
+MANAGE_SCOPES = [*ACCOUNT_SCOPES, MANAGE_SCOPE]
 _WRITABLE_VIDEO_STATUS_KEYS = {
     "privacyStatus",
     "publishAt",
@@ -70,6 +72,17 @@ def _load_credentials(
         client_secret_file or config.YOUTUBE_CLIENT_SECRET_FILE
     )
     required_scopes = scopes or SCOPES
+    auth_flags: list[str] = []
+    if "https://www.googleapis.com/auth/yt-analytics.readonly" in required_scopes:
+        auth_flags.append("--analytics")
+    if MANAGE_SCOPE in required_scopes:
+        auth_flags.append("--manage")
+    auth_hint = " ".join(
+        [
+            "python -m doci.youtube --auth [--channel <id>]",
+            *auth_flags,
+        ]
+    )
     creds = None
     token_scopes_ok = token_file.exists() and _token_has_scopes(
         token_file, required_scopes
@@ -79,13 +92,13 @@ def _load_credentials(
     elif token_file.exists() and not interactive:
         raise RuntimeError(
             "YouTube token のscopeが不足しています。"
-            "`python -m doci.youtube --auth [--channel <id>]` で再認証してください。"
+            f"`{auth_hint}` で再認証してください。"
         )
     if creds and not creds.has_scopes(required_scopes):
         if not interactive:
             raise RuntimeError(
                 "YouTube token のscopeが不足しています。"
-                "`python -m doci.youtube --auth [--channel <id>]` で再認証してください。"
+                f"`{auth_hint}` で再認証してください。"
             )
         creds = None
     if creds and creds.valid:
@@ -100,12 +113,12 @@ def _load_credentials(
             if not interactive:
                 raise RuntimeError(
                     "YouTube のrefresh_tokenが失効しています。"
-                    "`python -m doci.youtube --auth [--channel <id>]` で再認証してください。"
+                    f"`{auth_hint}` で再認証してください。"
                 )
     if not interactive:
         raise RuntimeError(
             "有効な YouTube 認証がありません。先に "
-            "`python -m doci.youtube --auth [--channel <id>]` を実行してください。"
+            f"`{auth_hint}` を実行してください。"
         )
     from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -475,6 +488,7 @@ def set_thumbnail(
 def _video_status(
     video_id: str,
     *,
+    required_scopes: list[str] | None = None,
     token_file: Path | None = None,
     client_secret_file: Path | None = None,
 ) -> tuple[object, dict]:
@@ -484,6 +498,7 @@ def _video_status(
         interactive=False,
         token_file=token_file,
         client_secret_file=client_secret_file,
+        scopes=required_scopes or ACCOUNT_SCOPES,
     )
     service = _build_service(creds)
     current = service.videos().list(part="status", id=video_id).execute()
@@ -527,6 +542,7 @@ def set_privacy(
         raise ValueError(f"invalid expected YouTube privacy: {expected_privacy!r}")
     service, current_status = _video_status(
         video_id,
+        required_scopes=MANAGE_SCOPES,
         token_file=token_file,
         client_secret_file=client_secret_file,
     )
@@ -560,6 +576,11 @@ def main() -> None:
         help="--auth時にYouTube Analytics読み取りscopeも要求",
     )
     ap.add_argument(
+        "--manage",
+        action="store_true",
+        help="--auth時に動画公開設定の更新scopeも要求",
+    )
+    ap.add_argument(
         "--whoami",
         action="store_true",
         help="tokenが紐づくYouTubeチャンネルIDと表示名を確認",
@@ -580,11 +601,16 @@ def main() -> None:
         token_file = spec.publish.youtube.token
         client_secret_file = spec.publish.youtube.client_secret
     if args.auth:
+        auth_scopes = list(
+            ANALYTICS_SCOPES if args.analytics else ACCOUNT_SCOPES
+        )
+        if args.manage and MANAGE_SCOPE not in auth_scopes:
+            auth_scopes.append(MANAGE_SCOPE)
         _load_credentials(
             interactive=True,
             token_file=token_file,
             client_secret_file=client_secret_file,
-            scopes=ANALYTICS_SCOPES if args.analytics else ACCOUNT_SCOPES,
+            scopes=auth_scopes,
         )
         print(f"認証完了: {token_file}")
         return

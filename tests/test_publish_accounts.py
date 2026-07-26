@@ -51,6 +51,9 @@ class PublishAccountsTest(unittest.TestCase):
         self.assertFalse(
             youtube._token_has_scopes(token, youtube.ACCOUNT_SCOPES)
         )
+        self.assertFalse(
+            youtube._token_has_scopes(token, youtube.MANAGE_SCOPES)
+        )
 
     def test_enabled_requires_channel_platform_token_and_global_switch(self) -> None:
         spec = self._youtube_spec("alpha")
@@ -221,7 +224,11 @@ class PublishAccountsTest(unittest.TestCase):
         }
         settings = self._youtube_spec("alpha")
         with (
-            patch.object(youtube, "_load_credentials", return_value=object()),
+            patch.object(
+                youtube,
+                "_load_credentials",
+                return_value=object(),
+            ) as credentials_mock,
             patch.object(
                 youtube,
                 "_build_service",
@@ -240,6 +247,10 @@ class PublishAccountsTest(unittest.TestCase):
         self.assertEqual(body["status"]["privacyStatus"], "public")
         self.assertEqual(body["status"]["license"], "youtube")
         self.assertNotIn("uploadStatus", body["status"])
+        self.assertEqual(
+            credentials_mock.call_args.kwargs["scopes"],
+            youtube.MANAGE_SCOPES,
+        )
 
     def test_set_privacy_refuses_an_unexpected_private_video(self) -> None:
         service = MagicMock()
@@ -369,6 +380,34 @@ class PublishAccountsTest(unittest.TestCase):
         self.assertEqual(
             load_mock.call_args.kwargs["client_secret_file"],
             settings.youtube.client_secret,
+        )
+
+    def test_youtube_manage_auth_requests_write_scope(self) -> None:
+        settings = self._youtube_spec("alpha")
+        fake_spec = SimpleNamespace(publish=settings)
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "doci.youtube",
+                    "--auth",
+                    "--channel",
+                    "alpha",
+                    "--analytics",
+                    "--manage",
+                ],
+            ),
+            patch("doci.channel.load", return_value=fake_spec),
+            patch.object(youtube, "_load_credentials") as load_mock,
+            patch("builtins.print"),
+        ):
+            youtube.main()
+
+        scopes = load_mock.call_args.kwargs["scopes"]
+        self.assertIn(youtube.MANAGE_SCOPE, scopes)
+        self.assertIn(
+            "https://www.googleapis.com/auth/yt-analytics.readonly",
+            scopes,
         )
 
     def test_youtube_whoami_cli_uses_selected_channel_paths(self) -> None:

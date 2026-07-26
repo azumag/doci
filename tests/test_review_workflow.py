@@ -30,6 +30,8 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
         self.assertIn("head -c 200000 /tmp/doci-pr.diff", self.workflow)
         self.assertIn("--model claude-opus-5", self.workflow)
         self.assertIn("unsafe review output", self.workflow)
+        self.assertIn("Require structured review result", self.workflow)
+        self.assertIn("Claude review returned no structured output", self.workflow)
 
     def test_uses_subscription_oauth_and_immutable_actions(self) -> None:
         self.assertIn("claude_code_oauth_token:", self.workflow)

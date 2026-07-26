@@ -210,8 +210,16 @@ Issueでは `公開承認` / `保留` / `限定公開で保持` のうち1ラベ
 `公開承認` の場合だけYouTubeを公開へ変更し、動画URLをIssueへ記録して自動クローズする。
 ほかの2ラベル、ラベル無し、複数ラベル、限定公開からの経過時間では公開設定を変更しない。
 
+公開設定の変更には `youtube.force-ssl` scope が必要なため、運用開始前に対象チャンネルを
+次のコマンドで再認証する。`--analytics` は既存の実績分析scopeも同時に維持するために指定する。
+
+```bash
+python -m doci.youtube --auth --analytics --manage --channel youtube-growth
+```
+
 決定ラベルはリポジトリ設定で事前に作成する。dociはラベルを自動作成せず、GitHub操作には
-ローカルの既存 `gh` 認証を使い、トークンや秘密値を設定・ログ・Issue本文へ保存しない。
+対象リポジトリownerの既存 `gh` 認証を使う。owner以外が作成した同形式のIssueは追跡対象に
+せず、トークンや秘密値を設定・ログ・Issue本文へ保存しない。
 3時間ごとの既存 `--all-channels` launchd 実行は、VOICEVOX起動や動画生成より前に
 `--reconcile-youtube-reviews` を実行して確認Issueを取得する。限定公開アップロードは
 Issue作成より先に `output/<channel>/youtube_review_outbox.jsonl` へ耐久記録されるため、
