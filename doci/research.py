@@ -596,6 +596,61 @@ def _sanitize_external(value):  # type: ignore[no-untyped-def]
     return value
 
 
+def _external_materials_json(
+    video_candidates: list[dict[str, str]],
+    reference_materials: list[dict[str, str]],
+) -> str:
+    """資料プロンプトの総量を制限し、後続の候補を丸ごと削って境界を守る。"""
+    payload = _sanitize_external(
+        {
+            "video_candidates": video_candidates,
+            "reference_materials": reference_materials,
+        }
+    )
+    if not isinstance(payload, dict):
+        payload = {"video_candidates": [], "reference_materials": []}
+    if not isinstance(payload.get("video_candidates"), list):
+        payload["video_candidates"] = []
+    if not isinstance(payload.get("reference_materials"), list):
+        payload["reference_materials"] = []
+    # YouTubeの説明欄・字幕は候補1本あたりの入力を抑え、一次資料excerptの
+    # 6000字上限と合わせて総量キャップへ収めやすくする。
+    for row in payload["video_candidates"]:
+        if not isinstance(row, dict):
+            continue
+        for key in ("description", "transcript", "transcript_excerpt"):
+            if isinstance(row.get(key), str):
+                row[key] = row[key][:6000]
+    limit = 50000
+
+    def encoded() -> str:
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    # 比較事例は最低2本を優先し、まず候補動画、次に一次資料の末尾から削る。
+    while len(encoded()) > limit and len(payload["video_candidates"]) > 2:
+        payload["video_candidates"].pop()
+    while len(encoded()) > limit and len(payload["reference_materials"]) > 1:
+        payload["reference_materials"].pop()
+    # それでも巨大な異常入力が来た場合は、文字列フィールドを段階的に縮める。
+    while len(encoded()) > limit:
+        strings = [
+            (row, key)
+            for group in (payload["video_candidates"], payload["reference_materials"])
+            for row in group
+            if isinstance(row, dict)
+            for key, value in row.items()
+            if isinstance(value, str) and key not in {"url", "source_url"}
+        ]
+        if not strings:
+            break
+        row, key = max(strings, key=lambda item: len(item[0][item[1]]))
+        current_length = len(row[key])
+        if current_length == 0:
+            break
+        row[key] = row[key][: max(0, current_length - 1000)]
+    return encoded()
+
+
 def _sanitize_url(text: str) -> str:
     """URLの構文を変えずに、プロンプト境界を閉じる文字だけを無害化する。"""
     text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
@@ -1153,15 +1208,8 @@ def web_research(
             if focus_text
             else "1. このコーナーに合う、具体的で語り甲斐のある題材を1つ選ぶ（抽象概念そのものでなく、出来事・人物・制度・数字に落ちるもの）。"
         ),
-        external_materials=json.dumps(
-            _sanitize_external(
-                {
-                    "video_candidates": video_candidates,
-                    "reference_materials": reference_materials,
-                }
-            ),
-            ensure_ascii=False,
-            indent=2,
+        external_materials=_external_materials_json(
+            video_candidates, reference_materials
         ),
     )
     last_err: Exception | None = None

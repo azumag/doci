@@ -550,6 +550,32 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertGreater(len(sanitized["transcript_excerpt"]), 1800)
         self.assertGreater(len(sanitized["excerpt"]), 1800)
 
+    def test_external_materials_have_a_bounded_prompt_size(self) -> None:
+        videos = [
+            {
+                "title": f"動画{index}",
+                "channel": "チャンネル",
+                "url": f"https://www.youtube.com/watch?v={index}",
+                "description": "説明" * 6000,
+                "transcript_excerpt": "字幕" * 6000,
+            }
+            for index in range(8)
+        ]
+        references = [
+            {
+                "url": f"https://support.google.com/youtube/help-{index}",
+                "title": "資料",
+                "excerpt": "本文" * 3000,
+            }
+            for index in range(4)
+        ]
+
+        encoded = research._external_materials_json(videos, references)
+
+        self.assertLessEqual(len(encoded), 50000)
+        self.assertIn('"video_candidates"', encoded)
+        self.assertIn('"reference_materials"', encoded)
+
     def test_non_youtube_source_query_and_port_are_part_of_allowlist_key(self) -> None:
         self.assertEqual(
             research._normalized_source_url("https://example.org/doc?b=2&a=1"),

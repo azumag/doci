@@ -259,11 +259,6 @@ def _run_opencode_go(
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             response_holder[0] = resp
-            if deadline_timeout is not None:
-                remaining = max(0.001, deadline_timeout - (time.monotonic() - started))
-                deadline_timer = threading.Timer(remaining, expire_stream)
-                deadline_timer.daemon = True
-                deadline_timer.start()
             try:
                 stream = iter(resp)
                 stream_timeout_warning_logged = False
@@ -282,12 +277,22 @@ def _run_opencode_go(
                             if read_timeout is not None
                             else idle_timeout
                         )
-                    if (
-                        not set_stream_timeout(resp, read_timeout)
-                        and not stream_timeout_warning_logged
-                    ):
-                        _log("警告: OpenCode Goストリームのソケット期限を設定できません")
-                        stream_timeout_warning_logged = True
+                    stream_timeout_applied = set_stream_timeout(resp, read_timeout)
+                    if not stream_timeout_applied:
+                        if deadline_timeout is not None and deadline_timer is None:
+                            # 通常はソケット期限でreadlineを解放する。期限設定に
+                            # 対応しないラッパーだけ、最後の保険としてタイマーを使う。
+                            timer_remaining = max(
+                                0.001, deadline_timeout - (time.monotonic() - started)
+                            )
+                            deadline_timer = threading.Timer(
+                                timer_remaining, expire_stream
+                            )
+                            deadline_timer.daemon = True
+                            deadline_timer.start()
+                        if not stream_timeout_warning_logged:
+                            _log("警告: OpenCode Goストリームのソケット期限を設定できません")
+                            stream_timeout_warning_logged = True
                     try:
                         raw = next(stream)
                     except socket.timeout as exc:
@@ -429,15 +434,24 @@ def _run_opencode(
 
 def _opencode_cli_model(model: str) -> str:
     """OpenCode CLIのagent-only設定を補助段でも維持する。"""
-    if config.OPENCODE_MODEL:
-        return config.OPENCODE_MODEL
-    return "" if config.OPENCODE_AGENT else model
+    candidate = config.OPENCODE_MODEL or ("" if config.OPENCODE_AGENT else model)
+    return _validate_opencode_cli_model(candidate)
+
+
+def _validate_opencode_cli_model(model: str) -> str:
+    """OpenCode CLIへClaudeプロバイダを暗黙に渡さない。"""
+    if model.startswith(("claude-", "anthropic/", "opencode-go/claude-")):
+        raise RuntimeError(
+            "TEXT_BACKEND=opencode ではClaudeモデルを使えません。"
+            " OPENCODE_MODELまたは段別モデルをOpenCode対応値へ変更してください"
+        )
+    return model
 
 
 def _opencode_cli_aux_model(model: str, *, explicit: bool) -> str:
     """補助段は段別モデルを優先し、未指定時だけ既存CLI設定を使う。"""
     if explicit:
-        return model
+        return _validate_opencode_cli_model(model)
     return _opencode_cli_model(model)
 
 

@@ -26,6 +26,16 @@ class WriteTimeoutTest(unittest.TestCase):
             "opencode-go/qwen3.7-plus",
         )
 
+    def test_opencode_cli_rejects_legacy_claude_models(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "Claudeモデル"):
+            ai_text._opencode_cli_aux_model("claude-opus-4-8", explicit=True)
+        with (
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
+            mock.patch.object(config, "OPENCODE_AGENT", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Claudeモデル"):
+                ai_text._opencode_cli_model("opencode-go/claude-opus-4-8")
+
     def test_zero_disables_opencode_cli_timeout(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
         with (
