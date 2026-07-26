@@ -528,12 +528,16 @@ def _search_reference_materials(
     label: str,
     channel_guidance: str = "",
     search_hint: str = "",
+    past_topics: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
     terms = [label]
     terms.extend(_query_terms(channel_guidance, 3))
     terms.extend(_query_terms(search_hint, 5))
     context = list(dict.fromkeys(term for term in terms if term))
+    # 直近の題材は検索結果から除外し、同じ上位資料への収束を避ける。
+    for term in _query_terms(" ".join((past_topics or [])[-3:]), 4):
+        context.append(f'-"{term}"')
     context.extend(("公式", "一次資料"))
     search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
     try:
@@ -845,11 +849,12 @@ def web_research(
         if normalized
     }
     reference_materials = []
-    if backend == "opencode_go" and not allowed_source_urls:
+    if backend == "opencode_go":
         reference_materials = _search_reference_materials(
             corner.label,
             channel_guidance=channel_guidance,
             search_hint=focus_text,
+            past_topics=past_topics,
         )
     allowed_source_urls.update(
         normalized

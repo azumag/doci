@@ -59,10 +59,12 @@ class ResearchPromptTest(unittest.TestCase):
             research._search_reference_materials(
                 "ショート攻略",
                 channel_guidance="YouTube制作者の維持率改善",
+                past_topics=["維持率改善"],
             )
 
         query_urls = [unquote(call.args[0].full_url) for call in open_mock.call_args_list]
         self.assertTrue(any("YouTube" in query_url for query_url in query_urls))
+        self.assertTrue(any('-"維持率改善"' in query_url for query_url in query_urls))
         self.assertTrue(all("直近の題材" not in query_url for query_url in query_urls))
 
     def test_reference_search_falls_back_to_wikipedia_when_ddg_has_no_results(self) -> None:
