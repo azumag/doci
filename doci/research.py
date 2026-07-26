@@ -14,6 +14,7 @@ import re
 import socket
 import threading
 import time
+from datetime import date
 from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
     ThreadPoolExecutor,
@@ -162,6 +163,8 @@ _TRUSTED_SOURCE_HOSTS = (
     "support.google.com",
     "developers.google.com",
     "policies.google.com",
+    "wikipedia.org",
+    "wikimedia.org",
     "who.int",
     "un.org",
 )
@@ -198,7 +201,7 @@ def _resolve_addresses(
     worker = threading.Thread(target=resolve, daemon=True)
     worker.start()
     worker.join(timeout)
-    return result
+    return list(result)
 
 
 def _is_public_http_url(url: str, *, trusted_only: bool = False) -> bool:
@@ -389,9 +392,10 @@ def _sanitize_external(value):  # type: ignore[no-untyped-def]
 def _page_excerpt(url: str) -> str:
     try:
         request = Request(url, headers={"User-Agent": "doci/1.0"})
-        with _safe_urlopen(request, timeout=3, trusted_only=True) as response:
+        with _safe_urlopen(request, timeout=8, trusted_only=True) as response:
             body = response.read(12000).decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001 - source discovery is best effort
+    except Exception as exc:  # noqa: BLE001 - source discovery is best effort
+        _log(f"OpenCode Go資料本文をスキップ: {type(exc).__name__}")
         return ""
     text = re.sub(r"<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>", " ", body, flags=re.I | re.S)
     text = re.sub(r"<[^>]+>", " ", text)
@@ -400,12 +404,10 @@ def _page_excerpt(url: str) -> str:
 
 def _search_reference_materials(
     label: str,
-    past_topics: list[str] | None = None,
     channel_guidance: str = "",
 ) -> list[dict[str, str]]:
     """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
-    context = [label]
-    context.extend((past_topics or [])[-3:])
+    context = [label, date.today().isoformat()]
     guidance = " ".join(channel_guidance.split())[:160]
     if guidance:
         context.append(guidance)
@@ -677,17 +679,10 @@ def web_research(
         for normalized in [_normalized_source_url(str(row.get("url")))]
         if normalized
     }
-    allowed_source_urls = {
-        normalized
-        for row in video_candidates
-        if isinstance(row, dict) and row.get("url")
-        for normalized in [_normalized_source_url(str(row.get("url")))]
-        if normalized
-    }
+    allowed_source_urls: set[str] = set()
     reference_materials = (
         _search_reference_materials(
             corner.label,
-            past_topics=past_topics,
             channel_guidance=channel_guidance,
         )
         if backend == "opencode_go"

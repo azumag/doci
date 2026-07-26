@@ -51,20 +51,19 @@ class ResearchPromptTest(unittest.TestCase):
         )
         excerpt_mock.assert_called_once_with("https://support.google.com/youtube/help")
 
-    def test_reference_search_includes_recent_topics_and_guidance(self) -> None:
+    def test_reference_search_includes_date_and_guidance_not_past_topics(self) -> None:
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.return_value = b""
         with mock.patch.object(research, "_safe_urlopen", return_value=response) as open_mock:
             research._search_reference_materials(
                 "ショート攻略",
-                past_topics=["古い題材", "直近の題材"],
                 channel_guidance="YouTube制作者の維持率改善",
             )
 
         query_url = unquote(open_mock.call_args.args[0].full_url)
-        self.assertIn("直近の題材", query_url)
         self.assertIn("YouTube", query_url)
+        self.assertNotIn("直近の題材", query_url)
 
     def test_untrusted_source_host_is_rejected(self) -> None:
         self.assertFalse(research._is_trusted_source_host("example.com"))

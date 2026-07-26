@@ -12,6 +12,7 @@ import argparse
 import json
 import re
 import subprocess
+import threading
 from collections.abc import Callable
 import sys
 import time
@@ -131,36 +132,61 @@ def _run_opencode_go(
     text_chars = 0
     stop_reason = ""
     request_timeout = _write_timeout() if timeout is None else (timeout if timeout > 0 else None)
+    deadline_expired = threading.Event()
+    deadline_timer: threading.Timer | None = None
+
+    def expire_stream() -> None:
+        deadline_expired.set()
+        try:
+            resp.close()  # type: ignore[name-defined]
+        except Exception:  # noqa: BLE001 - closing an already-finished response
+            return
+
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-            for raw in resp:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].lstrip()
-                if not payload or payload == "[DONE]":
-                    continue
-                try:
-                    event = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                event_type = event.get("type")
-                if event_type == "error":
-                    raise RuntimeError(f"OpenCode Go API error: {event.get('error', event)}")
-                delta = event.get("delta") or {}
-                if delta.get("type") == "text_delta":
-                    part = delta.get("text", "")
-                    text_parts.append(part)
-                    text_chars += len(part)
-                if event_type == "message_delta":
-                    stop_reason = delta.get("stop_reason") or stop_reason
-                elapsed = time.monotonic() - started
-                if elapsed >= next_progress:
-                    _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
-                    next_progress += 60.0
+            if request_timeout is not None:
+                deadline_timer = threading.Timer(request_timeout, expire_stream)
+                deadline_timer.daemon = True
+                deadline_timer.start()
+            try:
+                stream = iter(resp)
+                for raw in stream:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].lstrip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    event_type = event.get("type")
+                    if event_type == "error":
+                        raise RuntimeError(f"OpenCode Go API error: {event.get('error', event)}")
+                    delta = event.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        part = delta.get("text", "")
+                        text_parts.append(part)
+                        text_chars += len(part)
+                    if event_type == "message_delta":
+                        stop_reason = delta.get("stop_reason") or stop_reason
+                    elapsed = time.monotonic() - started
+                    if elapsed >= next_progress:
+                        _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
+                        next_progress += 60.0
+            finally:
+                if deadline_timer is not None:
+                    deadline_timer.cancel()
+            if deadline_expired.is_set():
+                raise RuntimeError("OpenCode Go API が時間上限に達しました")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"OpenCode Go API failed (HTTP {exc.code}): {detail}") from exc
+    except (TimeoutError, OSError, ValueError) as exc:
+        if deadline_expired.is_set():
+            raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
+        raise
 
     text = "".join(text_parts)
     if stop_reason == "max_tokens":
