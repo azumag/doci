@@ -7,7 +7,9 @@ theme でパディングされることを確認する。
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from doci import chart_bg, config
@@ -92,6 +94,21 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "未対応のCHART_BG_BACKEND"):
                 chart_bg.select({"type": "stat", "value": "42", "caption": "テスト値"}, "テーマ")
         claude_mock.assert_not_called()
+
+    def test_ensure_falls_back_to_backgroundless_chart_for_unknown_backend(self) -> None:
+        config.CHART_BG_BACKEND = "opencode-go"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            chart_bg, "_fetch_one", return_value={"query": "テーマ", "media": "image", "path": None}
+        ):
+            result = chart_bg.ensure(
+                {"type": "stat", "value": "42", "caption": "値"},
+                "テーマ",
+                Path(tmp),
+                0,
+            )
+
+        self.assertIsNone(result["_bg"])
+        self.assertEqual(result["_bg_media"], "image")
 
     def test_legacy_claude_model_is_replaced_for_opencode_go(self) -> None:
         raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})

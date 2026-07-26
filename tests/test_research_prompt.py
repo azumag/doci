@@ -272,6 +272,9 @@ class ResearchPromptTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     research._public_target(url, trusted_only=False)
 
+        with self.assertRaisesRegex(ValueError, "HTTPSのみ"):
+            research._public_target("http://support.google.com/youtube/help", trusted_only=True)
+
     def test_private_dns_answer_is_rejected_before_connect(self) -> None:
         private = [(2, 1, 6, "", ("169.254.169.254", 443))]
         with mock.patch.object(research.socket, "getaddrinfo", return_value=private):
@@ -297,6 +300,7 @@ class ResearchPromptTest(unittest.TestCase):
             web_howto="",
             video_case_study_rule="",
             extra_rules="",
+            search_fallback_rule="",
             factcheck_focus="",
             topic_selection_rule="",
             external_materials=json.dumps(external, ensure_ascii=False),
@@ -323,6 +327,10 @@ class ResearchPromptTest(unittest.TestCase):
             research._normalized_source_url(
                 "https://ja.wikipedia.org/wiki/%E5%85%B1%E7%94%A3%E4%B8%BB%E7%BE%A9"
             ),
+        )
+        self.assertNotEqual(
+            research._normalized_source_url("https://example.org/A%2FB"),
+            research._normalized_source_url("https://example.org/A/B"),
         )
         self.assertEqual(
             research._normalized_source_url(
