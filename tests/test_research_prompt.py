@@ -542,11 +542,13 @@ class ResearchPromptTest(unittest.TestCase):
             {
                 "description": "説明" * 1500,
                 "transcript_excerpt": "字幕" * 1500,
+                "excerpt": "一次資料" * 1500,
             }
         )
 
         self.assertGreater(len(sanitized["description"]), 1800)
         self.assertGreater(len(sanitized["transcript_excerpt"]), 1800)
+        self.assertGreater(len(sanitized["excerpt"]), 1800)
 
     def test_non_youtube_source_query_and_port_are_part_of_allowlist_key(self) -> None:
         self.assertEqual(

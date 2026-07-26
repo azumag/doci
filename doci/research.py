@@ -582,9 +582,9 @@ def _sanitize_external(value):  # type: ignore[no-untyped-def]
             if key_text.casefold() in {"url", "source_url"} and isinstance(item, str):
                 # URLは許可ソース照合に再利用するため、html.unescapeで query の & を壊さない。
                 sanitized[key_text] = _sanitize_url(item)
-            elif key_text.casefold() in {"description", "transcript", "transcript_excerpt"} and isinstance(item, str):
-                # YouTube説明欄・字幕は1800字では出典や比較事例が欠けるため、
-                # プロンプト境界だけを無害化し、より広い資料上限を使う。
+            elif key_text.casefold() in {"description", "transcript", "transcript_excerpt", "excerpt"} and isinstance(item, str):
+                # YouTube説明欄・字幕と一次資料本文は1800字では出典や比較事例が
+                # 欠けるため、プロンプト境界だけを無害化し、より広い資料上限を使う。
                 sanitized[key_text] = _sanitize_focus(item)
             else:
                 sanitized[key_text] = _sanitize_external(item)
@@ -784,9 +784,10 @@ def _search_reference_materials(
     if not parser.results and not wikipedia_rows:
         _log("OpenCode Go資料検索: API/補助検索の結果を解析できませんでした")
     materials: list[dict[str, str]] = []
-    # 取得は同期パイプライン上で行うが、最大8件を並列化して全体の待ち時間を
-    # 検索12秒 + 本文取得の目安9秒以内に抑える（本文取得は各8秒の総予算）。
-    executor = ThreadPoolExecutor(max_workers=4)
+    # 取得は同期パイプライン上で行うが、最大8件を4件ずつ並列化する。
+    # 候補が2波に分かれる場合も後半を待てるよう、待機期限を波数から算出する。
+    max_workers = 4
+    executor = ThreadPoolExecutor(max_workers=max_workers)
     page_timeout = remaining(8)
     if search_timeout is None:
         futures = {
@@ -803,7 +804,10 @@ def _search_reference_materials(
             else {}
         )
     try:
-        completion_timeout = remaining(9)
+        wave_count = max(1, (len(futures) + max_workers - 1) // max_workers)
+        # 各本文取得の上限に波数を掛け、スケジューリング余裕を1秒加える。
+        # remaining() が共有の検索期限を優先するため、長時間の無制限待機にはならない。
+        completion_timeout = remaining(max(9.0, page_timeout * wave_count + 1.0))
         if completion_timeout <= 0:
             raise FuturesTimeoutError()
         for future in as_completed(futures, timeout=completion_timeout):
