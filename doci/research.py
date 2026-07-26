@@ -350,15 +350,14 @@ def _safe_urlopen(request: Request, timeout: float, *, trusted_only: bool = Fals
 _INSTRUCTION_MARKERS = re.compile(
     r"(?i)(?:ignore\s+(?:all\s+)?(?:previous|prior|上述の)?\s*instructions?|"
     r"system\s+message|developer\s+message|assistant\s+message|"
-    r"これまでの指示を無視|前の指示を無視|システムメッセージ|開発者メッセージ|"
-    r"命令に従って|指示に従って)"
+    r"これまでの指示を無視|前の指示を無視)"
 )
 
 
 def _sanitize_excerpt(text: str) -> str:
     """本文をデータとして扱えるよう制御文字・タグ・命令らしい定型句を除く。"""
     text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
-    text = re.sub(r"(?i)&(?:lt|gt|amp|#x?3c|#x?3e);", "[外部データのHTML表記]", text)
+    text = re.sub(r"(?i)&(?:lt|gt|#x?3c|#x?3e);", "[外部データのHTML表記]", text)
     text = _INSTRUCTION_MARKERS.sub("[外部データ内の命令文を除去]", text)
     text = text.replace("<", "＜").replace(">", "＞")
     return " ".join(text.split())[:1800]
@@ -387,9 +386,19 @@ def _page_excerpt(url: str) -> str:
     return _sanitize_excerpt(text)
 
 
-def _search_reference_materials(label: str) -> list[dict[str, str]]:
+def _search_reference_materials(
+    label: str,
+    past_topics: list[str] | None = None,
+    channel_guidance: str = "",
+) -> list[dict[str, str]]:
     """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
-    search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(f"{label} 公式 一次資料")
+    context = [label]
+    context.extend((past_topics or [])[-3:])
+    guidance = " ".join(channel_guidance.split())[:160]
+    if guidance:
+        context.append(guidance)
+    context.append("公式 一次資料")
+    search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
     try:
         with _safe_urlopen(
             Request(search_url, headers={"User-Agent": "doci/1.0"}),
@@ -563,7 +572,9 @@ def _normalized_source_url(url: str) -> str:
             path_parts = [part for part in parsed.path.split("/") if part]
             if len(path_parts) >= 2 and path_parts[0] in {"shorts", "embed", "live", "v"}:
                 video_id = path_parts[1]
-        return f"youtube:{video_id}" if video_id else ""
+        if video_id:
+            return f"youtube:{video_id}"
+        # YouTube公式ヘルプ・仕様ページは動画IDを持たないため、一般URLキーへ落とす。
     try:
         port = parsed.port
     except ValueError:
@@ -658,7 +669,15 @@ def web_research(
         for normalized in [_normalized_source_url(str(row.get("url")))]
         if normalized
     }
-    reference_materials = _search_reference_materials(corner.label) if backend == "opencode_go" else []
+    reference_materials = (
+        _search_reference_materials(
+            corner.label,
+            past_topics=past_topics,
+            channel_guidance=channel_guidance,
+        )
+        if backend == "opencode_go"
+        else []
+    )
     allowed_source_urls.update(
         normalized
         for row in reference_materials
