@@ -27,6 +27,8 @@ from urllib.request import Request
 from . import config, llm
 from .channel import ChannelSpec, CornerSpec
 
+_DEFAULT_RESEARCH_TIMEOUT = object()
+
 
 class UnsupportedResearchBackendError(ValueError):
     """RESEARCH_BACKEND の設定値が未対応であることを示す。"""
@@ -900,6 +902,7 @@ def _log(msg: str) -> None:
 def _attempt(
     prompt: str,
     *,
+    timeout: int | float | None | object = _DEFAULT_RESEARCH_TIMEOUT,
     backend_override: str | None = None,
     model_override: str | None = None,
     model_explicit_override: bool | None = None,
@@ -908,11 +911,16 @@ def _attempt(
     allowed_video_source_urls: set[str] | None = None,
 ) -> dict:
     backend = backend_override or config.RESEARCH_BACKEND
+    llm_timeout = (
+        config.script_llm_timeout()
+        if timeout is _DEFAULT_RESEARCH_TIMEOUT
+        else timeout
+    )
     if backend == "codex":
         raw = llm.run_codex(
             prompt,
             config.CODEX_MODEL,
-            timeout=config.script_llm_timeout(),
+            timeout=llm_timeout,
             min_web_fetches=2,
         )
     elif backend in {"opencode", "opencode_go"}:
@@ -932,21 +940,21 @@ def _attempt(
             raw = ai_text._run_opencode_go(
                 prompt,
                 ai_text._opencode_go_model(model),
-                timeout=config.script_llm_timeout(),
+                timeout=llm_timeout,
             )
         else:
             raw = ai_text._run_opencode(
                 prompt,
                 ai_text._opencode_cli_aux_model(model, explicit=model_explicit),
                 config.OPENCODE_AGENT,
-                timeout=config.script_llm_timeout(),
+                timeout=llm_timeout,
             )
     elif backend == "claude":
         raw = llm.run_claude(
             prompt,
             config.legacy_claude_research_model(config.RESEARCH_MODEL),
             allowed_tools=["WebSearch", "WebFetch"],
-            timeout=config.script_llm_timeout(),
+            timeout=llm_timeout,
         )
     else:
         raise UnsupportedResearchBackendError(f"未対応のRESEARCH_BACKENDです: {backend}")
@@ -1118,6 +1126,24 @@ def web_research(
     backend = backend_override or config.RESEARCH_BACKEND
     if backend not in {"codex", "opencode", "opencode_go", "claude"}:
         raise UnsupportedResearchBackendError(f"未対応のRESEARCH_BACKENDです: {backend}")
+    research_timeout = config.script_research_timeout()
+    research_deadline = (
+        time.monotonic() + research_timeout
+        if research_timeout is not None
+        else None
+    )
+
+    def remaining_research_timeout() -> float | None:
+        if research_deadline is None:
+            return None
+        return max(0.0, research_deadline - time.monotonic())
+
+    def require_research_budget() -> float | None:
+        remaining = remaining_research_timeout()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError("リサーチ全体の時間上限に達しました")
+        return remaining
+
     guidance_parts = []
     for path in (corner.persona_path, corner.corner_path):
         try:
@@ -1158,12 +1184,13 @@ def web_research(
         return None
     reference_materials = []
     if backend in {"opencode", "opencode_go"}:
+        search_timeout = require_research_budget()
         reference_materials = _search_reference_materials(
             corner.label,
             channel_guidance=channel_guidance,
             search_hint=focus_text,
             past_topics=past_topics,
-            search_timeout=config.script_llm_timeout(),
+            search_timeout=search_timeout,
         )
     allowed_source_urls.update(
         normalized
@@ -1174,8 +1201,8 @@ def web_research(
     )
     if backend in {"opencode", "opencode_go"} and not allowed_source_urls:
         _log(
-            "警告: OpenCodeリサーチを実取得済み資料0件のため安全側にスキップ"
-            "（ファクトチェックも原文維持）"
+            "エラー: OpenCodeリサーチを実取得済み資料0件のため安全側にスキップ"
+            "（ファクトチェックも原文維持。許可ホスト・外部資料取得を確認してください）"
         )
         return None
     prompt = _PROMPT.format(
@@ -1217,8 +1244,10 @@ def web_research(
     last_err: Exception | None = None
     for attempt in range(1, config.SCRIPT_RESEARCH_RETRIES + 1):
         try:
+            attempt_timeout = require_research_budget()
             return _attempt(
                 prompt,
+                timeout=attempt_timeout,
                 backend_override=backend,
                 model_override=model_override,
                 model_explicit_override=model_explicit_override,

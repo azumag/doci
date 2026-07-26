@@ -193,6 +193,13 @@ def script_llm_timeout() -> int | None:
     return SCRIPT_LLM_TIMEOUT if SCRIPT_LLM_TIMEOUT > 0 else None
 
 
+def script_research_timeout() -> int | None:
+    """資料取得とリサーチ再試行を合わせた総待機上限を返す。"""
+    if SCRIPT_RESEARCH_TOTAL_TIMEOUT > 0:
+        return SCRIPT_RESEARCH_TOTAL_TIMEOUT
+    return script_llm_timeout()
+
+
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # 下書き再試行を含む執筆段全体の予算。個別試行の残り時間をこの上限で絞り、
@@ -202,6 +209,8 @@ SCRIPT_DRAFT_TOTAL_TIMEOUT = get_int(
 )
 # リサーチの再試行回数。外部Web取得が稀に不正JSONを返すため。高価なので控えめ。
 SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)
+# リサーチ（資料取得＋全試行）をまとめて制限する総予算。0はSCRIPT_LLM_TIMEOUTを使う。
+SCRIPT_RESEARCH_TOTAL_TIMEOUT = get_int("SCRIPT_RESEARCH_TOTAL_TIMEOUT", 0)
 # 公開済み/キュー済み題材の再利用を避ける既定期間。channel.toml の
 # pipeline.topic_cooldown_days でチャンネル単位に上書きでき、0で無効化する。
 TOPIC_COOLDOWN_DAYS = get_int("TOPIC_COOLDOWN_DAYS", 30)

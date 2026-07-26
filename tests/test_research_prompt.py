@@ -734,6 +734,26 @@ class ResearchPromptTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertEqual(result["facts"][0]["claim"], "確認済み")
 
+    def test_research_attempt_accepts_remaining_total_timeout(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "題材",
+                "facts": [{"claim": "確認済み", "source_url": "https://example.org/source"}],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode"),
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+        ):
+            research._attempt(
+                "prompt",
+                timeout=3.5,
+                allowed_source_urls={"https://example.org/source"},
+            )
+
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 3.5)
+
     def test_factcheck_research_model_override_is_used(self) -> None:
         raw = json.dumps(
             {

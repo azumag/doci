@@ -28,6 +28,7 @@ from .channel import ChannelSpec, CornerSpec
 
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
 _DEFAULT_WRITE_TIMEOUT = object()
+_RESPONSE_END = object()
 
 
 def _shutdown_response(response) -> None:  # type: ignore[no-untyped-def]
@@ -45,31 +46,117 @@ def _shutdown_response(response) -> None:  # type: ignore[no-untyped-def]
                 pass
 
 
-def _call_with_timeout(
-    func: Callable[[], object],
-    timeout_seconds: float,
-    on_timeout: Callable[[], None] | None = None,
-) -> object:
-    """settimeout非対応のラッパーでも、読み取り待ちで呼び出し側を塞がない。"""
-    result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+class _ResponseReadWorker:
+    """settimeout非対応の応答を、接続ごとに1本の読み取りワーカーで消費する。"""
 
-    def invoke() -> None:
+    def __init__(
+        self,
+        reader: Callable[[], object],
+        response,  # type: ignore[no-untyped-def]
+        *,
+        empty_is_end: bool = False,
+    ) -> None:
+        self._reader = reader
+        self._response = response
+        self._empty_is_end = empty_is_end
+        self._events: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+        self._cancelled = threading.Event()
+        self._worker = threading.Thread(
+            target=self._run, daemon=True, name="doci-response-reader"
+        )
+        self._worker.start()
+
+    def _publish(self, event: tuple[bool, object]) -> bool:
+        while not self._cancelled.is_set():
+            try:
+                self._events.put(event, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self) -> None:
+        while not self._cancelled.is_set():
+            try:
+                value = self._reader()
+            except StopIteration:
+                self._publish((False, _RESPONSE_END))
+                return
+            except BaseException as exc:  # noqa: BLE001 - propagate reader errors
+                self._publish((False, exc))
+                return
+            if not self._publish((True, value)):
+                return
+            if self._empty_is_end and not value:
+                return
+
+    def next(self, timeout_seconds: float) -> object:
         try:
-            result_queue.put((True, func()))
-        except BaseException as exc:  # noqa: BLE001 - propagate worker exceptions
-            result_queue.put((False, exc))
+            succeeded, value = self._events.get(timeout=max(0.001, timeout_seconds))
+        except queue.Empty as exc:
+            self.cancel()
+            raise socket.timeout("stream read timeout") from exc
+        if succeeded:
+            return value
+        if value is _RESPONSE_END:
+            raise StopIteration
+        raise value  # type: ignore[misc]
 
-    worker = threading.Thread(target=invoke, daemon=True)
-    worker.start()
+    def cancel(self) -> None:
+        if self._cancelled.is_set():
+            return
+        self._cancelled.set()
+        _shutdown_response(self._response)
+        close = getattr(self._response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except OSError:
+                pass
+        self._worker.join(timeout=0.2)
+
+
+def _read_response_until_deadline(response, deadline: float) -> bytes:  # type: ignore[no-untyped-def]
+    """settimeout非対応のHTTP応答を、接続単位のworkerで期限まで読む。"""
+    chunks: list[bytes] = []
+    response_timeout_supported = False
+    fallback_reader: _ResponseReadWorker | None = None
     try:
-        succeeded, value = result_queue.get(timeout=max(0.001, timeout_seconds))
-    except queue.Empty as exc:
-        if on_timeout is not None:
-            on_timeout()
-        raise socket.timeout("stream read timeout") from exc
-    if succeeded:
-        return value
-    raise value  # type: ignore[misc]
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Anthropic API が時間上限に達しました")
+            for candidate in (
+                getattr(response, "fp", None),
+                getattr(getattr(response, "fp", None), "raw", None),
+                getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+            ):
+                setter = getattr(candidate, "settimeout", None)
+                if callable(setter):
+                    try:
+                        setter(remaining)
+                    except OSError:
+                        pass
+                    else:
+                        response_timeout_supported = True
+            try:
+                if fallback_reader is not None:
+                    chunk = fallback_reader.next(remaining)
+                elif response_timeout_supported:
+                    chunk = response.read(4096)
+                else:
+                    fallback_reader = _ResponseReadWorker(
+                        lambda: response.read(4096), response, empty_is_end=True
+                    )
+                    chunk = fallback_reader.next(remaining)
+            except socket.timeout as exc:
+                raise TimeoutError("Anthropic API が時間上限に達しました") from exc
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)  # type: ignore[arg-type]
+    finally:
+        if fallback_reader is not None:
+            fallback_reader.cancel()
 
 
 def _monotonic() -> float:
@@ -138,46 +225,7 @@ def _run_anthropic(
     if deadline is not None:
         open_timeout = max(0.001, deadline - time.monotonic())
     with urllib.request.urlopen(req, timeout=open_timeout) as resp:
-        if deadline is None:
-            payload = resp.read()
-        else:
-            chunks: list[bytes] = []
-            response_timeout_supported = False
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("Anthropic API が時間上限に達しました")
-                for candidate in (
-                    getattr(resp, "fp", None),
-                    getattr(getattr(resp, "fp", None), "raw", None),
-                    getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None),
-                ):
-                    setter = getattr(candidate, "settimeout", None)
-                    if callable(setter):
-                        try:
-                            setter(remaining)
-                        except OSError:
-                            pass
-                        else:
-                            response_timeout_supported = True
-                try:
-                    chunk = (
-                        resp.read(4096)
-                        if response_timeout_supported
-                        else _call_with_timeout(
-                            lambda: resp.read(4096),
-                            remaining,
-                            lambda: _shutdown_response(resp),
-                        )
-                    )
-                except socket.timeout as exc:
-                    raise TimeoutError(
-                        "Anthropic API が時間上限に達しました"
-                    ) from exc
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            payload = b"".join(chunks)
+        payload = resp.read() if deadline is None else _read_response_until_deadline(resp, deadline)
         data = json.loads(payload.decode("utf-8"))
     return "".join(b.get("text", "") for b in data.get("content", []))
 
@@ -304,6 +352,7 @@ def _run_opencode_go(
             try:
                 stream = iter(resp)
                 stream_timeout_warning_logged = False
+                fallback_reader: _ResponseReadWorker | None = None
                 while True:
                     remaining = (
                         deadline_timeout - (time.monotonic() - started)
@@ -325,15 +374,15 @@ def _run_opencode_go(
                             _log("警告: OpenCode Goストリームのソケット期限を設定できません")
                             stream_timeout_warning_logged = True
                     try:
-                        raw = (
-                            next(stream)
-                            if stream_timeout_applied
-                            else _call_with_timeout(
-                                lambda: next(stream),
-                                read_timeout,
-                                lambda: _shutdown_response(resp),
+                        if fallback_reader is not None:
+                            raw = fallback_reader.next(read_timeout)
+                        elif stream_timeout_applied:
+                            raw = next(stream)
+                        else:
+                            fallback_reader = _ResponseReadWorker(
+                                lambda: next(stream), resp
                             )
-                        )
+                            raw = fallback_reader.next(read_timeout)
                     except socket.timeout as exc:
                         if (
                             deadline_timeout is not None
@@ -400,7 +449,8 @@ def _run_opencode_go(
                         _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
                         next_progress += 60.0
             finally:
-                pass
+                if fallback_reader is not None:
+                    fallback_reader.cancel()
             if deadline_expired.is_set() and not received_terminal:
                 raise RuntimeError("OpenCode Go API が時間上限に達しました")
     except urllib.error.HTTPError as exc:
