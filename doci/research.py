@@ -203,27 +203,6 @@ def _resolve_addresses(
     return list(result)
 
 
-def _is_public_http_url(url: str, *, trusted_only: bool = False) -> bool:
-    """取得先が公開インターネットのHTTP(S)ホストかを確認する。"""
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return False
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return False
-    if parsed.username or parsed.password:
-        return False
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".local"):
-        return False
-    if trusted_only and not _is_trusted_source_host(hostname):
-        return False
-    addresses = {
-        ipaddress.ip_address(info[4][0]) for info in _resolve_addresses(hostname)
-    }
-    return bool(addresses) and all(address.is_global for address in addresses)
-
-
 def _public_target(
     url: str, *, trusted_only: bool, deadline: float | None = None
 ) -> tuple[str, int, str]:
@@ -428,7 +407,7 @@ def _search_reference_materials(
         _log("OpenCode Go資料検索: 検索結果を解析できませんでした")
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
-    for row in parser.results[:8]:
+    for row in parser.results:
         url = _decode_search_url(row["url"], search_url)
         if not url or url in seen:
             continue
@@ -437,11 +416,16 @@ def _search_reference_materials(
             continue
         seen.add(url)
         rows.append({"url": url, "title": row["title"]})
+        if len(rows) >= 4:
+            break
     materials: list[dict[str, str]] = []
     # 取得は同期パイプライン上で行うが、最大8件を並列化して全体の待ち時間を
     # 検索12秒 + 本文取得の目安9秒以内に抑える（本文取得は各8秒の総予算）。
     executor = ThreadPoolExecutor(max_workers=4)
-    futures = {executor.submit(_page_excerpt, row["url"]): row for row in rows}
+    futures = {
+        executor.submit(_page_excerpt, row["url"]): row
+        for row in rows[:4]
+    }
     try:
         for future in as_completed(futures, timeout=9):
             row = futures[future]
@@ -462,7 +446,7 @@ def _search_reference_materials(
         for future in futures:
             if not future.done():
                 future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
+        executor.shutdown(wait=True, cancel_futures=True)
     if parser.results and not materials:
         _log("OpenCode Go資料検索: 取得できる公開一次資料がありませんでした")
     return materials

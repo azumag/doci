@@ -154,13 +154,14 @@ def _run_opencode_go(
             except Exception:  # noqa: BLE001 - closing an already-finished response
                 continue
 
-    if request_timeout is not None:
-        deadline_timer = threading.Timer(request_timeout, expire_stream)
-        deadline_timer.daemon = True
-        deadline_timer.start()
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             response_holder[0] = resp
+            if request_timeout is not None:
+                remaining = max(0.001, request_timeout - (time.monotonic() - started))
+                deadline_timer = threading.Timer(remaining, expire_stream)
+                deadline_timer.daemon = True
+                deadline_timer.start()
             try:
                 stream = iter(resp)
                 for raw in stream:

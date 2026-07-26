@@ -203,9 +203,14 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertNotIn("secret-ish", excerpt)
 
     def test_private_hosts_are_rejected_before_fetch(self) -> None:
-        self.assertFalse(research._is_public_http_url("http://127.0.0.1:8080/"))
-        self.assertFalse(research._is_public_http_url("http://169.254.169.254/"))
-        self.assertFalse(research._is_public_http_url("http://localhost/"))
+        for url in (
+            "http://127.0.0.1:8080/",
+            "http://169.254.169.254/",
+            "http://localhost/",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError):
+                    research._public_target(url, trusted_only=False)
 
     def test_private_dns_answer_is_rejected_before_connect(self) -> None:
         private = [(2, 1, 6, "", ("169.254.169.254", 443))]
