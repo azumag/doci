@@ -517,9 +517,15 @@ def generate(
         try:
             attempt_timeout = None
             if draft_total_timeout is not None:
-                attempt_timeout = draft_total_timeout - (time.monotonic() - draft_started)
-                if attempt_timeout <= 0:
+                remaining_budget = draft_total_timeout - (time.monotonic() - draft_started)
+                if remaining_budget <= 0:
                     raise TimeoutError("執筆段全体の時間上限に達しました")
+                per_attempt_timeout = _whole_write_timeout()
+                attempt_timeout = (
+                    min(per_attempt_timeout, remaining_budget)
+                    if per_attempt_timeout is not None
+                    else remaining_budget
+                )
             script = _validate(_extract_json(_dispatch(prompt, timeout=attempt_timeout)))
             break
         except (ValueError, TimeoutError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:

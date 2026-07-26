@@ -127,6 +127,7 @@ def ensure(spec: dict, theme: str, workdir: Path, idx: int) -> dict:
     if cache.exists():
         meta = json.loads(cache.read_text(encoding="utf-8"))
     else:
+        backgroundless = False
         try:
             sel = select(spec, theme)
         except UnsupportedChartBackendError:
@@ -136,16 +137,21 @@ def ensure(spec: dict, theme: str, workdir: Path, idx: int) -> dict:
                 f"{config.CHART_BG_BACKEND}。背景なしの図表へフォールバックします"
             )
             _, needed = _items_desc(spec)
-            sel = [{"query": theme, "media": "image"} for _ in range(needed)]
-        # 単一背景(stat/compare/bar)は Chrome に背景画像として埋め込むため image 固定。
-        # 動画背景は timeline(順次フロー=ffmpeg合成)でのみ使う。
-        if not is_timeline:
-            for b in sel:
-                b["media"] = "image"
-        meta = [
-            _fetch_one(b, workdir / f"scene_{idx:02d}_chart_bg_{k}")
-            for k, b in enumerate(sel)
-        ]
+            meta = [
+                {"query": theme, "media": "image", "path": None}
+                for _ in range(needed)
+            ]
+            backgroundless = True
+        if not backgroundless:
+            # 単一背景(stat/compare/bar)は Chrome に背景画像として埋め込むため image 固定。
+            # 動画背景は timeline(順次フロー=ffmpeg合成)でのみ使う。
+            if not is_timeline:
+                for b in sel:
+                    b["media"] = "image"
+            meta = [
+                _fetch_one(b, workdir / f"scene_{idx:02d}_chart_bg_{k}")
+                for k, b in enumerate(sel)
+            ]
         cache.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     spec = dict(spec)
     if spec.get("type") == "timeline":

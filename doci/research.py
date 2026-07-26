@@ -406,12 +406,28 @@ def _sanitize_text(text: str) -> str:
 def _sanitize_external(value):  # type: ignore[no-untyped-def]
     """YouTube API/検索結果の全フィールドを、閉じタグ不能なデータへ変換する。"""
     if isinstance(value, dict):
-        return {str(key): _sanitize_external(item) for key, item in value.items()}
+        sanitized = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text.casefold() in {"url", "source_url"} and isinstance(item, str):
+                # URLは許可ソース照合に再利用するため、html.unescapeで query の & を壊さない。
+                sanitized[key_text] = _sanitize_url(item)
+            else:
+                sanitized[key_text] = _sanitize_external(item)
+        return sanitized
     if isinstance(value, list):
         return [_sanitize_external(item) for item in value]
     if isinstance(value, str):
         return _sanitize_excerpt(value)
     return value
+
+
+def _sanitize_url(text: str) -> str:
+    """URLの構文を変えずに、プロンプト境界を閉じる文字だけを無害化する。"""
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+    text = _INSTRUCTION_MARKERS.sub("[外部データ内の命令文を除去]", text)
+    text = text.replace("<", "＜").replace(">", "＞")
+    return " ".join(text.split())[:1800]
 
 
 def _page_excerpt(url: str) -> str:

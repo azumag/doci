@@ -315,6 +315,13 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertGreater(len(focus), 1800)
         self.assertIn("後半の主張", focus)
 
+    def test_external_url_sanitization_preserves_query_entities(self) -> None:
+        url = "https://example.org/source?x=1&not=2&copy=3"
+
+        sanitized = research._sanitize_external({"source_url": url})
+
+        self.assertEqual(sanitized["source_url"], url)
+
     def test_non_youtube_source_query_and_port_are_part_of_allowlist_key(self) -> None:
         self.assertEqual(
             research._normalized_source_url("https://example.org/doc?b=2&a=1"),

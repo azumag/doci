@@ -292,13 +292,18 @@ factcheck = false
         with (
             patch.object(config, "TEXT_BACKEND", "opencode_go"),
             patch.object(config, "SCRIPT_DRAFT_RETRIES", 1),
-            patch.object(ai_text, "_dispatch", side_effect=RuntimeError("backend unavailable")),
+            patch.object(config, "WRITE_LLM_TIMEOUT", 900),
+            patch.object(config, "SCRIPT_DRAFT_TOTAL_TIMEOUT", 2700),
+            patch.object(
+                ai_text, "_dispatch", side_effect=RuntimeError("backend unavailable")
+            ) as dispatch_mock,
             patch.object(ai_text, "_run_claude_cli") as claude_mock,
         ):
             with self.assertRaisesRegex(RuntimeError, "執筆が規定回数で揃いませんでした"):
                 ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
 
         claude_mock.assert_not_called()
+        self.assertLessEqual(dispatch_mock.call_args.kwargs["timeout"], 900)
 
     def test_factcheck_only_opencode_go_fetches_research_materials(self) -> None:
         spec = self._make_spec(
