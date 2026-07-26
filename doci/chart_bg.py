@@ -152,7 +152,9 @@ def ensure(spec: dict, theme: str, workdir: Path, idx: int) -> dict:
                 _fetch_one(b, workdir / f"scene_{idx:02d}_chart_bg_{k}")
                 for k, b in enumerate(sel)
             ]
-        cache.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        # 設定ミスによる劣化結果はキャッシュせず、設定修正後の再レンダで復旧できるようにする。
+        if not backgroundless:
+            cache.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     spec = dict(spec)
     if spec.get("type") == "timeline":
         spec["_bgs"] = meta

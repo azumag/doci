@@ -252,6 +252,15 @@ class ResearchPromptTest(unittest.TestCase):
 
         self.assertEqual(excerpt, "公式の本文")
 
+    def test_decode_response_body_falls_back_for_unknown_charset_alias(self) -> None:
+        response = mock.MagicMock()
+        response.getheader.return_value = "text/html; charset=utf8mb4"
+
+        self.assertEqual(
+            research._decode_response_body(response, "公式の本文".encode("utf-8")),
+            "公式の本文",
+        )
+
     def test_page_excerpt_keeps_utf8_text_when_read_limit_splits_character(self) -> None:
         response = mock.MagicMock()
         response.__enter__.return_value = response

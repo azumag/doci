@@ -1,12 +1,14 @@
 """台本執筆タイムアウト設定のテスト（ネットワーク不要）。"""
 from __future__ import annotations
 
+import socket
 import subprocess
 import tempfile
 import time
 import unittest
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from doci import ai_text, config
@@ -108,6 +110,78 @@ class WriteTimeoutTest(unittest.TestCase):
             self.assertEqual(ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus"), "ok")
 
         self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 300)
+
+    def test_opencode_go_sets_socket_timeout_before_each_stream_read(self) -> None:
+        class FakeSocket:
+            def __init__(self):
+                self.values = []
+
+            def settimeout(self, value):
+                self.values.append(value)
+
+        class FakeResponse:
+            def __init__(self, events, sock):
+                self.events = events
+                self.fp = SimpleNamespace(raw=SimpleNamespace(_sock=sock))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                return iter(self.events)
+
+        sock = FakeSocket()
+        response = FakeResponse(
+            [b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n'],
+            sock,
+        )
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(config, "WRITE_LLM_IDLE_TIMEOUT", 300),
+            mock.patch.object(ai_text.urllib.request, "urlopen", return_value=response),
+        ):
+            self.assertEqual(
+                ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus"), "ok"
+            )
+
+        self.assertTrue(sock.values)
+
+    def test_opencode_go_socket_timeout_is_reported_as_idle_timeout(self) -> None:
+        class FakeSocket:
+            def settimeout(self, _value):
+                return None
+
+        class TimeoutResponse:
+            def __init__(self):
+                self.fp = SimpleNamespace(raw=SimpleNamespace(_sock=FakeSocket()))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                def timed_lines():
+                    raise socket.timeout("idle")
+                    yield b""
+
+                return timed_lines()
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(config, "WRITE_LLM_IDLE_TIMEOUT", 300),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=TimeoutResponse()
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "無通信タイムアウト"):
+                ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus")
 
     def test_positive_value_is_kept(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")

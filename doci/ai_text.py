@@ -165,10 +165,10 @@ def _run_opencode_go(
             except Exception:  # noqa: BLE001 - closing an already-finished response
                 continue
 
-    def set_stream_timeout(response, timeout_seconds: float | None) -> None:  # type: ignore[no-untyped-def]
+    def set_stream_timeout(response, timeout_seconds: float | None) -> bool:  # type: ignore[no-untyped-def]
         """各行の読み取り前にソケットへ残り時間を設定し、全体上限をreadlineにも適用する。"""
         if timeout_seconds is None:
-            return
+            return True
         candidates = (
             getattr(getattr(response, "fp", None), "raw", None),
             getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
@@ -180,7 +180,9 @@ def _run_opencode_go(
                     setter(timeout_seconds)
                 except OSError:
                     pass
-                return
+                else:
+                    return True
+        return False
 
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
@@ -192,6 +194,7 @@ def _run_opencode_go(
                 deadline_timer.start()
             try:
                 stream = iter(resp)
+                stream_timeout_warning_logged = False
                 while True:
                     if deadline_expired.is_set() and not received_terminal:
                         raise RuntimeError("OpenCode Go API が時間上限に達しました")
@@ -211,7 +214,12 @@ def _run_opencode_go(
                             if read_timeout is not None
                             else idle_timeout
                         )
-                    set_stream_timeout(resp, read_timeout)
+                    if (
+                        not set_stream_timeout(resp, read_timeout)
+                        and not stream_timeout_warning_logged
+                    ):
+                        _log("警告: OpenCode Goストリームのソケット期限を設定できません")
+                        stream_timeout_warning_logged = True
                     try:
                         raw = next(stream)
                     except socket.timeout as exc:

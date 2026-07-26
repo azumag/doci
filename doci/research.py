@@ -460,7 +460,8 @@ def _decode_response_body(response, body: bytes) -> str:  # type: ignore[no-unty
     try:
         return body.decode(str(charset), errors="replace")
     except LookupError:
-        return ""
+        _log(f"未知のcharset {charset!r} をUTF-8として復号します")
+        return body.decode("utf-8", errors="replace")
 
 
 def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
