@@ -113,21 +113,21 @@ def _opencode_go_model(model: str) -> str:
     認証経路を暗黙に要求するため、既定のQwenへ安全に戻す。
     """
     if not model:
-        _log("警告: OpenCode Goのモデル未指定のため既定モデルへ戻します")
-        return config.OPENCODE_GO_DEFAULT_MODEL
-    if model.startswith(("claude-", "anthropic/")):
-        _log(
-            "警告: OpenCode GoではClaude系モデルを使わないため、 "
-            f"{model!r} を既定モデルへ戻します"
+        raise RuntimeError(
+            "TEXT_BACKEND=opencode_go ではモデルを指定してください "
+            f"（例: {config.OPENCODE_GO_DEFAULT_MODEL}）"
         )
-        return config.OPENCODE_GO_DEFAULT_MODEL
     provider, separator, _ = model.partition("/")
     if separator and provider != "opencode-go":
-        _log(
-            "警告: OpenCode Goでは別プロバイダのモデル指定 "
-            f"{model!r} を使えないため、既定モデルへ戻します"
+        raise RuntimeError(
+            "TEXT_BACKEND=opencode_go では OPENCODE_MODEL を "
+            "opencode-go/<model> 形式で指定してください"
         )
-        return config.OPENCODE_GO_DEFAULT_MODEL
+    if model.startswith("claude-"):
+        raise RuntimeError(
+            "TEXT_BACKEND=opencode_go ではClaudeモデルを使えません。 "
+            f"{config.OPENCODE_GO_DEFAULT_MODEL} を指定してください"
+        )
     return model
 
 
@@ -141,12 +141,7 @@ def _run_opencode_go(
 ) -> str:
     """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
     model = _opencode_go_model(model)
-    provider, sep, model_id = model.partition("/")
-    if sep and provider != "opencode-go":
-        raise RuntimeError(
-            "TEXT_BACKEND=opencode_go では OPENCODE_MODEL を "
-            "opencode-go/<model> 形式で指定してください"
-        )
+    _, sep, model_id = model.partition("/")
     if not sep:
         model_id = model
     body = json.dumps(

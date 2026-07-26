@@ -174,11 +174,13 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
         raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
         with (
             mock.patch.object(config, "TEXT_MODEL", "claude-opus-4-8"),
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
             mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
         ):
-            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+            with self.assertRaisesRegex(RuntimeError, "Claudeモデル"):
+                chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
 
-        self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_GO_DEFAULT_MODEL)
+        run_mock.assert_not_called()
 
     def test_opencode_go_prefers_explicit_opencode_model(self) -> None:
         raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})

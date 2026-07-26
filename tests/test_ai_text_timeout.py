@@ -17,12 +17,8 @@ from doci import ai_text, config
 
 class WriteTimeoutTest(unittest.TestCase):
     def test_opencode_go_rejects_other_provider_qualified_models(self) -> None:
-        with mock.patch.object(ai_text, "_log") as log_mock:
-            self.assertEqual(
-                ai_text._opencode_go_model("minimax/m3"),
-                config.OPENCODE_GO_DEFAULT_MODEL,
-            )
-        log_mock.assert_called_once()
+        with self.assertRaisesRegex(RuntimeError, "opencode-go/<model>"):
+            ai_text._opencode_go_model("minimax/m3")
         self.assertEqual(
             ai_text._opencode_go_model("opencode-go/qwen3.7-plus"),
             "opencode-go/qwen3.7-plus",

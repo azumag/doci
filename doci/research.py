@@ -1102,7 +1102,7 @@ def web_research(
             "参考候補が空または不足している場合は、"
             + _WEB_HOWTO.get(backend, _WEB_HOWTO["claude"])
             + "追加の検索と実ページ取得で候補を補ってください。"
-            if backend != "opencode_go"
+            if backend not in {"opencode", "opencode_go"}
             else ""
         ),
         topic_selection_rule=(
