@@ -113,12 +113,14 @@ def _reconcile_all_youtube_reviews() -> tuple[dict, int]:
             spec = channel.load(channel_id)
             if not spec.publish.youtube.review.enabled:
                 continue
-            events = youtube_review.reconcile(spec)
+            outcome = youtube_review.reconcile_result(spec)
+            events = list(outcome.events)
             results.append(
                 {
                     "channel": channel_id,
-                    "status": "ok",
+                    "status": "error" if outcome.failed_count else "ok",
                     "events": events,
+                    "failed_count": outcome.failed_count,
                 }
             )
         except Exception as exc:
@@ -128,9 +130,10 @@ def _reconcile_all_youtube_reviews() -> tuple[dict, int]:
                     "channel": channel_id,
                     "status": "error",
                     "error": str(exc)[:240],
+                    "failed_count": 1,
                 }
             )
-    failed = sum(item["status"] == "error" for item in results)
+    failed = sum(int(item.get("failed_count", 0)) for item in results)
     return {
         "mode": "reconcile_youtube_reviews",
         "status": "error" if failed else "ok",

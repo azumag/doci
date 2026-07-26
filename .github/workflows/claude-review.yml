@@ -49,7 +49,11 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git diff --no-ext-diff --unified=40 "${BASE_SHA}...${HEAD_SHA}" > /tmp/doci-pr.diff
+          git diff --no-ext-diff --unified=20 "${BASE_SHA}...${HEAD_SHA}" > /tmp/doci-pr.diff
+          if [ "$(wc -c < /tmp/doci-pr.diff)" -gt 200000 ]; then
+            echo "::error title=Claude review input too large::PR diff exceeds the 200000-byte review boundary."
+            exit 1
+          fi
           {
             cat <<'REVIEW_INSTRUCTIONS'
           次のPull Request差分だけをread-onlyでレビューしてください。
@@ -64,7 +68,7 @@ jobs:
           PR NUMBER: ${{ github.event.pull_request.number }}
           DIFF:
           REVIEW_INSTRUCTIONS
-            head -c 200000 /tmp/doci-pr.diff
+            cat /tmp/doci-pr.diff
           } > /tmp/doci-claude-review-prompt.md
 
       - name: Run isolated Claude review

@@ -14,12 +14,14 @@ import subprocess
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
 
 from .channel import ChannelSpec, YouTubeReviewSpec
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
+_GH_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _MARKER_RE = re.compile(
     r"<!--\s*doci-youtube-review\s+video_id=([A-Za-z0-9_-]{6,20})\s*-->"
 )
@@ -169,6 +171,13 @@ class ReviewRecord:
     status: str = "pending"
     issue_number: int | None = None
     issue_url: str | None = None
+    issue_author: str | None = None
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    events: tuple[str, ...]
+    failed_count: int = 0
 
 
 def _text(value: object, limit: int = 500) -> str:
@@ -343,48 +352,62 @@ def _issue_json_fields() -> str:
     return "number,title,body,labels,url,state,author"
 
 
-def _expected_issue_author(review: YouTubeReviewSpec) -> str:
-    """このリポジトリではowner自身のgh認証で運用Issueを作成する。"""
-    return review.repository.split("/", 1)[0]
+@lru_cache(maxsize=1)
+def _current_gh_login() -> str:
+    """secretを読まず、ghが認証済みの現在ユーザー名だけを取得する。"""
+    login = _run_gh(["api", "user", "--jq", ".login"]).strip()
+    if not _GH_LOGIN_RE.fullmatch(login):
+        raise RuntimeError("gh認証ユーザー名を安全に確認できません")
+    return login
 
 
 def _find_issue(
     review: YouTubeReviewSpec,
     video_id: str,
+    expected_author: str | None = None,
 ) -> TrackingIssue | None:
-    """検索indexを使わず、owner作成の直近IssueをREST一覧からmarkerで確定する。"""
-    expected_author = _expected_issue_author(review)
-    raw = _run_gh(
-        [
-            "api",
-            f"repos/{review.repository}/issues",
-            "--method",
-            "GET",
-            "-f",
-            "state=all",
-            "-f",
-            f"creator={expected_author}",
-            "-f",
-            "per_page=100",
-            "-f",
-            "sort=created",
-            "-f",
-            "direction=desc",
-        ]
-    )
-    rows = json.loads(raw or "[]")
-    if not isinstance(rows, list):
-        raise RuntimeError("GitHub Issue検索結果の形式が不正です")
-    for row in rows:
-        if isinstance(row, dict) and row.get("pull_request"):
-            continue
-        issue = _parse_issue(row) if isinstance(row, dict) else None
-        if (
-            issue is not None
-            and issue.video_id == video_id
-            and issue.author.casefold() == expected_author.casefold()
-        ):
-            return issue
+    """検索indexを使わず、指定actor作成IssueをREST一覧からmarkerで確定する。"""
+    expected_author = expected_author or _current_gh_login()
+    if not _GH_LOGIN_RE.fullmatch(expected_author):
+        raise RuntimeError("outboxのIssue作成者が不正なため検索を拒否します")
+    page = 1
+    while True:
+        raw = _run_gh(
+            [
+                "api",
+                f"repos/{review.repository}/issues",
+                "--method",
+                "GET",
+                "-f",
+                "state=all",
+                "-f",
+                f"creator={expected_author}",
+                "-f",
+                "per_page=100",
+                "-f",
+                f"page={page}",
+                "-f",
+                "sort=created",
+                "-f",
+                "direction=desc",
+            ]
+        )
+        rows = json.loads(raw or "[]")
+        if not isinstance(rows, list):
+            raise RuntimeError("GitHub Issue検索結果の形式が不正です")
+        for row in rows:
+            if isinstance(row, dict) and row.get("pull_request"):
+                continue
+            issue = _parse_issue(row) if isinstance(row, dict) else None
+            if (
+                issue is not None
+                and issue.video_id == video_id
+                and issue.author.casefold() == expected_author.casefold()
+            ):
+                return issue
+        if len(rows) < 100:
+            break
+        page += 1
     return None
 
 
@@ -501,7 +524,7 @@ def _create_issue(
         labels=(),
         url=url,
         state="OPEN",
-        author=_expected_issue_author(review),
+        author=_current_gh_login(),
     )
 
 
@@ -534,6 +557,7 @@ def _record_from_row(row: dict) -> ReviewRecord | None:
         status=str(row.get("status") or "pending"),
         issue_number=issue_number if isinstance(issue_number, int) else None,
         issue_url=_text(row.get("issue_url")) or None,
+        issue_author=_text(row.get("issue_author"), limit=40) or None,
     )
 
 
@@ -565,6 +589,7 @@ def _append_record(spec: ChannelSpec, record: ReviewRecord) -> None:
         "status": record.status,
         "issue_number": record.issue_number,
         "issue_url": record.issue_url,
+        "issue_author": record.issue_author,
     }
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -602,6 +627,7 @@ def _with_issue(record: ReviewRecord, issue: TrackingIssue) -> ReviewRecord:
         status="pending" if record.status == "issue_creating" else record.status,
         issue_number=issue.number,
         issue_url=issue.url,
+        issue_author=issue.author,
     )
 
 
@@ -613,6 +639,7 @@ def _with_status(record: ReviewRecord, status: str) -> ReviewRecord:
         status=status,
         issue_number=record.issue_number,
         issue_url=record.issue_url,
+        issue_author=record.issue_author,
     )
 
 
@@ -621,7 +648,10 @@ def _ensure_issue_locked(
     record: ReviewRecord,
 ) -> tuple[ReviewRecord, TrackingIssue]:
     review = spec.publish.youtube.review
-    expected_author = _expected_issue_author(review)
+    current_author = _current_gh_login()
+    expected_author = record.issue_author or current_author
+    if not _GH_LOGIN_RE.fullmatch(expected_author):
+        raise RuntimeError("outboxのIssue作成者が不正なため処理を拒否します")
     if record.issue_number is not None:
         issue = _get_issue(review, record.issue_number)
         if issue is None:
@@ -630,8 +660,18 @@ def _ensure_issue_locked(
                 "重複作成を避けるため自動再作成しません"
             )
     else:
-        issue = _find_issue(review, record.video_id)
+        issue = _find_issue(review, record.video_id, expected_author)
     if issue is None and record.status == "issue_creating":
+        if record.issue_author is None:
+            raise RuntimeError(
+                "作成者未記録の確認Issue作成中レコードです。"
+                "重複作成を避けるため自動再作成しません"
+            )
+        if current_author.casefold() != expected_author.casefold():
+            raise RuntimeError(
+                "確認Issue作成後にgh認証ユーザーが変更されました。"
+                "元の作成者へ戻すまで自動再作成しません"
+            )
         # direct REST一覧で作成済みIssueが無いことを1run後に確認できたため、
         # pendingへ戻す。次の3時間runでだけ再試行し、直後の重複作成を避ける。
         _append_record(spec, _with_status(record, "pending"))
@@ -640,8 +680,24 @@ def _ensure_issue_locked(
             "重複作成を避け、次回runで作成を再試行します"
         )
     if issue is None:
+        if (
+            record.issue_author is not None
+            and current_author.casefold() != expected_author.casefold()
+        ):
+            raise RuntimeError(
+                "outbox記録後にgh認証ユーザーが変更されました。"
+                "元の作成者へ戻すまで確認Issueを作成しません"
+            )
         # operation lock内で検索→作成するため、同一ホストの並行runは重複作成しない。
-        intent = _with_status(record, "issue_creating")
+        intent = ReviewRecord(
+            video_id=record.video_id,
+            title=record.title,
+            assessment=record.assessment,
+            status="issue_creating",
+            issue_number=record.issue_number,
+            issue_url=record.issue_url,
+            issue_author=current_author,
+        )
         _append_record(spec, intent)
         record = intent
         created = _create_issue(
@@ -659,7 +715,7 @@ def _ensure_issue_locked(
     if issue.video_id != record.video_id:
         raise RuntimeError("確認Issueの動画IDがoutboxと一致しません")
     if issue.author.casefold() != expected_author.casefold():
-        raise RuntimeError("確認Issueの作成者が設定リポジトリownerと一致しません")
+        raise RuntimeError("確認Issueの作成者がoutboxに記録したactorと一致しません")
     updated = _with_issue(record, issue)
     if updated != record:
         _append_record(spec, updated)
@@ -741,13 +797,14 @@ def _decision(
     return (next(iter(decisions)), None) if decisions else (None, None)
 
 
-def reconcile(spec: ChannelSpec) -> list[str]:
-    """outboxのpending動画だけを処理し、明示ラベル以外では公開しない。"""
+def reconcile_result(spec: ChannelSpec) -> ReconcileResult:
+    """pending動画を処理し、イベントと個別失敗数を構造化して返す。"""
     review = spec.publish.youtube.review
     if not review.enabled:
-        return []
+        return ReconcileResult(())
 
     events: list[str] = []
+    failed_count = 0
     with _operation_lock(spec):
         records = _latest_records(spec)
         for candidate in _history_candidates(spec):
@@ -766,6 +823,7 @@ def reconcile(spec: ChannelSpec) -> list[str]:
                     fresh is None
                     or fresh.video_id != record.video_id
                 ):
+                    failed_count += 1
                     events.append(
                         f"確認Issue #{issue.number}: 追跡markerが一致しないため変更なし"
                     )
@@ -836,8 +894,14 @@ def reconcile(spec: ChannelSpec) -> list[str]:
                         f"確認Issue #{fresh.number}: 限定公開で保持（変更なし）"
                     )
             except Exception as exc:  # 1件の不調で他のpending動画を止めない
+                failed_count += 1
                 events.append(
                     f"動画 {original.video_id}: 確認処理失敗 "
                     f"{type(exc).__name__}: {_redact(str(exc))[:180]}"
                 )
-    return events
+    return ReconcileResult(tuple(events), failed_count)
+
+
+def reconcile(spec: ChannelSpec) -> list[str]:
+    """後方互換のイベント一覧API。失敗数が必要な呼出元はreconcile_resultを使う。"""
+    return list(reconcile_result(spec).events)

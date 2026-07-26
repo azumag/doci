@@ -234,6 +234,36 @@ class ThemeAssessmentTest(unittest.TestCase):
         self.assertIsNone(assessment)
 
 
+class GithubIdentityTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        youtube_review._current_gh_login.cache_clear()
+
+    def test_current_login_comes_from_gh_authenticated_user(self) -> None:
+        youtube_review._current_gh_login.cache_clear()
+        with mock.patch.object(
+            youtube_review,
+            "_run_gh",
+            return_value="review-operator",
+        ) as gh_mock:
+            login = youtube_review._current_gh_login()
+
+        self.assertEqual(login, "review-operator")
+        gh_mock.assert_called_once_with(["api", "user", "--jq", ".login"])
+
+    def test_invalid_current_login_fails_closed(self) -> None:
+        youtube_review._current_gh_login.cache_clear()
+        with mock.patch.object(
+            youtube_review,
+            "_run_gh",
+            return_value="unsafe login",
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "gh認証ユーザー名を安全に確認できません",
+            ):
+                youtube_review._current_gh_login()
+
+
 class IssueWorkflowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -244,6 +274,13 @@ class IssueWorkflowTest(unittest.TestCase):
         self.assessment = youtube_review.assess(
             _assessment_script(viewer_action="")
         )
+        login_patch = mock.patch.object(
+            youtube_review,
+            "_current_gh_login",
+            return_value="owner",
+        )
+        login_patch.start()
+        self.addCleanup(login_patch.stop)
 
     def _issue(
         self,
@@ -572,7 +609,7 @@ class IssueWorkflowTest(unittest.TestCase):
         self._queue("healthy123")
         healthy = self._issue(video_id="healthy123")
 
-        def find_issue(_review, video_id):
+        def find_issue(_review, video_id, _expected_author):
             if video_id == "broken123":
                 raise RuntimeError("boom")
             return healthy
@@ -589,15 +626,16 @@ class IssueWorkflowTest(unittest.TestCase):
                 return_value=healthy,
             ),
         ):
-            events = youtube_review.reconcile(self.spec)
+            outcome = youtube_review.reconcile_result(self.spec)
 
-        self.assertTrue(any("broken123" in event for event in events))
+        self.assertEqual(outcome.failed_count, 1)
+        self.assertTrue(any("broken123" in event for event in outcome.events))
         self.assertEqual(
             youtube_review._latest_records(self.spec)["healthy123"].issue_number,
             42,
         )
 
-    def test_issue_lookup_is_owner_scoped_direct_and_bounded(self) -> None:
+    def test_issue_lookup_is_authenticated_user_scoped_and_direct(self) -> None:
         with mock.patch.object(
             youtube_review,
             "_run_gh",
@@ -609,7 +647,45 @@ class IssueWorkflowTest(unittest.TestCase):
         self.assertIn("api", args)
         self.assertIn("creator=owner", args)
         self.assertIn("per_page=100", args)
+        self.assertIn("page=1", args)
         self.assertNotIn("--search", args)
+
+    def test_issue_lookup_checks_multiple_pages(self) -> None:
+        unrelated = [
+            {
+                "number": number,
+                "title": "unrelated",
+                "body": "",
+                "labels": [],
+                "html_url": f"https://github.com/owner/repo/issues/{number}",
+                "state": "open",
+                "user": {"login": "owner"},
+            }
+            for number in range(1, 101)
+        ]
+        target = {
+            "number": 101,
+            "title": "target",
+            "body": "<!-- doci-youtube-review video_id=abc123XYZ -->",
+            "labels": [],
+            "html_url": "https://github.com/owner/repo/issues/101",
+            "state": "open",
+            "user": {"login": "owner"},
+        }
+        with mock.patch.object(
+            youtube_review,
+            "_run_gh",
+            side_effect=[
+                json.dumps(unrelated),
+                json.dumps([target]),
+            ],
+        ) as gh_mock:
+            issue = youtube_review._find_issue(self.review, "abc123XYZ")
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue.number, 101)
+        self.assertEqual(gh_mock.call_count, 2)
+        self.assertIn("page=2", gh_mock.call_args.args[0])
 
     def test_issue_lookup_ignores_matching_marker_from_another_author(self) -> None:
         row = {
@@ -673,10 +749,79 @@ class IssueWorkflowTest(unittest.TestCase):
                 youtube_review._latest_records(self.spec)[created.video_id].status,
                 "issue_creating",
             )
+            self.assertEqual(
+                youtube_review._latest_records(self.spec)[created.video_id].issue_author,
+                "owner",
+            )
             recovered = youtube_review.ensure_issue(self.spec, created.video_id)
 
         self.assertEqual(recovered, created)
         create_mock.assert_called_once()
+
+    def test_actor_switch_after_create_loss_never_recreates_issue(self) -> None:
+        self._queue()
+        created = self._issue(author="actor-a")
+        original_append = youtube_review._append_record
+        failed_once = False
+
+        def fail_link_once(spec, record):
+            nonlocal failed_once
+            if record.issue_number is not None and not failed_once:
+                failed_once = True
+                raise OSError("link fsync failed")
+            return original_append(spec, record)
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_current_gh_login",
+                return_value="actor-a",
+            ),
+            mock.patch.object(youtube_review, "_find_issue", return_value=None),
+            mock.patch.object(
+                youtube_review,
+                "_create_issue",
+                return_value=created,
+            ) as first_create,
+            mock.patch.object(youtube_review, "_get_issue", return_value=created),
+            mock.patch.object(
+                youtube_review,
+                "_append_record",
+                side_effect=fail_link_once,
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "link fsync failed"):
+                youtube_review.ensure_issue(self.spec, created.video_id)
+
+        record = youtube_review._latest_records(self.spec)[created.video_id]
+        self.assertEqual(record.status, "issue_creating")
+        self.assertEqual(record.issue_author, "actor-a")
+        first_create.assert_called_once()
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_current_gh_login",
+                return_value="actor-b",
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                return_value=None,
+            ) as find_mock,
+            mock.patch.object(youtube_review, "_create_issue") as retry_create,
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "gh認証ユーザーが変更"):
+                    youtube_review.ensure_issue(self.spec, created.video_id)
+
+        retry_create.assert_not_called()
+        self.assertEqual(find_mock.call_count, 2)
+        for call in find_mock.call_args_list:
+            self.assertEqual(call.args, (self.review, created.video_id, "actor-a"))
+        latest = youtube_review._latest_records(self.spec)[created.video_id]
+        self.assertEqual(latest.status, "issue_creating")
+        self.assertEqual(latest.issue_author, "actor-a")
 
     def test_new_issue_author_is_verified_before_linking(self) -> None:
         self._queue()

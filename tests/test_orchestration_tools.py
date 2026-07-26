@@ -132,6 +132,8 @@ class CronGenerateTest(unittest.TestCase):
         self.assertLess(reconcile_at, voicevox_at)
         self.assertLess(reconcile_at, generation_at)
         self.assertIn("DOCI_REVIEW_RECONCILED=1", script)
+        self.assertIn('if [ "$review_rc" != "0" ]', script)
+        self.assertIn("else\n  export DOCI_REVIEW_RECONCILED=1", script)
 
 
 if __name__ == "__main__":

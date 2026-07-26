@@ -82,8 +82,8 @@ class RunDailyCliTest(unittest.TestCase):
             ),
             patch.object(
                 youtube_review,
-                "reconcile",
-                return_value=["checked"],
+                "reconcile_result",
+                return_value=youtube_review.ReconcileResult(("checked",)),
             ) as reconcile_mock,
             patch.object(run_daily, "run") as generate_mock,
         ):
@@ -93,6 +93,37 @@ class RunDailyCliTest(unittest.TestCase):
         self.assertEqual(summary["channels"][0]["events"], ["checked"])
         reconcile_mock.assert_called_once_with(enabled)
         generate_mock.assert_not_called()
+
+    def test_reconcile_all_propagates_individual_failures(self) -> None:
+        enabled = SimpleNamespace(
+            id="enabled",
+            publish=SimpleNamespace(
+                youtube=SimpleNamespace(
+                    review=SimpleNamespace(enabled=True),
+                )
+            ),
+        )
+        with (
+            patch.object(config, "PUBLISH_YOUTUBE", True),
+            patch.object(config, "PUBLISH_DRY_RUN", False),
+            patch.object(run_daily.channel, "discover", return_value=["enabled"]),
+            patch.object(run_daily.channel, "load", return_value=enabled),
+            patch.object(
+                youtube_review,
+                "reconcile_result",
+                return_value=youtube_review.ReconcileResult(
+                    ("動画 broken123: 確認処理失敗 RuntimeError: boom",),
+                    failed_count=1,
+                ),
+            ),
+        ):
+            summary, exit_code = run_daily._reconcile_all_youtube_reviews()
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(summary["status"], "error")
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["channels"][0]["status"], "error")
+        self.assertEqual(summary["channels"][0]["failed_count"], 1)
 
     def test_reconcile_all_is_read_only_during_dry_run(self) -> None:
         with (

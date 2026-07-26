@@ -218,10 +218,13 @@ python -m doci.youtube --auth --analytics --manage --channel youtube-growth
 ```
 
 決定ラベルはリポジトリ設定で事前に作成する。dociはラベルを自動作成せず、GitHub操作には
-対象リポジトリownerの既存 `gh` 認証を使う。owner以外が作成した同形式のIssueは追跡対象に
-せず、トークンや秘密値を設定・ログ・Issue本文へ保存しない。
+既存 `gh` 認証を使う。実行時に `gh api user` から確認した認証ユーザー以外が作成した
+同形式のIssueは追跡対象にしない。Issue作成intentにはその認証ユーザー名をoutboxへ
+耐久記録し、作成結果が不明な間に認証ユーザーが変わった場合は重複作成せずfail-closedにする。
+トークンや秘密値は設定・ログ・Issue本文へ保存しない。
 3時間ごとの既存 `--all-channels` launchd 実行は、VOICEVOX起動や動画生成より前に
-`--reconcile-youtube-reviews` を実行して確認Issueを取得する。限定公開アップロードは
+`--reconcile-youtube-reviews` を実行して確認Issueを取得する。動画単位の処理失敗も
+CLIの非zero終了へ伝搬し、その場合は後続のチャンネルrunでも生成前に再試行する。限定公開アップロードは
 Issue作成より先に `output/<channel>/youtube_review_outbox.jsonl` へ耐久記録されるため、
 Issue作成や後続の履歴保存に失敗しても次の3時間実行で再試行される。
 

@@ -34,8 +34,9 @@ echo "[$(ts)] ===== cron run start =====" >> "$LOG"
 review_rc=$?
 if [ "$review_rc" != "0" ]; then
   echo "[$(ts)] YouTube確認Issue処理失敗 rc=$review_rc。生成は継続。" >> "$LOG"
+else
+  export DOCI_REVIEW_RECONCILED=1
 fi
-export DOCI_REVIEW_RECONCILED=1
 
 # 新規生成だけ多重起動を防止する（確認Issue処理は上で完了済み）。
 LOCK="$PROJ/output/.cron_generate_${RUN_NAME}.lock"

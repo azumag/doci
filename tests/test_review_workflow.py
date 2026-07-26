@@ -27,7 +27,9 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
             "prompt_file: /tmp/doci-claude-review-prompt.md",
             self.workflow,
         )
-        self.assertIn("head -c 200000 /tmp/doci-pr.diff", self.workflow)
+        self.assertIn("--unified=20", self.workflow)
+        self.assertIn("PR diff exceeds the 200000-byte review boundary", self.workflow)
+        self.assertIn("cat /tmp/doci-pr.diff", self.workflow)
         self.assertIn("--model claude-opus-5", self.workflow)
         self.assertIn("unsafe review output", self.workflow)
         self.assertIn("Require structured review result", self.workflow)
