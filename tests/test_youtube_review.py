@@ -1,0 +1,579 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from doci import youtube_review
+from doci.channel import YouTubeReviewSpec
+
+
+def _assessment_script(**research_overrides) -> dict:
+    research = {
+        "topic": "YouTubeショートの冒頭離脱を減らす",
+        "angle": "視聴者維持率から冒頭を診断する",
+        "youtube_creator_audience": "YouTube制作者",
+        "youtube_creator_problem": "YouTubeショートの冒頭離脱を視聴者維持率で特定する",
+        "viewer_action": "YouTube Studioで冒頭の維持率を確認し、次の一本の冒頭だけを変更する",
+        "theme_fit": "clear",
+        "theme_fit_reason": "YouTubeショートの視聴者維持率改善が主題の中心だから",
+    }
+    research.update(research_overrides)
+    return {
+        "title": "YouTubeショートの冒頭離脱を直す",
+        "description": "視聴者維持率を使った改善手順",
+        "narration": (
+            "YouTubeショートの視聴者維持率を確認し、"
+            "冒頭離脱が起きる位置を次の一本で変更します。"
+        ),
+        "_research": research,
+    }
+
+
+def _spec(
+    root: Path,
+    *,
+    review: YouTubeReviewSpec | None = None,
+) -> SimpleNamespace:
+    review = review or YouTubeReviewSpec(
+        enabled=True,
+        repository="owner/repo",
+        publish_label="公開承認",
+        hold_label="保留",
+        keep_unlisted_label="限定公開で保持",
+    )
+    youtube = SimpleNamespace(
+        privacy="unlisted",
+        token=root / "youtube-token.json",
+        client_secret=root / "client-secret.json",
+        review=review,
+    )
+    return SimpleNamespace(
+        publish=SimpleNamespace(youtube=youtube),
+        history_file=root / "history.jsonl",
+        output_dir=root / "output",
+    )
+
+
+class ThemeAssessmentTest(unittest.TestCase):
+    def test_all_explicit_fields_and_clear_subject_allow_public(self) -> None:
+        result = youtube_review.assess(_assessment_script())
+
+        self.assertTrue(result.eligible_for_public)
+        self.assertEqual(result.privacy, "public")
+        self.assertEqual(result.reasons, ())
+
+    def test_missing_field_keeps_generation_on_unlisted_path(self) -> None:
+        result = youtube_review.assess(_assessment_script(viewer_action=""))
+
+        self.assertFalse(result.eligible_for_public)
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertIn(
+            "視聴後に取れる具体的なYouTube操作がない",
+            result.reasons,
+        )
+
+    def test_ambiguous_theme_never_auto_publishes(self) -> None:
+        result = youtube_review.assess(
+            _assessment_script(theme_fit="ambiguous")
+        )
+
+        self.assertEqual(result.privacy, "unlisted")
+
+    def test_no_research_is_safe_unlisted_fallback(self) -> None:
+        result = youtube_review.assess(
+            {"title": "幸福の正体", "description": "睡眠データの話"}
+        )
+
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertGreaterEqual(len(result.reasons), 4)
+
+    def test_clear_metadata_cannot_publish_an_off_theme_title(self) -> None:
+        script = _assessment_script()
+        script["title"] = "なぜ私たちは眠らないのか"
+
+        result = youtube_review.assess(script)
+
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertIn(
+            "企画・タイトルからYouTube主題を明確に確認できない",
+            result.reasons,
+        )
+
+    def test_negated_youtube_fields_cannot_pass_by_substring(self) -> None:
+        result = youtube_review.assess(
+            _assessment_script(
+                youtube_creator_problem=(
+                    "YouTubeショートとは関係ない睡眠の悩みを改善する"
+                ),
+                theme_fit_reason=(
+                    "YouTubeショートとは関係ない企画だが語を含めた"
+                ),
+            )
+        )
+
+        self.assertEqual(result.privacy, "unlisted")
+
+    def test_off_topic_narration_cannot_pass_on_youtube_self_declaration(self) -> None:
+        script = _assessment_script(
+            topic="YouTubeショートで睡眠の幸福を語る",
+            angle="睡眠日誌の良さを紹介する",
+            youtube_creator_problem=(
+                "YouTubeショートで睡眠の幸福を語る企画を作る"
+            ),
+            viewer_action="次の動画の冒頭に睡眠日誌を追加する",
+            theme_fit_reason="YouTubeショートを使った睡眠の幸福が主題",
+        )
+        script["title"] = "YouTubeショートで睡眠の幸福を語る"
+        script["description"] = "睡眠日誌で幸福を見つける方法"
+        script["narration"] = "幸福と睡眠だけの話"
+
+        result = youtube_review.assess(script)
+
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertIn(
+            "解決する具体的なYouTube上の課題または指標がない",
+            result.reasons,
+        )
+
+    def test_operation_target_without_problem_or_metric_is_unlisted(self) -> None:
+        script = _assessment_script(
+            topic="YouTube動画のタイトルで睡眠の幸福を語る",
+            angle="タイトルに睡眠の幸福を入れる",
+            youtube_creator_problem=(
+                "YouTube動画のタイトルに睡眠の幸福を入れる企画を作る"
+            ),
+            viewer_action="次の動画のタイトルに睡眠の幸福を追加する",
+            theme_fit_reason="YouTube動画のタイトルで睡眠の幸福を語る主題",
+        )
+        script["title"] = "YouTube動画のタイトルで睡眠の幸福を語る"
+        script["description"] = "タイトルに睡眠の幸福を入れる"
+        script["narration"] = "YouTube動画のタイトルに睡眠の幸福を追加します"
+
+        result = youtube_review.assess(script)
+
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertIn(
+            "解決する具体的なYouTube上の課題または指標がない",
+            result.reasons,
+        )
+
+    def test_generated_narration_must_retain_the_planned_youtube_focus(self) -> None:
+        script = _assessment_script()
+        script["description"] = "睡眠日誌で幸福を見つける方法"
+        script["narration"] = "幸福と睡眠だけの話"
+
+        result = youtube_review.assess(script)
+
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertIn(
+            "企画・タイトルからYouTube主題を明確に確認できない",
+            result.reasons,
+        )
+
+    def test_vague_action_cannot_pass_on_a_generic_verb(self) -> None:
+        result = youtube_review.assess(
+            _assessment_script(viewer_action="YouTubeを見る")
+        )
+
+        self.assertEqual(result.privacy, "unlisted")
+
+    def test_disabled_review_preserves_existing_channel_privacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = _spec(
+                Path(tmp),
+                review=YouTubeReviewSpec(enabled=False),
+            )
+
+            privacy, assessment = youtube_review.choose_privacy(
+                spec,
+                _assessment_script(),
+            )
+
+        self.assertEqual(privacy, "unlisted")
+        self.assertIsNone(assessment)
+
+
+class IssueWorkflowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.spec = _spec(self.root)
+        self.review = self.spec.publish.youtube.review
+        self.assessment = youtube_review.assess(
+            _assessment_script(viewer_action="")
+        )
+
+    def _issue(
+        self,
+        *,
+        labels: tuple[str, ...] = (),
+        state: str = "OPEN",
+        video_id: str = "abc123XYZ",
+        number: int = 42,
+    ) -> youtube_review.TrackingIssue:
+        return youtube_review.TrackingIssue(
+            number=number,
+            video_id=video_id,
+            title="確認",
+            body=f"<!-- doci-youtube-review video_id={video_id} -->",
+            labels=labels,
+            url=f"https://github.com/owner/repo/issues/{number}",
+            state=state,
+        )
+
+    def _queue(self, video_id: str = "abc123XYZ") -> None:
+        youtube_review.queue_pending(
+            self.spec,
+            video_id,
+            "YouTubeショート改善",
+            self.assessment,
+        )
+
+    def test_issue_body_documents_labels_and_no_time_based_publish(self) -> None:
+        body = youtube_review._issue_body(
+            "abc123XYZ",
+            "YouTubeショート改善",
+            self.assessment,
+            self.review,
+        )
+
+        self.assertIn("公開承認", body)
+        self.assertIn("保留", body)
+        self.assertIn("限定公開で保持", body)
+        self.assertIn("経過時間だけを理由に、自動公開することはありません", body)
+        self.assertNotIn("token", body.casefold())
+
+    def test_ensure_issue_requires_local_outbox_provenance(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not registered"):
+            youtube_review.ensure_issue(self.spec, "abc123XYZ")
+
+    def test_queue_is_fsynced_before_issue_creation_and_reused(self) -> None:
+        self._queue()
+        existing = self._issue(state="CLOSED")
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                return_value=existing,
+            ),
+            mock.patch.object(youtube_review, "_create_issue") as create_mock,
+        ):
+            result = youtube_review.ensure_issue(self.spec, existing.video_id)
+
+        self.assertEqual(result, existing)
+        create_mock.assert_not_called()
+        row = json.loads(
+            youtube_review._outbox_path(self.spec)
+            .read_text(encoding="utf-8")
+            .splitlines()[0]
+        )
+        self.assertEqual(row["status"], "pending")
+
+    def test_publish_label_changes_only_unlisted_then_closes_issue(self) -> None:
+        issue = self._issue(labels=("公開承認",))
+        self._queue(issue.video_id)
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                return_value=issue,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=issue,
+            ),
+            mock.patch(
+                "doci.youtube.privacy_status",
+                return_value="unlisted",
+            ),
+            mock.patch("doci.youtube.set_privacy") as privacy_mock,
+            mock.patch.object(
+                youtube_review,
+                "_close_published_issue",
+            ) as close_mock,
+        ):
+            events = youtube_review.reconcile(self.spec)
+
+        privacy_mock.assert_called_once_with(
+            issue.video_id,
+            "public",
+            expected_privacy="unlisted",
+            token_file=self.spec.publish.youtube.token,
+            client_secret_file=self.spec.publish.youtube.client_secret,
+        )
+        close_mock.assert_called_once_with(self.review, issue)
+        self.assertIn("公開完了", events[0])
+
+    def test_private_video_is_never_changed_even_with_publish_label(self) -> None:
+        issue = self._issue(labels=("公開承認",))
+        self._queue(issue.video_id)
+        with (
+            mock.patch.object(youtube_review, "_find_issue", return_value=issue),
+            mock.patch.object(youtube_review, "_get_issue", return_value=issue),
+            mock.patch("doci.youtube.privacy_status", return_value="private"),
+            mock.patch("doci.youtube.set_privacy") as privacy_mock,
+            mock.patch.object(
+                youtube_review,
+                "_close_published_issue",
+            ) as close_mock,
+        ):
+            events = youtube_review.reconcile(self.spec)
+
+        privacy_mock.assert_not_called()
+        close_mock.assert_not_called()
+        self.assertIn("公開変更を拒否", events[0])
+
+    def test_closed_issue_recovers_after_terminal_append_failure(self) -> None:
+        approved = self._issue(labels=("公開承認",))
+        closed = self._issue(labels=("公開承認",), state="CLOSED")
+        self._queue(approved.video_id)
+        original_append = youtube_review._append_record
+        failed_once = False
+
+        def fail_first_terminal(spec, record):
+            nonlocal failed_once
+            if record.status == "published" and not failed_once:
+                failed_once = True
+                raise OSError("terminal fsync failed")
+            return original_append(spec, record)
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                return_value=approved,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                side_effect=[approved, closed, closed],
+            ),
+            mock.patch(
+                "doci.youtube.privacy_status",
+                return_value="public",
+            ) as privacy_mock,
+            mock.patch.object(
+                youtube_review,
+                "_close_published_issue",
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_append_record",
+                side_effect=fail_first_terminal,
+            ),
+        ):
+            first_events = youtube_review.reconcile(self.spec)
+            self.assertEqual(
+                youtube_review._latest_records(self.spec)[approved.video_id].status,
+                "public_confirmed",
+            )
+            second_events = youtube_review.reconcile(self.spec)
+
+        self.assertTrue(any("terminal fsync failed" in event for event in first_events))
+        self.assertTrue(any("公開完了状態を復旧" in event for event in second_events))
+        self.assertEqual(
+            youtube_review._latest_records(self.spec)[approved.video_id].status,
+            "published",
+        )
+        privacy_mock.assert_called_once()
+
+    def test_public_confirmed_closes_even_if_approval_label_was_removed(self) -> None:
+        approved = self._issue(labels=("公開承認",))
+        withdrawn = self._issue(labels=())
+        self._queue(approved.video_id)
+        failed_once = False
+
+        def fail_first_close(review, issue):
+            nonlocal failed_once
+            if not failed_once:
+                failed_once = True
+                raise RuntimeError("close failed")
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                return_value=approved,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                side_effect=[approved, withdrawn, withdrawn],
+            ),
+            mock.patch(
+                "doci.youtube.privacy_status",
+                return_value="public",
+            ) as privacy_mock,
+            mock.patch.object(
+                youtube_review,
+                "_close_published_issue",
+                side_effect=fail_first_close,
+            ) as close_mock,
+        ):
+            first_events = youtube_review.reconcile(self.spec)
+            self.assertEqual(
+                youtube_review._latest_records(self.spec)[approved.video_id].status,
+                "public_confirmed",
+            )
+            second_events = youtube_review.reconcile(self.spec)
+
+        self.assertTrue(any("close failed" in event for event in first_events))
+        self.assertTrue(any("公開完了状態を復旧" in event for event in second_events))
+        self.assertEqual(
+            youtube_review._latest_records(self.spec)[approved.video_id].status,
+            "published",
+        )
+        self.assertEqual(close_mock.call_count, 2)
+        privacy_mock.assert_called_once()
+
+    def test_forged_issue_without_outbox_is_ignored(self) -> None:
+        with (
+            mock.patch.object(youtube_review, "_find_issue") as find_mock,
+            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+        ):
+            events = youtube_review.reconcile(self.spec)
+
+        self.assertEqual(events, [])
+        find_mock.assert_not_called()
+        privacy_mock.assert_not_called()
+
+    def test_fresh_label_withdrawal_prevents_publication(self) -> None:
+        approved = self._issue(labels=("公開承認",))
+        withdrawn = self._issue(labels=())
+        self._queue(approved.video_id)
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                return_value=approved,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=withdrawn,
+            ),
+            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+        ):
+            events = youtube_review.reconcile(self.spec)
+
+        self.assertEqual(events, [])
+        privacy_mock.assert_not_called()
+
+    def test_hold_keep_and_conflicting_labels_never_change_youtube(self) -> None:
+        cases = (
+            ("hold123", ("保留",), "保留"),
+            ("keep123", ("限定公開で保持",), "限定公開で保持"),
+            ("conflict123", ("公開承認", "保留"), "競合"),
+        )
+        for index, (video_id, labels, expected) in enumerate(cases, start=1):
+            self._queue(video_id)
+            issue = self._issue(
+                labels=labels,
+                video_id=video_id,
+                number=index,
+            )
+            with (
+                self.subTest(video_id=video_id),
+                mock.patch.object(
+                    youtube_review,
+                    "_find_issue",
+                    return_value=issue,
+                ),
+                mock.patch.object(
+                    youtube_review,
+                    "_get_issue",
+                    return_value=issue,
+                ),
+                mock.patch("doci.youtube.privacy_status") as privacy_mock,
+            ):
+                events = youtube_review.reconcile(self.spec)
+
+            privacy_mock.assert_not_called()
+            self.assertTrue(any(expected in event for event in events))
+
+    def test_missing_issue_is_retried_from_unlisted_history(self) -> None:
+        row = {
+            "video_id": "retry123",
+            "title": "確認待ち",
+            "youtube_privacy": "unlisted",
+            "youtube_theme_review": self.assessment.to_dict(),
+        }
+        self.spec.history_file.write_text(
+            json.dumps(row, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        created = self._issue(video_id="retry123")
+        with (
+            mock.patch.object(youtube_review, "_find_issue", return_value=None),
+            mock.patch.object(
+                youtube_review,
+                "_create_issue",
+                return_value=created,
+            ) as create_mock,
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=created,
+            ),
+        ):
+            youtube_review.reconcile(self.spec)
+
+        create_mock.assert_called_once()
+        records = youtube_review._latest_records(self.spec)
+        self.assertEqual(records["retry123"].issue_number, 42)
+
+    def test_one_broken_record_does_not_stop_the_next_record(self) -> None:
+        self._queue("broken123")
+        self._queue("healthy123")
+        healthy = self._issue(video_id="healthy123")
+
+        def find_issue(_review, video_id):
+            if video_id == "broken123":
+                raise RuntimeError("boom")
+            return healthy
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                side_effect=find_issue,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=healthy,
+            ),
+        ):
+            events = youtube_review.reconcile(self.spec)
+
+        self.assertTrue(any("broken123" in event for event in events))
+        self.assertEqual(
+            youtube_review._latest_records(self.spec)["healthy123"].issue_number,
+            42,
+        )
+
+    def test_issue_search_is_targeted_and_bounded(self) -> None:
+        with mock.patch.object(
+            youtube_review,
+            "_run_gh",
+            return_value="[]",
+        ) as gh_mock:
+            youtube_review._find_issue(self.review, "abc123XYZ")
+
+        args = gh_mock.call_args.args[0]
+        self.assertIn("abc123XYZ in:title,body", args)
+        self.assertEqual(args[args.index("--limit") + 1], "100")
+
+    def test_error_redaction_removes_github_token_shapes(self) -> None:
+        value = "failed with ghp_abcdefghijklmnopqrstuvwxyz123456"
+        self.assertNotIn("ghp_", youtube_review._redact(value))
+
+
+if __name__ == "__main__":
+    unittest.main()

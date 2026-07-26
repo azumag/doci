@@ -54,6 +54,13 @@ privacy = "unlisted"
 client_secret = "secrets/youtube-growth/client_secret.json"
 token = "secrets/youtube-growth/youtube_token.json"
 
+[publish.youtube.review]
+enabled = true
+repository = "azumag/doci"
+publish_label = "公開承認"
+hold_label = "保留"
+keep_unlisted_label = "限定公開で保持"
+
 [pipeline]
 research = true
 factcheck = true

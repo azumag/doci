@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from doci import config, instagram, publish, routing, tiktok, youtube
 from doci.channel import (
@@ -182,6 +182,106 @@ class PublishAccountsTest(unittest.TestCase):
         self.assertEqual(
             thumbnail_mock.call_args.kwargs["token_file"], settings.youtube.token
         )
+
+    def test_youtube_privacy_override_takes_precedence_for_one_upload(self) -> None:
+        settings = self._youtube_spec("alpha")
+        with patch.object(
+            youtube,
+            "upload",
+            return_value="video-id",
+        ) as upload_mock:
+            publish._do_upload(
+                "youtube",
+                self.root / "video.mp4",
+                "Title",
+                "Description",
+                [],
+                self.route,
+                settings,
+                youtube_privacy="public",
+            )
+
+        self.assertEqual(settings.youtube.privacy, "unlisted")
+        self.assertEqual(upload_mock.call_args.args[4], "public")
+
+    def test_set_privacy_preserves_existing_youtube_status_fields(self) -> None:
+        service = MagicMock()
+        videos = service.videos.return_value
+        videos.list.return_value.execute.return_value = {
+            "items": [
+                {
+                    "status": {
+                        "privacyStatus": "unlisted",
+                        "license": "youtube",
+                        "selfDeclaredMadeForKids": False,
+                        "uploadStatus": "processed",
+                    }
+                }
+            ]
+        }
+        settings = self._youtube_spec("alpha")
+        with (
+            patch.object(youtube, "_load_credentials", return_value=object()),
+            patch.object(
+                youtube,
+                "_build_service",
+                return_value=service,
+            ),
+        ):
+            youtube.set_privacy(
+                "video123",
+                "public",
+                expected_privacy="unlisted",
+                token_file=settings.youtube.token,
+                client_secret_file=settings.youtube.client_secret,
+            )
+
+        body = videos.update.call_args.kwargs["body"]
+        self.assertEqual(body["status"]["privacyStatus"], "public")
+        self.assertEqual(body["status"]["license"], "youtube")
+        self.assertNotIn("uploadStatus", body["status"])
+
+    def test_set_privacy_refuses_an_unexpected_private_video(self) -> None:
+        service = MagicMock()
+        videos = service.videos.return_value
+        videos.list.return_value.execute.return_value = {
+            "items": [{"status": {"privacyStatus": "private"}}]
+        }
+        settings = self._youtube_spec("alpha")
+        with (
+            patch.object(youtube, "_load_credentials", return_value=object()),
+            patch.object(youtube, "_build_service", return_value=service),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "actual=private"):
+                youtube.set_privacy(
+                    "video123",
+                    "public",
+                    expected_privacy="unlisted",
+                    token_file=settings.youtube.token,
+                    client_secret_file=settings.youtube.client_secret,
+                )
+
+        videos.update.assert_not_called()
+
+    def test_privacy_status_reads_without_updating(self) -> None:
+        service = MagicMock()
+        videos = service.videos.return_value
+        videos.list.return_value.execute.return_value = {
+            "items": [{"status": {"privacyStatus": "unlisted"}}]
+        }
+        settings = self._youtube_spec("alpha")
+        with (
+            patch.object(youtube, "_load_credentials", return_value=object()),
+            patch.object(youtube, "_build_service", return_value=service),
+        ):
+            current = youtube.privacy_status(
+                "video123",
+                token_file=settings.youtube.token,
+                client_secret_file=settings.youtube.client_secret,
+            )
+
+        self.assertEqual(current, "unlisted")
+        videos.update.assert_not_called()
 
     def test_tiktok_token_helpers_use_requested_path(self) -> None:
         path = self.root / "nested" / "tiktok_token.json"

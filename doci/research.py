@@ -49,6 +49,11 @@ YouTube Data APIで取得した公開動画候補（YouTube系チャンネルの
 出力は **有効な JSON オブジェクトのみ**（前後に説明やコードフェンスを付けない）。文字列内の引用符・改行は必ずエスケープし、各 claim は1文に収める:
 {{"topic": "きょうの題材（短い日本語）",
   "angle": "視聴者がハッとする切り口（1文）",
+  "youtube_creator_audience": "対象者。YouTube系企画では必ず「YouTube制作者」と明記し、それ以外は空文字",
+  "youtube_creator_problem": "解決する具体的なYouTube上の課題または指標（1文。該当しなければ空文字）",
+  "viewer_action": "視聴後にYouTube Studioや次の動画で取れる具体的な操作（1文。該当しなければ空文字）",
+  "theme_fit": "clear | ambiguous | off_topic",
+  "theme_fit_reason": "主題適合判定の理由（1文）",
   "facts": [{{"claim": "検証済みの具体事実（日本語・1文）", "source_url": "...", "source_title": "..."}}],
   "examples": [{{"title": "公開動画のタイトル", "channel": "チャンネル名", "url": "YouTube動画URL", "published_at": "公開日（確認できる場合）", "observed": "冒頭・構成・見せ方など公開画面から直接観察できたこと（日本語・1文）"}}]}}
 """
@@ -64,6 +69,13 @@ _YOUTUBE_CASE_STUDY_RULE = """\
    - 公開動画は構成の事例であり、プラットフォーム仕様の根拠には使わない。仕様は上記の一次資料で裏付ける。
    - 上に候補がある場合は実在確認済みの入口として使ってよいが、タイトルや説明文だけで内容を推測せず、
      実際の動画内容を確認できたものだけを examples に採用する。
+4. 企画の主題ガードとして、次の3点を別々のフィールドへ具体的に明記する。
+   - youtube_creator_audience は必ず「YouTube制作者」とする。
+   - youtube_creator_problem は、その制作者が解決したいYouTube上の具体的な課題または指標を1文で書く。
+   - viewer_action は、視聴後にYouTube Studioまたは次の動画制作で実行できる操作を1文で書く。
+5. theme_fit は、YouTube運用が主題の中心で、題材・切り口・想定タイトルからも明確な場合だけ clear とする。
+   他分野の比喩は説明手段に限定し、比喩自体が主題やタイトルの中心になる場合は ambiguous または
+   off_topic とする。迷った場合は必ず ambiguous にする。
 """
 
 # codex は内部知識だけで済ませがちなため、実際に取得したページに基づけと念押しする一文を足す。
@@ -245,6 +257,12 @@ def brief_for_prompt(research: dict) -> str:
     ]
     if research.get("angle"):
         lines.append(f"切り口: {research['angle']}")
+    if research.get("youtube_creator_audience"):
+        lines.append(f"対象者: {research['youtube_creator_audience']}")
+    if research.get("youtube_creator_problem"):
+        lines.append(f"解決する課題・指標: {research['youtube_creator_problem']}")
+    if research.get("viewer_action"):
+        lines.append(f"視聴後の操作: {research['viewer_action']}")
     lines.append(
         "\n## 参考事実（Webで裏取り済み。最低2つを具体として自然に本文へ織り込む。"
         "年・数値・固有名は正確に。これらは検証済みなので事実として述べてよい。出典は本文に書かない）。"

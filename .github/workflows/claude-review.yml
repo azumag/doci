@@ -82,6 +82,7 @@ jobs:
             DIFF:
             ${{ steps.pr_diff.outputs.diff }}
           claude_args: >-
+            --model claude-opus-5
             --max-turns 4
             --json-schema
             '{"type":"object","additionalProperties":false,"properties":{"summary":{"type":"string","maxLength":1200},"findings":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"properties":{"severity":{"type":"string","enum":["BLOCKER","HIGH","MEDIUM"]},"file":{"type":"string","maxLength":300},"line":{"type":"integer","minimum":1},"body":{"type":"string","maxLength":1200}},"required":["severity","file","line","body"]}}},"required":["summary","findings"]}'

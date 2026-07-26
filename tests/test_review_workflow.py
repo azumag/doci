@@ -23,6 +23,7 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
         self.assertIn("steps.claude.outputs.structured_output", self.workflow)
         self.assertIn("needs.review.outputs.review_json", self.workflow)
         self.assertIn("--body-file /tmp/claude-review.md", self.workflow)
+        self.assertIn("--model claude-opus-5", self.workflow)
         self.assertIn("unsafe review output", self.workflow)
 
     def test_uses_subscription_oauth_and_immutable_actions(self) -> None:

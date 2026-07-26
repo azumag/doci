@@ -1,4 +1,4 @@
-"""YouTube Data API v3 アップロード（v1 は unlisted/private）。
+"""YouTube Data API v3 アップロード・公開設定更新。
 
 初回のみ OAuth 同意が必要:
     python -m doci.youtube --auth
@@ -24,6 +24,22 @@ ANALYTICS_SCOPES = [
     *ACCOUNT_SCOPES,
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
+_WRITABLE_VIDEO_STATUS_KEYS = {
+    "privacyStatus",
+    "publishAt",
+    "license",
+    "embeddable",
+    "publicStatsViewable",
+    "selfDeclaredMadeForKids",
+    "containsSyntheticMedia",
+}
+
+
+def _build_service(credentials):
+    """YouTube service構築を、依存未導入のfixtureテストから差し替え可能にする。"""
+    from googleapiclient.discovery import build
+
+    return build("youtube", "v3", credentials=credentials)
 
 
 def _token_has_scopes(token_file: Path, required_scopes: list[str]) -> bool:
@@ -454,6 +470,85 @@ def set_thumbnail(
     youtube = build("youtube", "v3", credentials=creds)
     media = MediaFileUpload(str(thumbnail_path), mimetype="image/png")
     youtube.thumbnails().set(videoId=video_id, media_body=media).execute()
+
+
+def _video_status(
+    video_id: str,
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> tuple[object, dict]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+        raise ValueError(f"invalid YouTube video id: {video_id!r}")
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+    )
+    service = _build_service(creds)
+    current = service.videos().list(part="status", id=video_id).execute()
+    items = current.get("items") or []
+    if len(items) != 1:
+        raise RuntimeError(f"YouTube動画が見つかりません: {video_id}")
+    return service, dict(items[0].get("status") or {})
+
+
+def privacy_status(
+    video_id: str,
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> str:
+    """現在の公開設定を読み取る（変更なし）。"""
+    _, status = _video_status(
+        video_id,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+    )
+    return str(status.get("privacyStatus") or "")
+
+
+def set_privacy(
+    video_id: str,
+    privacy: str,
+    *,
+    expected_privacy: str | None = None,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> str:
+    """期待した現在状態のときだけ、他の書込み可能statusを保持して更新する。"""
+    if privacy not in {"public", "unlisted", "private"}:
+        raise ValueError(f"invalid YouTube privacy: {privacy!r}")
+    if expected_privacy is not None and expected_privacy not in {
+        "public",
+        "unlisted",
+        "private",
+    }:
+        raise ValueError(f"invalid expected YouTube privacy: {expected_privacy!r}")
+    service, current_status = _video_status(
+        video_id,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+    )
+    current_privacy = str(current_status.get("privacyStatus") or "")
+    if current_privacy == privacy:
+        return "unchanged"
+    if expected_privacy is not None and current_privacy != expected_privacy:
+        raise RuntimeError(
+            f"YouTube公開設定が想定外です: expected={expected_privacy} "
+            f"actual={current_privacy or 'missing'}"
+        )
+    status = {
+        key: value
+        for key, value in current_status.items()
+        if key in _WRITABLE_VIDEO_STATUS_KEYS
+    }
+    status["privacyStatus"] = privacy
+    service.videos().update(
+        part="status",
+        body={"id": video_id, "status": status},
+    ).execute()
+    return "updated"
 
 
 def main() -> None:
