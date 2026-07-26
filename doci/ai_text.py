@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import socket
 import subprocess
 import threading
 from collections.abc import Callable
@@ -30,8 +31,10 @@ REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
 _extract_json = llm.extract_json
 
 
-def _write_timeout() -> int | None:
+def _write_timeout(override: int | float | None = None) -> int | float | None:
     """CLI/APIの全体待機上限。0は明示的な長文待機モード。"""
+    if override is not None:
+        return override if override > 0 else None
     return _whole_write_timeout()
 
 
@@ -40,13 +43,13 @@ def _whole_write_timeout() -> int | None:
     return config.WRITE_LLM_TIMEOUT if config.WRITE_LLM_TIMEOUT > 0 else None
 
 
-def _run_claude_cli(prompt: str, model: str) -> str:
+def _run_claude_cli(prompt: str, model: str, timeout: int | float | None = None) -> str:
     return llm.run_claude(
-        prompt, config.legacy_claude_model(model), timeout=_write_timeout()
+        prompt, config.legacy_claude_model(model), timeout=_write_timeout(timeout)
     )
 
 
-def _run_anthropic(prompt: str, model: str) -> str:
+def _run_anthropic(prompt: str, model: str, timeout: int | float | None = None) -> str:
     key = config.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY が未設定です (TEXT_BACKEND=anthropic)")
@@ -66,7 +69,7 @@ def _run_anthropic(prompt: str, model: str) -> str:
             "content-type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=_write_timeout()) as resp:
+    with urllib.request.urlopen(req, timeout=_write_timeout(timeout)) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return "".join(b.get("text", "") for b in data.get("content", []))
 
@@ -162,6 +165,23 @@ def _run_opencode_go(
             except Exception:  # noqa: BLE001 - closing an already-finished response
                 continue
 
+    def set_stream_timeout(response, timeout_seconds: float | None) -> None:  # type: ignore[no-untyped-def]
+        """各行の読み取り前にソケットへ残り時間を設定し、全体上限をreadlineにも適用する。"""
+        if timeout_seconds is None:
+            return
+        candidates = (
+            getattr(getattr(response, "fp", None), "raw", None),
+            getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+        )
+        for candidate in candidates:
+            setter = getattr(candidate, "settimeout", None)
+            if callable(setter):
+                try:
+                    setter(timeout_seconds)
+                except OSError:
+                    pass
+                return
+
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             response_holder[0] = resp
@@ -175,8 +195,33 @@ def _run_opencode_go(
                 while True:
                     if deadline_expired.is_set() and not received_terminal:
                         raise RuntimeError("OpenCode Go API が時間上限に達しました")
+                    remaining = (
+                        deadline_timeout - (time.monotonic() - started)
+                        if deadline_timeout is not None
+                        else None
+                    )
+                    if remaining is not None and remaining <= 0:
+                        raise RuntimeError("OpenCode Go API が時間上限に達しました")
+                    if remaining is not None:
+                        remaining = max(0.001, remaining)
+                    read_timeout = remaining
+                    if idle_timeout is not None:
+                        read_timeout = (
+                            min(read_timeout, idle_timeout)
+                            if read_timeout is not None
+                            else idle_timeout
+                        )
+                    set_stream_timeout(resp, read_timeout)
                     try:
                         raw = next(stream)
+                    except socket.timeout as exc:
+                        if (
+                            deadline_timeout is not None
+                            and time.monotonic() - started >= deadline_timeout
+                        ):
+                            deadline_expired.set()
+                            raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
+                        raise RuntimeError("OpenCode Go API の無通信タイムアウト") from exc
                     except StopIteration:
                         break
                     line = raw.decode("utf-8", errors="replace").strip()
@@ -236,7 +281,12 @@ def _run_opencode_go(
     return text
 
 
-def _run_opencode(prompt: str, model: str, agent: str) -> str:
+def _run_opencode(
+    prompt: str,
+    model: str,
+    agent: str,
+    timeout: int | float | None = None,
+) -> str:
     if not model and not agent:
         raise RuntimeError(
             "OPENCODE_MODEL か OPENCODE_AGENT のどちらかを設定してください (TEXT_BACKEND=opencode)"
@@ -281,29 +331,31 @@ def _run_opencode(prompt: str, model: str, agent: str) -> str:
         encoding="utf-8",
     )
     cmd += ["--print-logs", "--log-level", "ERROR", "--dir", str(scratch), prompt]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_write_timeout())
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_write_timeout(timeout))
     if proc.returncode != 0:
         raise RuntimeError(f"opencode failed (rc={proc.returncode}): {proc.stderr[:500]}")
     return proc.stdout
 
 
-def _dispatch(prompt: str) -> str:
+def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
     backend = config.TEXT_BACKEND
     model = config.TEXT_MODEL
     if backend == "claude_cli":
-        return _run_claude_cli(prompt, model)
+        return _run_claude_cli(prompt, model, timeout=timeout)
     if backend == "anthropic":
-        return _run_anthropic(prompt, model)
+        return _run_anthropic(prompt, model, timeout=timeout)
     if backend == "opencode_go":
-        return _run_opencode_go(prompt, config.OPENCODE_MODEL or model)
+        return _run_opencode_go(prompt, config.OPENCODE_MODEL or model, timeout=timeout)
     if backend == "opencode":
         # agent-only の既存設定では TEXT_MODEL の既定値を混ぜず、
         # _run_opencode 側に空モデルを渡して --agent を有効にする。
         opencode_model = config.OPENCODE_MODEL
         if not opencode_model and not config.OPENCODE_AGENT:
             opencode_model = model
+        if timeout is None:
+            return _run_opencode(prompt, opencode_model, config.OPENCODE_AGENT)
         return _run_opencode(
-            prompt, opencode_model, config.OPENCODE_AGENT
+            prompt, opencode_model, config.OPENCODE_AGENT, timeout=timeout
         )
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")
 
@@ -455,11 +507,22 @@ def generate(
     )
     script = None
     last_err: Exception | None = None
+    draft_started = time.monotonic()
+    draft_total_timeout = (
+        config.SCRIPT_DRAFT_TOTAL_TIMEOUT
+        if config.SCRIPT_DRAFT_TOTAL_TIMEOUT > 0
+        else None
+    )
     for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
         try:
-            script = _validate(_extract_json(_dispatch(prompt)))
+            attempt_timeout = None
+            if draft_total_timeout is not None:
+                attempt_timeout = draft_total_timeout - (time.monotonic() - draft_started)
+                if attempt_timeout <= 0:
+                    raise TimeoutError("執筆段全体の時間上限に達しました")
+            script = _validate(_extract_json(_dispatch(prompt, timeout=attempt_timeout)))
             break
-        except (ValueError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+        except (ValueError, TimeoutError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
             # JSON不良/必須キー不足（ValueError）だけでなく、執筆バックエンドのタイムアウト
             # (TimeoutExpired)・異常終了(RuntimeError)・ネットワーク失敗(OSError)も一過性とみなし
             # 再試行する（qwen 等が稀に固まり、1回の失敗で通し全体が即死するのを防ぐ）。
@@ -519,6 +582,7 @@ def generate(
                 focus_text=(
                     f"{script.get('title', '')}\n{script.get('narration', '')}"
                 ),
+                require_youtube_examples=False,
             )
         except Exception as e:  # noqa: BLE001
             _log(f"ファクトチェック用リサーチ失敗→原文維持: {e}")

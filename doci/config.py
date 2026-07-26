@@ -112,6 +112,9 @@ SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
 WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 900)
 # 全体上限を無効にしても、無音の接続を無限に保持しないためのソケット待機上限。
 WRITE_LLM_IDLE_TIMEOUT = get_int("WRITE_LLM_IDLE_TIMEOUT", 300)
+# 下書き再試行を含む執筆段全体の予算。個別試行の残り時間をこの上限で絞り、
+# Claudeフォールバックなしでも複数コーナーを長時間占有し続けないようにする。
+SCRIPT_DRAFT_TOTAL_TIMEOUT = get_int("SCRIPT_DRAFT_TOTAL_TIMEOUT", WRITE_LLM_TIMEOUT)
 
 
 def script_llm_timeout() -> int | None:

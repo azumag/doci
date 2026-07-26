@@ -110,6 +110,23 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
         self.assertIsNone(result["_bg"])
         self.assertEqual(result["_bg_media"], "image")
 
+    def test_ensure_unknown_backend_preserves_timeline_background_count(self) -> None:
+        config.CHART_BG_BACKEND = "opencode-go"
+        spec = {
+            "type": "timeline",
+            "events": [
+                {"year": "1990", "label": "A"},
+                {"year": "2000", "label": "B"},
+                {"year": "2010", "label": "C"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            chart_bg, "_fetch_one", side_effect=lambda item, _out: {**item, "path": None}
+        ):
+            result = chart_bg.ensure(spec, "テーマ", Path(tmp), 0)
+
+        self.assertEqual(len(result["_bgs"]), 3)
+
     def test_legacy_claude_model_is_replaced_for_opencode_go(self) -> None:
         raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
         with (

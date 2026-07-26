@@ -338,6 +338,7 @@ factcheck = true
             script = ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
 
         research_mock.assert_called_once()
+        self.assertFalse(research_mock.call_args.kwargs["require_youtube_examples"])
         factcheck_mock.assert_called_once_with("本題から始まるナレーションです。", research_data)
         self.assertEqual(script["narration"], "確認済みのナレーションです。")
 

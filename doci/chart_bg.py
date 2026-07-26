@@ -123,7 +123,8 @@ def ensure(spec: dict, theme: str, workdir: Path, idx: int) -> dict:
             if not str(exc).startswith("未対応のCHART_BG_BACKEND"):
                 raise
             # 設定値の取り違えで日次生成全体を落とさず、背景なしの図表へ安全に劣化する。
-            sel = [{"query": theme, "media": "image"}]
+            _, needed = _items_desc(spec)
+            sel = [{"query": theme, "media": "image"} for _ in range(needed)]
         # 単一背景(stat/compare/bar)は Chrome に背景画像として埋め込むため image 固定。
         # 動画背景は timeline(順次フロー=ffmpeg合成)でのみ使う。
         if not is_timeline:

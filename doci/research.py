@@ -770,6 +770,7 @@ def web_research(
     performance_guidance: str = "",
     backend_override: str | None = None,
     focus_text: str = "",
+    require_youtube_examples: bool | None = None,
 ) -> dict | None:
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
@@ -781,7 +782,11 @@ def web_research(
         except OSError:
             continue
     channel_guidance = "\n\n".join(guidance_parts) or "（追加方針なし）"
-    needs_youtube_examples = _needs_youtube_case_studies(channel_guidance)
+    needs_youtube_examples = (
+        _needs_youtube_case_studies(channel_guidance)
+        if require_youtube_examples is None
+        else require_youtube_examples
+    )
     video_candidates = _youtube_video_candidates(
         spec, corner, needs_youtube_examples
     )
