@@ -27,7 +27,7 @@ _GH_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _CYCLE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
 _LOCK_WAIT_TIMEOUT_SECONDS = 30.0
 _LOCK_RETRY_SECONDS = 0.25
-_MAX_ISSUE_LIST_PAGES = 10
+_ISSUE_BATCH_SIZE = 50
 _MAX_RETRY_PLAN_FILES = 64
 _OUTBOX_COMPACT_MIN_EVENTS = 100
 _MARKER_RE = re.compile(
@@ -337,6 +337,8 @@ def _parse_issue(row: dict) -> TrackingIssue | None:
     if not match:
         return None
     labels = row.get("labels") or []
+    if isinstance(labels, dict):
+        labels = labels.get("nodes") or []
     label_names = tuple(
         str(label.get("name") or "")
         for label in labels
@@ -375,99 +377,159 @@ def _find_issue(
     video_id: str,
     expected_author: str | None = None,
 ) -> TrackingIssue | None:
-    """検索indexを使わず、指定actor作成IssueをREST一覧からmarkerで確定する。"""
+    """動画ID入りtitleで絞り、markerとactorを再検証して復旧対象を確定する。"""
     expected_author = expected_author or _current_gh_login()
     if not _GH_LOGIN_RE.fullmatch(expected_author):
         raise RuntimeError("outboxのIssue作成者が不正なため検索を拒否します")
-    for page in range(1, _MAX_ISSUE_LIST_PAGES + 1):
-        raw = _run_gh(
-            [
-                "api",
-                f"repos/{review.repository}/issues",
-                "--method",
-                "GET",
-                "-f",
-                "state=all",
-                "-f",
-                f"creator={expected_author}",
-                "-f",
-                "per_page=100",
-                "-f",
-                f"page={page}",
-                "-f",
-                "sort=created",
-                "-f",
-                "direction=desc",
-            ]
-        )
-        rows = json.loads(raw or "[]")
-        if not isinstance(rows, list):
-            raise RuntimeError("GitHub Issue検索結果の形式が不正です")
-        for row in rows:
-            if isinstance(row, dict) and row.get("pull_request"):
-                continue
-            issue = _parse_issue(row) if isinstance(row, dict) else None
-            if (
-                issue is not None
-                and issue.video_id == video_id
-                and issue.author.casefold() == expected_author.casefold()
-            ):
-                return issue
-        if len(rows) < 100:
-            return None
-    raise RuntimeError(
-        "GitHub Issue検索が安全なページ上限に達しました。"
-        "重複作成を避けるため自動作成を停止します"
+    query = (
+        f"repo:{review.repository} is:issue "
+        f'author:{expected_author} in:title "{video_id}"'
     )
+    raw = _run_gh(
+        [
+            "api",
+            "search/issues",
+            "--method",
+            "GET",
+            "-f",
+            f"q={query}",
+            "-f",
+            "per_page=100",
+        ]
+    )
+    result = json.loads(raw or "{}")
+    if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+        raise RuntimeError("GitHub Issue検索結果の形式が不正です")
+    if result.get("incomplete_results") is not False:
+        raise RuntimeError(
+            "GitHub Issue検索が不完全なため、重複作成を避けて処理を停止します"
+        )
+    rows = result["items"]
+    total_count = result.get("total_count")
+    if (
+        not isinstance(total_count, int)
+        or isinstance(total_count, bool)
+        or total_count < 0
+    ):
+        raise RuntimeError("GitHub Issue検索件数の形式が不正です")
+    if total_count > len(rows):
+        raise RuntimeError(
+            "動画IDで絞ったGitHub Issue検索が100件を超えました。"
+            "重複作成を避けるため自動作成を停止します"
+        )
+    for row in rows:
+        issue = _parse_issue(row) if isinstance(row, dict) else None
+        if (
+            issue is not None
+            and issue.video_id == video_id
+            and issue.author.casefold() == expected_author.casefold()
+        ):
+            return issue
+    return None
 
 
-def _list_open_tracking_issues(
+def _get_tracking_issues_by_numbers(
     review: YouTubeReviewSpec,
     expected_author: str,
+    issue_targets: dict[int, str],
 ) -> dict[int, TrackingIssue]:
-    """Openな確認Issueをまとめて取得し、未決件数に比例するAPI呼出しを避ける。"""
+    """既知Issue番号をGraphQL aliasでまとめ、無関係Issueを列挙しない。"""
     if not _GH_LOGIN_RE.fullmatch(expected_author):
-        raise RuntimeError("Issue一覧の作成者が不正なため取得を拒否します")
+        raise RuntimeError("Issue一括取得の作成者が不正なため拒否します")
+    if any(
+        not isinstance(number, int)
+        or isinstance(number, bool)
+        or number <= 0
+        for number in issue_targets
+    ):
+        raise RuntimeError("Issue一括取得の番号が不正なため拒否します")
+    if any(
+        not isinstance(video_id, str)
+        or not _VIDEO_ID_RE.fullmatch(video_id)
+        for video_id in issue_targets.values()
+    ):
+        raise RuntimeError("Issue一括取得の動画IDが不正なため拒否します")
+    owner, name = review.repository.split("/", 1)
     issues: dict[int, TrackingIssue] = {}
-    for page in range(1, _MAX_ISSUE_LIST_PAGES + 1):
+    ordered = sorted(issue_targets)
+    for offset in range(0, len(ordered), _ISSUE_BATCH_SIZE):
+        batch = ordered[offset : offset + _ISSUE_BATCH_SIZE]
+        selections = "\n".join(
+            (
+                f"i{number}: issue(number: {number}) {{ "
+                "number title body url state author { login } "
+                "labels(first: 100) { nodes { name } pageInfo { hasNextPage } }"
+                " }"
+            )
+            for number in batch
+        )
+        query = (
+            "query($owner: String!, $name: String!) { "
+            "repository(owner: $owner, name: $name) { "
+            f"{selections}"
+            " } }"
+        )
         raw = _run_gh(
             [
                 "api",
-                f"repos/{review.repository}/issues",
-                "--method",
-                "GET",
+                "graphql",
                 "-f",
-                "state=open",
-                "-f",
-                f"creator={expected_author}",
-                "-f",
-                "per_page=100",
-                "-f",
-                f"page={page}",
-                "-f",
-                "sort=updated",
-                "-f",
-                "direction=desc",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
             ]
         )
-        rows = json.loads(raw or "[]")
-        if not isinstance(rows, list):
-            raise RuntimeError("GitHub Issue一覧の形式が不正です")
-        for row in rows:
-            if not isinstance(row, dict) or row.get("pull_request"):
-                continue
-            issue = _parse_issue(row)
-            if (
-                issue is not None
-                and issue.author.casefold() == expected_author.casefold()
+        result = json.loads(raw or "{}")
+        if (
+            not isinstance(result, dict)
+            or result.get("errors") not in (None, [])
+        ):
+            raise RuntimeError("GitHub Issue一括取得が部分失敗しました")
+        repository = (
+            result.get("data", {}).get("repository")
+            if isinstance(result.get("data"), dict)
+            else None
+        )
+        if not isinstance(repository, dict):
+            raise RuntimeError("GitHub Issue一括取得結果の形式が不正です")
+        for number in batch:
+            alias = f"i{number}"
+            if alias not in repository or not isinstance(
+                repository[alias],
+                dict,
             ):
-                issues[issue.number] = issue
-        if len(rows) < 100:
-            return issues
-    raise RuntimeError(
-        "OpenなGitHub Issue一覧が安全なページ上限に達しました。"
-        "一部だけを処理せず確認処理を停止します"
-    )
+                raise RuntimeError(
+                    f"確認Issue #{number} を一括取得結果から確認できません"
+                )
+            row = repository[alias]
+            labels = row.get("labels")
+            if (
+                isinstance(labels, dict)
+                and isinstance(labels.get("pageInfo"), dict)
+                and labels["pageInfo"].get("hasNextPage") is True
+            ):
+                raise RuntimeError(
+                    f"確認Issue #{number} のラベルが100件を超えたため処理を停止します"
+                )
+            issue = _parse_issue(row)
+            if issue is None:
+                raise RuntimeError(
+                    f"確認Issue #{number} の追跡markerを確認できません"
+                )
+            if issue.number != number:
+                raise RuntimeError("GitHub Issue一括取得の番号が一致しません")
+            if issue.author.casefold() != expected_author.casefold():
+                raise RuntimeError(
+                    f"確認Issue #{number} の作成者がoutboxと一致しません"
+                )
+            if issue.video_id != issue_targets[number]:
+                raise RuntimeError(
+                    f"確認Issue #{number} の動画IDがoutboxと一致しません"
+                )
+            issues[number] = issue
+    return issues
 
 
 def _get_issue(
@@ -541,7 +603,7 @@ def _issue_body(
 
 - `{review.publish_label}`: YouTubeを公開へ変更し、完了URLを記録してこのIssueを閉じる
 - `{review.hold_label}`: 現状の限定公開から変更しない
-- `{review.keep_unlisted_label}`: 削除せず限定公開のまま維持する
+- `{review.keep_unlisted_label}`: 削除せず限定公開のまま維持し、確定コメントでIssueを閉じる
 
 複数の決定ラベルが付いた場合は曖昧として何も変更しません。
 ラベルが無い動画や限定公開の経過時間だけを理由に、自動公開することはありません。
@@ -732,7 +794,13 @@ def _record_from_row(row: dict) -> ReviewRecord | None:
         title=_text(row.get("title"), limit=200) or video_id,
         assessment=_assessment_from_dict(row.get("assessment")),
         status=str(row.get("status") or "pending"),
-        issue_number=issue_number if isinstance(issue_number, int) else None,
+        issue_number=(
+            issue_number
+            if isinstance(issue_number, int)
+            and not isinstance(issue_number, bool)
+            and issue_number > 0
+            else None
+        ),
         issue_url=_text(row.get("issue_url")) or None,
         issue_author=_text(row.get("issue_author"), limit=40) or None,
     )
@@ -864,17 +932,13 @@ def _ensure_issue_locked(
     if not _GH_LOGIN_RE.fullmatch(expected_author):
         raise RuntimeError("outboxのIssue作成者が不正なため処理を拒否します")
     if record.issue_number is not None:
-        issue = (
-            prefetched_issues.get(record.issue_number)
-            if prefetched_issues is not None
-            else None
-        )
-        if issue is None:
-            # Closed・marker欠損など、open一覧に無い記録だけ個別取得して確定する。
+        if prefetched_issues is None:
             issue = _get_issue(review, record.issue_number)
+        else:
+            issue = prefetched_issues.get(record.issue_number)
         if issue is None:
             raise RuntimeError(
-                "記録済みの確認Issueから追跡markerを確認できません。"
+                "記録済みの確認Issue一括取得から追跡markerを確認できません。"
                 "重複作成を避けるため自動再作成しません"
             )
     else:
@@ -890,7 +954,7 @@ def _ensure_issue_locked(
                 "確認Issue作成後にgh認証ユーザーが変更されました。"
                 "元の作成者へ戻すまで自動再作成しません"
             )
-        # direct REST一覧で作成済みIssueが無いことを1run後に確認できたため、
+        # 動画IDで絞った検索で作成済みIssueが無いことを1run後に確認したため、
         # pendingへ戻す。次の3時間runでだけ再試行し、直後の重複作成を避ける。
         _append_record(spec, _with_status(record, "pending"))
         raise RuntimeError(
@@ -924,6 +988,18 @@ def _ensure_issue_locked(
             record.title,
             record.assessment,
         )
+        # createが返した番号を個別検証より先にfsyncし、検証APIが失敗しても
+        # 次回は番号指定で復旧して重複Issueを作らない。
+        record = ReviewRecord(
+            video_id=record.video_id,
+            title=record.title,
+            assessment=record.assessment,
+            status="issue_creating",
+            issue_number=created.number,
+            issue_url=created.url,
+            issue_author=created.author,
+        )
+        _append_record(spec, record)
         issue = _get_issue(review, created.number)
         if issue is None:
             raise RuntimeError(
@@ -1000,6 +1076,23 @@ def _close_published_issue(
     )
 
 
+def _close_kept_unlisted_issue(
+    review: YouTubeReviewSpec,
+    issue: TrackingIssue,
+) -> None:
+    _run_gh(
+        [
+            "issue",
+            "close",
+            str(issue.number),
+            "--repo",
+            review.repository,
+            "--comment",
+            f"限定公開で保持を確定しました: https://youtu.be/{issue.video_id}",
+        ]
+    )
+
+
 def _decision(
     issue: TrackingIssue,
     review: YouTubeReviewSpec,
@@ -1045,15 +1138,23 @@ def reconcile_result(
             )
         ]
         current_author = _current_gh_login() if active else ""
-        expected_authors = {
-            record.issue_author or current_author
-            for record in active
-        }
-        # 全actorの一覧取得が成功してから動画単位処理へ進み、ページ上限時に
-        # 一部だけ公開変更されることを防ぐ。
+        issue_targets_by_author: dict[str, dict[int, str]] = {}
+        for record in active:
+            if record.issue_number is None:
+                continue
+            author = record.issue_author or current_author
+            issue_targets_by_author.setdefault(author, {})[
+                record.issue_number
+            ] = record.video_id
+        # 全actorの番号指定一括取得が成功してから動画単位処理へ進み、
+        # 取得不調時に一部だけ公開変更されることを防ぐ。
         prefetched_by_author = {
-            author: _list_open_tracking_issues(review, author)
-            for author in expected_authors
+            author: _get_tracking_issues_by_numbers(
+                review,
+                author,
+                issue_targets,
+            )
+            for author, issue_targets in issue_targets_by_author.items()
         }
         for original in active:
             try:
@@ -1061,7 +1162,9 @@ def reconcile_result(
                 record, issue = _ensure_issue_locked(
                     spec,
                     original,
-                    prefetched_issues=prefetched_by_author[expected_author],
+                    prefetched_issues=prefetched_by_author.get(
+                        expected_author
+                    ),
                 )
                 # _ensure_issue_lockedの取得結果を通常確認に再利用する。公開変更または
                 # terminal化の直前だけ再取得し、安全境界を維持しつつgh呼出しを半減する。
@@ -1075,6 +1178,19 @@ def reconcile_result(
                     _append_record(spec, terminal)
                     events.append(
                         f"確認Issue #{fresh.number}: 公開完了状態を復旧 "
+                        f"https://youtu.be/{record.video_id}"
+                    )
+                    continue
+                if record.status == "keep_unlisted_confirmed":
+                    # 保持決定は動画を変更しないが、決定済みIssueをopenのまま
+                    # 増やさない。close失敗後も耐久状態から冪等に復旧する。
+                    if fresh.state == "OPEN":
+                        _close_kept_unlisted_issue(review, fresh)
+                    terminal = _with_status(record, "keep_unlisted")
+                    _append_record(spec, terminal)
+                    events.append(
+                        f"確認Issue #{fresh.number}: "
+                        "限定公開保持の完了状態を復旧 "
                         f"https://youtu.be/{record.video_id}"
                     )
                     continue
@@ -1160,10 +1276,19 @@ def reconcile_result(
                 elif decision == review.hold_label:
                     events.append(f"確認Issue #{fresh.number}: 保留（変更なし）")
                 else:
+                    confirmed = _with_status(
+                        record,
+                        "keep_unlisted_confirmed",
+                    )
+                    if confirmed != record:
+                        _append_record(spec, confirmed)
+                        record = confirmed
+                    _close_kept_unlisted_issue(review, fresh)
                     terminal = _with_status(record, "keep_unlisted")
                     _append_record(spec, terminal)
                     events.append(
-                        f"確認Issue #{fresh.number}: 限定公開で保持（変更なし）"
+                        f"確認Issue #{fresh.number}: "
+                        "限定公開で保持してIssueをクローズ（動画変更なし）"
                     )
             except Exception as exc:  # 1件の不調で他のpending動画を止めない
                 failed_count += 1

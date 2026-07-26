@@ -35,6 +35,10 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
         self.assertIn("--model claude-opus-5", self.workflow)
         self.assertIn("unsafe review output", self.workflow)
         self.assertIn("Require structured review result", self.workflow)
+        self.assertIn(
+            "success() && env.CLAUDE_CODE_OAUTH_TOKEN_CONFIGURED",
+            self.workflow,
+        )
         self.assertIn("Claude review returned no structured output", self.workflow)
 
     def test_uses_subscription_oauth_and_immutable_actions(self) -> None:

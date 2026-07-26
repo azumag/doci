@@ -91,7 +91,7 @@ jobs:
             "Bash,Read,Glob,Grep,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
 
       - name: Require structured review result
-        if: ${{ always() && env.CLAUDE_CODE_OAUTH_TOKEN_CONFIGURED == 'true' }}
+        if: ${{ success() && env.CLAUDE_CODE_OAUTH_TOKEN_CONFIGURED == 'true' }}
         env:
           REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
         run: |

@@ -281,14 +281,14 @@ class IssueWorkflowTest(unittest.TestCase):
         )
         login_patch.start()
         self.addCleanup(login_patch.stop)
-        self.list_open_impl = youtube_review._list_open_tracking_issues
-        issue_list_patch = mock.patch.object(
+        self.batch_get_impl = youtube_review._get_tracking_issues_by_numbers
+        issue_batch_patch = mock.patch.object(
             youtube_review,
-            "_list_open_tracking_issues",
+            "_get_tracking_issues_by_numbers",
             return_value={},
         )
-        self.issue_list_mock = issue_list_patch.start()
-        self.addCleanup(issue_list_patch.stop)
+        self.issue_batch_mock = issue_batch_patch.start()
+        self.addCleanup(issue_batch_patch.stop)
 
     def _issue(
         self,
@@ -510,6 +510,7 @@ class IssueWorkflowTest(unittest.TestCase):
         approved = self._issue(labels=("公開承認",))
         closed = self._issue(labels=("公開承認",), state="CLOSED")
         self._queue(approved.video_id)
+        self.issue_batch_mock.return_value = {closed.number: closed}
         original_append = youtube_review._append_record
         failed_once = False
 
@@ -529,7 +530,7 @@ class IssueWorkflowTest(unittest.TestCase):
             mock.patch.object(
                 youtube_review,
                 "_get_issue",
-                side_effect=[approved, closed, closed],
+                return_value=approved,
             ),
             mock.patch(
                 "doci.youtube.privacy_status",
@@ -564,6 +565,9 @@ class IssueWorkflowTest(unittest.TestCase):
         approved = self._issue(labels=("公開承認",))
         withdrawn = self._issue(labels=())
         self._queue(approved.video_id)
+        self.issue_batch_mock.return_value = {
+            withdrawn.number: withdrawn
+        }
         failed_once = False
 
         def fail_first_close(review, issue):
@@ -581,7 +585,7 @@ class IssueWorkflowTest(unittest.TestCase):
             mock.patch.object(
                 youtube_review,
                 "_get_issue",
-                side_effect=[approved, withdrawn, withdrawn],
+                return_value=approved,
             ),
             mock.patch(
                 "doci.youtube.privacy_status",
@@ -649,30 +653,100 @@ class IssueWorkflowTest(unittest.TestCase):
             ("conflict123", ("公開承認", "保留"), "競合"),
         )
         for index, (video_id, labels, expected) in enumerate(cases, start=1):
-            self._queue(video_id)
-            issue = self._issue(
-                labels=labels,
-                video_id=video_id,
-                number=index,
-            )
-            with (
-                self.subTest(video_id=video_id),
-                mock.patch.object(
-                    youtube_review,
-                    "_find_issue",
-                    return_value=issue,
-                ),
-                mock.patch.object(
-                    youtube_review,
-                    "_get_issue",
-                    return_value=issue,
-                ),
-                mock.patch("doci.youtube.privacy_status") as privacy_mock,
-            ):
-                events = youtube_review.reconcile(self.spec)
+            with self.subTest(video_id=video_id), tempfile.TemporaryDirectory() as tmp:
+                spec = _spec(Path(tmp))
+                youtube_review.queue_pending(
+                    spec,
+                    video_id,
+                    "YouTubeショート改善",
+                    self.assessment,
+                )
+                issue = self._issue(
+                    labels=labels,
+                    video_id=video_id,
+                    number=index,
+                )
+                with (
+                    mock.patch.object(
+                        youtube_review,
+                        "_find_issue",
+                        return_value=issue,
+                    ),
+                    mock.patch.object(
+                        youtube_review,
+                        "_get_issue",
+                        return_value=issue,
+                    ),
+                    mock.patch(
+                        "doci.youtube.privacy_status"
+                    ) as privacy_mock,
+                    mock.patch.object(
+                        youtube_review,
+                        "_close_kept_unlisted_issue",
+                    ) as close_keep_mock,
+                ):
+                    events = youtube_review.reconcile(spec)
 
-            privacy_mock.assert_not_called()
-            self.assertTrue(any(expected in event for event in events))
+                privacy_mock.assert_not_called()
+                if video_id == "keep123":
+                    close_keep_mock.assert_called_once_with(
+                        spec.publish.youtube.review,
+                        issue,
+                    )
+                else:
+                    close_keep_mock.assert_not_called()
+                self.assertTrue(any(expected in event for event in events))
+
+    def test_keep_unlisted_close_failure_recovers_without_video_change(
+        self,
+    ) -> None:
+        kept = self._issue(labels=("限定公開で保持",))
+        withdrawn = self._issue(labels=())
+        self._queue(kept.video_id)
+        self.issue_batch_mock.return_value = {withdrawn.number: withdrawn}
+        failed_once = False
+
+        def fail_first_close(_review, _issue):
+            nonlocal failed_once
+            if not failed_once:
+                failed_once = True
+                raise RuntimeError("close failed")
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                return_value=kept,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=kept,
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_close_kept_unlisted_issue",
+                side_effect=fail_first_close,
+            ) as close_mock,
+            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+        ):
+            first = youtube_review.reconcile(self.spec)
+            self.assertEqual(
+                youtube_review._latest_records(self.spec)[kept.video_id].status,
+                "keep_unlisted_confirmed",
+            )
+            second = youtube_review.reconcile(self.spec)
+
+        self.assertTrue(any("close failed" in event for event in first))
+        self.assertTrue(
+            any("限定公開保持の完了状態を復旧" in event for event in second)
+        )
+        self.assertEqual(close_mock.call_count, 2)
+        privacy_mock.assert_not_called()
+        self.assertEqual(
+            youtube_review._latest_records(self.spec)[kept.video_id].status,
+            "keep_unlisted",
+        )
 
     def test_linked_hold_issue_is_fetched_once_per_reconcile(self) -> None:
         issue = self._issue(labels=("保留",))
@@ -685,7 +759,7 @@ class IssueWorkflowTest(unittest.TestCase):
         before_lines = youtube_review._outbox_path(self.spec).read_text(
             encoding="utf-8"
         ).splitlines()
-        self.issue_list_mock.return_value = {issue.number: issue}
+        self.issue_batch_mock.return_value = {issue.number: issue}
         with (
             mock.patch.object(
                 youtube_review,
@@ -697,7 +771,11 @@ class IssueWorkflowTest(unittest.TestCase):
 
         self.assertEqual(outcome.failed_count, 0)
         self.assertIn("保留（変更なし）", outcome.events[0])
-        self.issue_list_mock.assert_called_once_with(self.review, "owner")
+        self.issue_batch_mock.assert_called_once_with(
+            self.review,
+            "owner",
+            {issue.number: issue.video_id},
+        )
         get_mock.assert_not_called()
         privacy_mock.assert_not_called()
         after_lines = youtube_review._outbox_path(self.spec).read_text(
@@ -728,18 +806,26 @@ class IssueWorkflowTest(unittest.TestCase):
             "actor-a": {actor_a.number: actor_a},
             "actor-b": {actor_b.number: actor_b},
         }
-        self.issue_list_mock.side_effect = (
-            lambda _review, author: by_author[author]
+        self.issue_batch_mock.side_effect = (
+            lambda _review, author, _numbers: by_author[author]
         )
         with mock.patch.object(youtube_review, "_get_issue") as get_mock:
             outcome = youtube_review.reconcile_result(self.spec)
 
         self.assertEqual(outcome.failed_count, 0)
         self.assertCountEqual(
-            self.issue_list_mock.call_args_list,
+            self.issue_batch_mock.call_args_list,
             [
-                mock.call(self.review, "actor-a"),
-                mock.call(self.review, "actor-b"),
+                mock.call(
+                    self.review,
+                    "actor-a",
+                    {actor_a.number: actor_a.video_id},
+                ),
+                mock.call(
+                    self.review,
+                    "actor-b",
+                    {actor_b.number: actor_b.video_id},
+                ),
             ],
         )
         get_mock.assert_not_called()
@@ -765,12 +851,12 @@ class IssueWorkflowTest(unittest.TestCase):
                 youtube_review._with_issue(record, issue),
             )
 
-        def list_for_actor(_review, author):
+        def list_for_actor(_review, author, _numbers):
             if author == "actor-b":
                 raise RuntimeError("ページ上限")
             return {actor_a.number: actor_a}
 
-        self.issue_list_mock.side_effect = list_for_actor
+        self.issue_batch_mock.side_effect = list_for_actor
         with (
             mock.patch.object(youtube_review, "_get_issue") as get_mock,
             mock.patch("doci.youtube.privacy_status") as privacy_mock,
@@ -789,6 +875,7 @@ class IssueWorkflowTest(unittest.TestCase):
             self.spec,
             youtube_review._with_issue(hold_record, hold),
         )
+        self.issue_batch_mock.return_value = {hold.number: hold}
         self._queue("broken123")
 
         def fail_broken(_review, video_id, _expected_author):
@@ -835,7 +922,7 @@ class IssueWorkflowTest(unittest.TestCase):
 
         self.assertEqual(first.failed_video_ids, ("broken123",))
         self.assertEqual(second.failed_video_ids, ("broken123",))
-        get_mock.assert_called_once_with(self.review, hold.number)
+        get_mock.assert_not_called()
 
     def test_missing_issue_is_retried_from_unlisted_history(self) -> None:
         row = {
@@ -904,30 +991,23 @@ class IssueWorkflowTest(unittest.TestCase):
         with mock.patch.object(
             youtube_review,
             "_run_gh",
-            return_value="[]",
+            return_value=(
+                '{"total_count": 0, "incomplete_results": false, '
+                '"items": []}'
+            ),
         ) as gh_mock:
             youtube_review._find_issue(self.review, "abc123XYZ")
 
         args = gh_mock.call_args.args[0]
         self.assertIn("api", args)
-        self.assertIn("creator=owner", args)
+        self.assertIn("search/issues", args)
         self.assertIn("per_page=100", args)
-        self.assertIn("page=1", args)
-        self.assertNotIn("--search", args)
+        query_arg = next(arg for arg in args if arg.startswith("q="))
+        self.assertIn("repo:owner/repo", query_arg)
+        self.assertIn("author:owner", query_arg)
+        self.assertIn('in:title "abc123XYZ"', query_arg)
 
-    def test_issue_lookup_checks_multiple_pages(self) -> None:
-        unrelated = [
-            {
-                "number": number,
-                "title": "unrelated",
-                "body": "",
-                "labels": [],
-                "html_url": f"https://github.com/owner/repo/issues/{number}",
-                "state": "open",
-                "user": {"login": "owner"},
-            }
-            for number in range(1, 101)
-        ]
+    def test_issue_lookup_returns_exact_marker_from_narrow_search(self) -> None:
         target = {
             "number": 101,
             "title": "target",
@@ -940,19 +1020,21 @@ class IssueWorkflowTest(unittest.TestCase):
         with mock.patch.object(
             youtube_review,
             "_run_gh",
-            side_effect=[
-                json.dumps(unrelated),
-                json.dumps([target]),
-            ],
+            return_value=json.dumps(
+                {
+                    "total_count": 1,
+                    "incomplete_results": False,
+                    "items": [target],
+                }
+            ),
         ) as gh_mock:
             issue = youtube_review._find_issue(self.review, "abc123XYZ")
 
         self.assertIsNotNone(issue)
         self.assertEqual(issue.number, 101)
-        self.assertEqual(gh_mock.call_count, 2)
-        self.assertIn("page=2", gh_mock.call_args.args[0])
+        self.assertEqual(gh_mock.call_count, 1)
 
-    def test_issue_lookup_fails_closed_at_page_limit(self) -> None:
+    def test_issue_lookup_fails_closed_if_narrow_search_exceeds_100(self) -> None:
         full_page = [
             {
                 "number": number,
@@ -965,40 +1047,205 @@ class IssueWorkflowTest(unittest.TestCase):
             }
             for number in range(1, 101)
         ]
+        with mock.patch.object(
+            youtube_review,
+            "_run_gh",
+            return_value=json.dumps(
+                {
+                    "total_count": 101,
+                    "incomplete_results": False,
+                    "items": full_page,
+                }
+            ),
+        ) as gh_mock:
+            with self.assertRaisesRegex(RuntimeError, "100件"):
+                youtube_review._find_issue(self.review, "abc123XYZ")
+
+        self.assertEqual(gh_mock.call_count, 1)
+
+    def test_incomplete_issue_search_never_creates_a_duplicate(self) -> None:
+        self._queue()
         with (
-            mock.patch.object(youtube_review, "_MAX_ISSUE_LIST_PAGES", 2),
             mock.patch.object(
                 youtube_review,
                 "_run_gh",
-                return_value=json.dumps(full_page),
-            ) as gh_mock,
+                return_value=json.dumps(
+                    {
+                        "total_count": 0,
+                        "incomplete_results": True,
+                        "items": [],
+                    }
+                ),
+            ),
+            mock.patch.object(
+                youtube_review,
+                "_create_issue",
+            ) as create_mock,
         ):
-            with self.assertRaisesRegex(RuntimeError, "ページ上限"):
-                youtube_review._find_issue(self.review, "abc123XYZ")
+            with self.assertRaisesRegex(RuntimeError, "検索が不完全"):
+                youtube_review.ensure_issue(self.spec, "abc123XYZ")
 
-        self.assertEqual(gh_mock.call_count, 2)
+        create_mock.assert_not_called()
+        record = youtube_review._latest_records(self.spec)["abc123XYZ"]
+        self.assertEqual(record.status, "pending")
+        self.assertIsNone(record.issue_number)
+        self.assertIsNone(record.issue_author)
 
-    def test_open_tracking_issues_are_fetched_as_one_page(self) -> None:
+    def test_tracking_issues_are_fetched_by_known_numbers(self) -> None:
         row = {
             "number": 42,
             "title": "target",
             "body": "<!-- doci-youtube-review video_id=abc123XYZ -->",
-            "labels": [{"name": "保留"}],
-            "html_url": "https://github.com/owner/repo/issues/42",
-            "state": "open",
-            "user": {"login": "owner"},
+            "labels": {
+                "nodes": [{"name": "保留"}],
+                "pageInfo": {"hasNextPage": False},
+            },
+            "url": "https://github.com/owner/repo/issues/42",
+            "state": "OPEN",
+            "author": {"login": "owner"},
         }
         with mock.patch.object(
             youtube_review,
             "_run_gh",
-            return_value=json.dumps([row]),
+            return_value=json.dumps(
+                {"data": {"repository": {"i42": row}}}
+            ),
         ) as gh_mock:
-            issues = self.list_open_impl(self.review, "owner")
+            issues = self.batch_get_impl(
+                self.review,
+                "owner",
+                {42: "abc123XYZ"},
+            )
 
         self.assertEqual(issues[42].video_id, "abc123XYZ")
         args = gh_mock.call_args.args[0]
-        self.assertIn("state=open", args)
-        self.assertIn("creator=owner", args)
+        self.assertIn("graphql", args)
+        query_arg = next(arg for arg in args if arg.startswith("query="))
+        self.assertIn("i42: issue(number: 42)", query_arg)
+        self.assertIn("owner=owner", args)
+        self.assertIn("name=repo", args)
+
+    def test_tracking_issue_batches_scale_without_repository_page_scan(
+        self,
+    ) -> None:
+        def graph_row(number: int) -> dict:
+            video_id = f"vid{number:04d}"
+            return {
+                "number": number,
+                "title": f"target {number}",
+                "body": (
+                    "<!-- doci-youtube-review "
+                    f"video_id={video_id} -->"
+                ),
+                "labels": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": False},
+                },
+                "url": f"https://github.com/owner/repo/issues/{number}",
+                "state": "OPEN",
+                "author": {"login": "owner"},
+            }
+
+        first = {
+            f"i{number}": graph_row(number)
+            for number in range(1, 51)
+        }
+        second = {"i51": graph_row(51)}
+        with mock.patch.object(
+            youtube_review,
+            "_run_gh",
+            side_effect=[
+                json.dumps({"data": {"repository": first}}),
+                json.dumps({"data": {"repository": second}}),
+            ],
+        ) as gh_mock:
+            issues = self.batch_get_impl(
+                self.review,
+                "owner",
+                {
+                    number: f"vid{number:04d}"
+                    for number in range(1, 52)
+                },
+            )
+
+        self.assertEqual(set(issues), set(range(1, 52)))
+        self.assertEqual(gh_mock.call_count, 2)
+
+    def test_partial_graphql_batch_stops_before_any_video_processing(
+        self,
+    ) -> None:
+        first = self._issue(
+            labels=("公開承認",),
+            video_id="first111",
+            number=11,
+        )
+        second = self._issue(
+            labels=("公開承認",),
+            video_id="second22",
+            number=22,
+        )
+        for issue in (first, second):
+            self._queue(issue.video_id)
+            record = youtube_review._latest_records(self.spec)[issue.video_id]
+            youtube_review._append_record(
+                self.spec,
+                youtube_review._with_issue(record, issue),
+            )
+        first_row = {
+            "number": first.number,
+            "title": "target",
+            "body": (
+                "<!-- doci-youtube-review "
+                f"video_id={first.video_id} -->"
+            ),
+            "labels": {
+                "nodes": [{"name": "公開承認"}],
+                "pageInfo": {"hasNextPage": False},
+            },
+            "url": first.url,
+            "state": "OPEN",
+            "author": {"login": "owner"},
+        }
+        cases = (
+            (
+                {
+                    "data": {"repository": {"i11": first_row}},
+                    "errors": [{"message": "field failed"}],
+                },
+                "部分失敗",
+            ),
+            (
+                {"data": {"repository": {"i11": first_row}}},
+                "確認Issue #22",
+            ),
+        )
+        for response, expected in cases:
+            with (
+                self.subTest(expected=expected),
+                mock.patch.object(
+                    youtube_review,
+                    "_run_gh",
+                    return_value=json.dumps(response),
+                ),
+                mock.patch.object(
+                    youtube_review,
+                    "_get_issue",
+                ) as get_mock,
+                mock.patch(
+                    "doci.youtube.privacy_status"
+                ) as privacy_mock,
+                mock.patch.object(
+                    youtube_review,
+                    "_append_record",
+                ) as append_mock,
+            ):
+                self.issue_batch_mock.side_effect = self.batch_get_impl
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    youtube_review.reconcile_result(self.spec)
+
+            get_mock.assert_not_called()
+            privacy_mock.assert_not_called()
+            append_mock.assert_not_called()
 
     def test_issue_lookup_ignores_matching_marker_from_another_author(self) -> None:
         row = {
@@ -1013,7 +1260,13 @@ class IssueWorkflowTest(unittest.TestCase):
         with mock.patch.object(
             youtube_review,
             "_run_gh",
-            return_value=json.dumps([row]),
+            return_value=json.dumps(
+                {
+                    "total_count": 1,
+                    "incomplete_results": False,
+                    "items": [row],
+                }
+            ),
         ):
             issue = youtube_review._find_issue(self.review, "abc123XYZ")
 
@@ -1158,7 +1411,8 @@ class IssueWorkflowTest(unittest.TestCase):
 
         record = youtube_review._latest_records(self.spec)[created.video_id]
         self.assertEqual(record.status, "issue_creating")
-        self.assertIsNone(record.issue_number)
+        self.assertEqual(record.issue_number, created.number)
+        self.assertEqual(record.issue_author, created.author)
 
     def test_missing_marker_on_recorded_issue_never_creates_a_duplicate(
         self,
