@@ -86,7 +86,21 @@ def _reconcile_youtube_review(spec: ChannelSpec, do_upload: bool) -> None:
     try:
         from . import youtube_review
 
-        events = youtube_review.reconcile(spec)
+        cycle_id = os.environ.get("DOCI_REVIEW_CYCLE_ID", "")
+        retry_ids = youtube_review.load_retry_plan(spec, cycle_id)
+        if retry_ids is None:
+            events = youtube_review.reconcile(spec)
+        else:
+            outcome = youtube_review.reconcile_result(
+                spec,
+                only_video_ids=set(retry_ids),
+            )
+            youtube_review.save_retry_plan(
+                spec,
+                cycle_id,
+                outcome.failed_video_ids,
+            )
+            events = list(outcome.events)
         if not events:
             _log("YouTube確認Issue: 未処理の決定なし")
         for event in events:
@@ -108,12 +122,18 @@ def _reconcile_all_youtube_reviews() -> tuple[dict, int]:
 
     from . import youtube_review
 
+    cycle_id = os.environ.get("DOCI_REVIEW_CYCLE_ID", "")
     for channel_id in channel.discover():
         try:
             spec = channel.load(channel_id)
             if not spec.publish.youtube.review.enabled:
                 continue
             outcome = youtube_review.reconcile_result(spec)
+            youtube_review.save_retry_plan(
+                spec,
+                cycle_id,
+                outcome.failed_video_ids,
+            )
             events = list(outcome.events)
             results.append(
                 {
@@ -121,6 +141,7 @@ def _reconcile_all_youtube_reviews() -> tuple[dict, int]:
                     "status": "error" if outcome.failed_count else "ok",
                     "events": events,
                     "failed_count": outcome.failed_count,
+                    "failed_video_ids": list(outcome.failed_video_ids),
                 }
             )
         except Exception as exc:

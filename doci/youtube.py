@@ -24,8 +24,12 @@ ANALYTICS_SCOPES = [
     *ACCOUNT_SCOPES,
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
+# videos.update は `youtube` と `youtube.force-ssl` の両方を許可する。
+# 公式scope説明で前者はアカウント全体管理、後者は動画・評価・コメント・字幕に
+# 対象資源が限定されるため、公開設定更新には後者を選ぶ。
 MANAGE_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 MANAGE_SCOPES = [*ACCOUNT_SCOPES, MANAGE_SCOPE]
+_YOUTUBE_API_TIMEOUT_SECONDS = 60
 _WRITABLE_VIDEO_STATUS_KEYS = {
     "privacyStatus",
     "publishAt",
@@ -39,9 +43,15 @@ _WRITABLE_VIDEO_STATUS_KEYS = {
 
 def _build_service(credentials):
     """YouTube service構築を、依存未導入のfixtureテストから差し替え可能にする。"""
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
     from googleapiclient.discovery import build
 
-    return build("youtube", "v3", credentials=credentials)
+    http = AuthorizedHttp(
+        credentials,
+        http=httplib2.Http(timeout=_YOUTUBE_API_TIMEOUT_SECONDS),
+    )
+    return build("youtube", "v3", http=http)
 
 
 def _token_has_scopes(token_file: Path, required_scopes: list[str]) -> bool:

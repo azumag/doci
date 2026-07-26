@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
 import subprocess
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -22,6 +24,9 @@ from .channel import ChannelSpec, YouTubeReviewSpec
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 _GH_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
+_CYCLE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+_LOCK_WAIT_TIMEOUT_SECONDS = 30.0
+_LOCK_RETRY_SECONDS = 0.25
 _MARKER_RE = re.compile(
     r"<!--\s*doci-youtube-review\s+video_id=([A-Za-z0-9_-]{6,20})\s*-->"
 )
@@ -178,6 +183,7 @@ class ReviewRecord:
 class ReconcileResult:
     events: tuple[str, ...]
     failed_count: int = 0
+    failed_video_ids: tuple[str, ...] = ()
 
 
 def _text(value: object, limit: int = 500) -> str:
@@ -536,13 +542,105 @@ def _lock_path(spec: ChannelSpec) -> Path:
     return spec.output_dir / ".youtube_review.lock"
 
 
+def _retry_plan_path(spec: ChannelSpec, cycle_id: str) -> Path:
+    """Concurrent cron cycles cannot overwrite each other's retry state."""
+    digest = hashlib.sha256(cycle_id.encode("utf-8")).hexdigest()
+    return spec.output_dir / ".youtube_review_retry" / f"{digest}.json"
+
+
+def save_retry_plan(
+    spec: ChannelSpec,
+    cycle_id: str,
+    failed_video_ids: tuple[str, ...],
+) -> None:
+    """同一cron cycleの後続runへ、失敗動画だけをローカルに引き渡す。"""
+    if not cycle_id:
+        return
+    if not _CYCLE_ID_RE.fullmatch(cycle_id):
+        raise ValueError("invalid YouTube review cycle id")
+    video_ids = tuple(dict.fromkeys(failed_video_ids))
+    if any(not _VIDEO_ID_RE.fullmatch(video_id) for video_id in video_ids):
+        raise ValueError("invalid YouTube review retry video id")
+    path = _retry_plan_path(spec, cycle_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "cycle_id": cycle_id,
+                    "failed_video_ids": list(video_ids),
+                },
+                file,
+                ensure_ascii=False,
+            )
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def load_retry_plan(
+    spec: ChannelSpec,
+    cycle_id: str,
+) -> tuple[str, ...] | None:
+    """cycleが一致するplanだけを返す。手動runや次cycleは全件確認へ戻す。"""
+    if not cycle_id or not _CYCLE_ID_RE.fullmatch(cycle_id):
+        return None
+    try:
+        row = json.loads(
+            _retry_plan_path(spec, cycle_id).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(row, dict) or row.get("cycle_id") != cycle_id:
+        return None
+    video_ids = row.get("failed_video_ids")
+    if not isinstance(video_ids, list):
+        return None
+    if any(
+        not isinstance(video_id, str) or not _VIDEO_ID_RE.fullmatch(video_id)
+        for video_id in video_ids
+    ):
+        return None
+    return tuple(dict.fromkeys(video_ids))
+
+
 @contextmanager
-def _operation_lock(spec: ChannelSpec) -> Iterator[None]:
+def _operation_lock(
+    spec: ChannelSpec,
+    *,
+    timeout_seconds: float | None = None,
+) -> Iterator[None]:
+    """ネットワーク停止中の別processへ無期限追従しない、上限付き排他lock。"""
     path = _lock_path(spec)
     path.parent.mkdir(parents=True, exist_ok=True)
+    wait_limit = (
+        _LOCK_WAIT_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else max(0.0, timeout_seconds)
+    )
+    deadline = time.monotonic() + wait_limit
     with path.open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        yield
+        while True:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"YouTube確認処理lockを{wait_limit:g}秒以内に取得できません"
+                    )
+                time.sleep(_LOCK_RETRY_SECONDS)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _record_from_row(row: dict) -> ReviewRecord | None:
@@ -797,7 +895,11 @@ def _decision(
     return (next(iter(decisions)), None) if decisions else (None, None)
 
 
-def reconcile_result(spec: ChannelSpec) -> ReconcileResult:
+def reconcile_result(
+    spec: ChannelSpec,
+    *,
+    only_video_ids: set[str] | None = None,
+) -> ReconcileResult:
     """pending動画を処理し、イベントと個別失敗数を構造化して返す。"""
     review = spec.publish.youtube.review
     if not review.enabled:
@@ -805,6 +907,7 @@ def reconcile_result(spec: ChannelSpec) -> ReconcileResult:
 
     events: list[str] = []
     failed_count = 0
+    failed_video_ids: list[str] = []
     with _operation_lock(spec):
         records = _latest_records(spec)
         for candidate in _history_candidates(spec):
@@ -815,19 +918,16 @@ def reconcile_result(spec: ChannelSpec) -> ReconcileResult:
         for original in list(records.values()):
             if original.status in _TERMINAL_OUTBOX_STATUSES:
                 continue
+            if (
+                only_video_ids is not None
+                and original.video_id not in only_video_ids
+            ):
+                continue
             try:
                 record, issue = _ensure_issue_locked(spec, original)
-                # 公開変更の直前にOPEN状態とラベルを再取得し、撤回・競合を反映する。
-                fresh = _get_issue(review, issue.number)
-                if (
-                    fresh is None
-                    or fresh.video_id != record.video_id
-                ):
-                    failed_count += 1
-                    events.append(
-                        f"確認Issue #{issue.number}: 追跡markerが一致しないため変更なし"
-                    )
-                    continue
+                # _ensure_issue_lockedの取得結果を通常確認に再利用する。公開変更または
+                # terminal化の直前だけ再取得し、安全境界を維持しつつgh呼出しを半減する。
+                fresh = issue
                 if record.status == "public_confirmed":
                     # 承認と公開状態はcloseより前に耐久記録済み。以後のラベル
                     # 撤回は公開済み事実を戻せないため、完了記録だけを冪等再試行する。
@@ -851,6 +951,40 @@ def reconcile_result(spec: ChannelSpec) -> ReconcileResult:
                     continue
                 if decision is None:
                     continue
+                if decision in {
+                    review.publish_label,
+                    review.keep_unlisted_label,
+                }:
+                    refreshed = _get_issue(review, issue.number)
+                    if (
+                        refreshed is None
+                        or refreshed.video_id != record.video_id
+                    ):
+                        failed_count += 1
+                        failed_video_ids.append(record.video_id)
+                        events.append(
+                            f"確認Issue #{issue.number}: "
+                            "追跡markerが一致しないため変更なし"
+                        )
+                        continue
+                    fresh = refreshed
+                    if fresh.state != "OPEN":
+                        events.append(
+                            f"確認Issue #{fresh.number}: "
+                            "openな追跡Issueではないため変更なし"
+                        )
+                        continue
+                    decision, conflict = _decision(fresh, review)
+                    if conflict:
+                        events.append(f"確認Issue #{fresh.number}: {conflict}")
+                        continue
+                    if decision is None:
+                        continue
+                    if decision == review.hold_label:
+                        events.append(
+                            f"確認Issue #{fresh.number}: 保留（変更なし）"
+                        )
+                        continue
                 if decision == review.publish_label:
                     from . import youtube
 
@@ -895,11 +1029,16 @@ def reconcile_result(spec: ChannelSpec) -> ReconcileResult:
                     )
             except Exception as exc:  # 1件の不調で他のpending動画を止めない
                 failed_count += 1
+                failed_video_ids.append(original.video_id)
                 events.append(
                     f"動画 {original.video_id}: 確認処理失敗 "
                     f"{type(exc).__name__}: {_redact(str(exc))[:180]}"
                 )
-    return ReconcileResult(tuple(events), failed_count)
+    return ReconcileResult(
+        tuple(events),
+        failed_count,
+        tuple(dict.fromkeys(failed_video_ids)),
+    )
 
 
 def reconcile(spec: ChannelSpec) -> list[str]:

@@ -30,6 +30,7 @@ echo "[$(ts)] ===== cron run start =====" >> "$LOG"
 
 # 確認Issueは生成・VOICEVOXの成否と切り離し、既存3時間ジョブのたびに先に取得する。
 # 前回の長時間生成が継続中でも実行する。短いoperation lockはPython側で管理する。
+export DOCI_REVIEW_CYCLE_ID="cron-$(date +%s)-$$"
 "$PY" -m doci.run_daily --reconcile-youtube-reviews >> "$LOG" 2>&1
 review_rc=$?
 if [ "$review_rc" != "0" ]; then

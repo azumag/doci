@@ -328,6 +328,55 @@ class IssueWorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not registered"):
             youtube_review.ensure_issue(self.spec, "abc123XYZ")
 
+    def test_operation_lock_times_out_instead_of_waiting_forever(self) -> None:
+        with (
+            mock.patch.object(
+                youtube_review.fcntl,
+                "flock",
+                side_effect=BlockingIOError,
+            ),
+            mock.patch.object(
+                youtube_review.time,
+                "monotonic",
+                side_effect=[0.0, 1.0],
+            ),
+            mock.patch.object(youtube_review.time, "sleep") as sleep_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "0秒以内に取得できません"):
+                with youtube_review._operation_lock(
+                    self.spec,
+                    timeout_seconds=0,
+                ):
+                    self.fail("lock must not be acquired")
+
+        sleep_mock.assert_not_called()
+
+    def test_retry_plan_is_scoped_to_one_cron_cycle(self) -> None:
+        youtube_review.save_retry_plan(
+            self.spec,
+            "cron-123",
+            ("broken123", "broken123"),
+        )
+        youtube_review.save_retry_plan(
+            self.spec,
+            "cron-124",
+            ("second456",),
+        )
+
+        self.assertEqual(
+            youtube_review.load_retry_plan(self.spec, "cron-123"),
+            ("broken123",),
+        )
+        self.assertEqual(
+            youtube_review.load_retry_plan(self.spec, "cron-124"),
+            ("second456",),
+        )
+        self.assertNotEqual(
+            youtube_review._retry_plan_path(self.spec, "cron-123"),
+            youtube_review._retry_plan_path(self.spec, "cron-124"),
+        )
+        self.assertIsNone(youtube_review.load_retry_plan(self.spec, ""))
+
     def test_queue_is_fsynced_before_issue_creation_and_reused(self) -> None:
         self._queue()
         existing = self._issue(state="CLOSED")
@@ -573,6 +622,92 @@ class IssueWorkflowTest(unittest.TestCase):
             privacy_mock.assert_not_called()
             self.assertTrue(any(expected in event for event in events))
 
+    def test_linked_hold_issue_is_fetched_once_per_reconcile(self) -> None:
+        issue = self._issue(labels=("保留",))
+        self._queue(issue.video_id)
+        record = youtube_review._latest_records(self.spec)[issue.video_id]
+        youtube_review._append_record(
+            self.spec,
+            youtube_review._with_issue(record, issue),
+        )
+        before_lines = youtube_review._outbox_path(self.spec).read_text(
+            encoding="utf-8"
+        ).splitlines()
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=issue,
+            ) as get_mock,
+            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+        ):
+            outcome = youtube_review.reconcile_result(self.spec)
+
+        self.assertEqual(outcome.failed_count, 0)
+        self.assertIn("保留（変更なし）", outcome.events[0])
+        get_mock.assert_called_once_with(self.review, issue.number)
+        privacy_mock.assert_not_called()
+        after_lines = youtube_review._outbox_path(self.spec).read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertEqual(after_lines, before_lines)
+
+    def test_retry_targets_only_failed_video_and_does_not_refetch_hold(self) -> None:
+        hold = self._issue(labels=("保留",), video_id="hold123", number=1)
+        self._queue(hold.video_id)
+        hold_record = youtube_review._latest_records(self.spec)[hold.video_id]
+        youtube_review._append_record(
+            self.spec,
+            youtube_review._with_issue(hold_record, hold),
+        )
+        self._queue("broken123")
+
+        def fail_broken(_review, video_id, _expected_author):
+            if video_id == "broken123":
+                raise RuntimeError("boom")
+            self.fail(f"unexpected issue lookup: {video_id}")
+
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_get_issue",
+                return_value=hold,
+            ) as get_mock,
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                side_effect=fail_broken,
+            ),
+        ):
+            first = youtube_review.reconcile_result(self.spec)
+            youtube_review.save_retry_plan(
+                self.spec,
+                "cron-cycle-a",
+                first.failed_video_ids,
+            )
+            youtube_review.save_retry_plan(
+                self.spec,
+                "cron-cycle-b",
+                (),
+            )
+            retry_ids = youtube_review.load_retry_plan(
+                self.spec,
+                "cron-cycle-a",
+            )
+            self.assertEqual(retry_ids, ("broken123",))
+            self.assertEqual(
+                youtube_review.load_retry_plan(self.spec, "cron-cycle-b"),
+                (),
+            )
+            second = youtube_review.reconcile_result(
+                self.spec,
+                only_video_ids=set(retry_ids),
+            )
+
+        self.assertEqual(first.failed_video_ids, ("broken123",))
+        self.assertEqual(second.failed_video_ids, ("broken123",))
+        get_mock.assert_called_once_with(self.review, hold.number)
+
     def test_missing_issue_is_retried_from_unlisted_history(self) -> None:
         row = {
             "video_id": "retry123",
@@ -629,6 +764,7 @@ class IssueWorkflowTest(unittest.TestCase):
             outcome = youtube_review.reconcile_result(self.spec)
 
         self.assertEqual(outcome.failed_count, 1)
+        self.assertEqual(outcome.failed_video_ids, ("broken123",))
         self.assertTrue(any("broken123" in event for event in outcome.events))
         self.assertEqual(
             youtube_review._latest_records(self.spec)["healthy123"].issue_number,

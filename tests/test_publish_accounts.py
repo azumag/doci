@@ -405,6 +405,14 @@ class PublishAccountsTest(unittest.TestCase):
 
         scopes = load_mock.call_args.kwargs["scopes"]
         self.assertIn(youtube.MANAGE_SCOPE, scopes)
+        self.assertEqual(
+            youtube.MANAGE_SCOPE,
+            "https://www.googleapis.com/auth/youtube.force-ssl",
+        )
+        self.assertNotIn(
+            "https://www.googleapis.com/auth/youtube",
+            scopes,
+        )
         self.assertIn(
             "https://www.googleapis.com/auth/yt-analytics.readonly",
             scopes,

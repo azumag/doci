@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -85,6 +86,7 @@ class RunDailyCliTest(unittest.TestCase):
                 "reconcile_result",
                 return_value=youtube_review.ReconcileResult(("checked",)),
             ) as reconcile_mock,
+            patch.object(youtube_review, "save_retry_plan") as save_plan_mock,
             patch.object(run_daily, "run") as generate_mock,
         ):
             summary, exit_code = run_daily._reconcile_all_youtube_reviews()
@@ -92,6 +94,7 @@ class RunDailyCliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(summary["channels"][0]["events"], ["checked"])
         reconcile_mock.assert_called_once_with(enabled)
+        save_plan_mock.assert_called_once_with(enabled, "", ())
         generate_mock.assert_not_called()
 
     def test_reconcile_all_propagates_individual_failures(self) -> None:
@@ -114,8 +117,10 @@ class RunDailyCliTest(unittest.TestCase):
                 return_value=youtube_review.ReconcileResult(
                     ("動画 broken123: 確認処理失敗 RuntimeError: boom",),
                     failed_count=1,
+                    failed_video_ids=("broken123",),
                 ),
             ),
+            patch.object(youtube_review, "save_retry_plan") as save_plan_mock,
         ):
             summary, exit_code = run_daily._reconcile_all_youtube_reviews()
 
@@ -124,6 +129,62 @@ class RunDailyCliTest(unittest.TestCase):
         self.assertEqual(summary["failed"], 1)
         self.assertEqual(summary["channels"][0]["status"], "error")
         self.assertEqual(summary["channels"][0]["failed_count"], 1)
+        self.assertEqual(
+            summary["channels"][0]["failed_video_ids"],
+            ["broken123"],
+        )
+        save_plan_mock.assert_called_once_with(
+            enabled,
+            "",
+            ("broken123",),
+        )
+
+    def test_channel_retry_uses_only_failed_video_ids_from_same_cycle(self) -> None:
+        spec = SimpleNamespace(
+            publish=SimpleNamespace(
+                youtube=SimpleNamespace(
+                    review=SimpleNamespace(enabled=True),
+                )
+            )
+        )
+        outcome = youtube_review.ReconcileResult(
+            ("動画 broken123: 確認処理失敗 RuntimeError: boom",),
+            failed_count=1,
+            failed_video_ids=("broken123",),
+        )
+        with (
+            patch.dict(os.environ, {"DOCI_REVIEW_CYCLE_ID": "cron-123"}),
+            patch.object(config, "PUBLISH_YOUTUBE", True),
+            patch.object(config, "PUBLISH_DRY_RUN", False),
+            patch.object(
+                youtube_review,
+                "load_retry_plan",
+                return_value=("broken123",),
+            ) as load_plan_mock,
+            patch.object(
+                youtube_review,
+                "reconcile_result",
+                return_value=outcome,
+            ) as result_mock,
+            patch.object(youtube_review, "reconcile") as full_reconcile_mock,
+            patch.object(
+                youtube_review,
+                "save_retry_plan",
+            ) as save_plan_mock,
+        ):
+            run_daily._reconcile_youtube_review(spec, True)
+
+        load_plan_mock.assert_called_once_with(spec, "cron-123")
+        result_mock.assert_called_once_with(
+            spec,
+            only_video_ids={"broken123"},
+        )
+        full_reconcile_mock.assert_not_called()
+        save_plan_mock.assert_called_once_with(
+            spec,
+            "cron-123",
+            ("broken123",),
+        )
 
     def test_reconcile_all_is_read_only_during_dry_run(self) -> None:
         with (

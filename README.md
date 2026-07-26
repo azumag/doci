@@ -227,6 +227,7 @@ python -m doci.youtube --auth --analytics --manage --channel youtube-growth
 CLIの非zero終了へ伝搬し、その場合は後続のチャンネルrunでも生成前に再試行する。限定公開アップロードは
 Issue作成より先に `output/<channel>/youtube_review_outbox.jsonl` へ耐久記録されるため、
 Issue作成や後続の履歴保存に失敗しても次の3時間実行で再試行される。
+`保留` は3時間周期に1回だけIssueを再取得し、動画状態もoutbox状態も変更・追記しない。
 
 個別レイヤのテスト:
 ```bash
