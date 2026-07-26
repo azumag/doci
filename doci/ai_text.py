@@ -83,7 +83,33 @@ def _run_anthropic(
         },
     )
     with urllib.request.urlopen(req, timeout=_write_timeout(timeout)) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+        read_timeout = _write_timeout(timeout)
+        if read_timeout is None:
+            payload = resp.read()
+        else:
+            deadline = time.monotonic() + read_timeout
+            chunks: list[bytes] = []
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Anthropic API が時間上限に達しました")
+                for candidate in (
+                    getattr(resp, "fp", None),
+                    getattr(getattr(resp, "fp", None), "raw", None),
+                    getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None),
+                ):
+                    setter = getattr(candidate, "settimeout", None)
+                    if callable(setter):
+                        try:
+                            setter(remaining)
+                        except OSError:
+                            pass
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            payload = b"".join(chunks)
+        data = json.loads(payload.decode("utf-8"))
     return "".join(b.get("text", "") for b in data.get("content", []))
 
 
@@ -390,6 +416,13 @@ def _opencode_cli_model(model: str) -> str:
     return "" if config.OPENCODE_AGENT else model
 
 
+def _opencode_cli_aux_model(model: str, *, explicit: bool) -> str:
+    """補助段は段別モデルを優先し、未指定時だけ既存CLI設定を使う。"""
+    if explicit:
+        return model
+    return _opencode_cli_model(model)
+
+
 def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
     backend = config.TEXT_BACKEND
     model = config.TEXT_MODEL
@@ -651,6 +684,8 @@ def generate(
                 spec,
                 performance_guidance=performance_guidance,
                 backend_override=config.FACTCHECK_BACKEND,
+                model_override=config.FACTCHECK_MODEL,
+                model_explicit_override=config._FACTCHECK_MODEL_EXPLICIT,
                 focus_text=(
                     f"{script.get('title', '')}\n{script.get('narration', '')}"
                 ),

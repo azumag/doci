@@ -113,6 +113,27 @@ class WriteTimeoutTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "時間上限"):
                 ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus", timeout=0.001)
 
+    def test_anthropic_response_has_a_whole_response_deadline(self) -> None:
+        class SlowResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, _amount=-1):
+                time.sleep(0.03)
+                return b"{}"
+
+        with (
+            mock.patch.object(config, "get", return_value="test-key"),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=SlowResponse()
+            ),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "時間上限"):
+                ai_text._run_anthropic("prompt", "claude-sonnet-4-6", timeout=0.001)
+
     def test_opencode_go_deadline_timer_closes_response_and_socket(self) -> None:
         class Closable:
             def __init__(self):

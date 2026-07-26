@@ -827,6 +827,8 @@ def _attempt(
     prompt: str,
     *,
     backend_override: str | None = None,
+    model_override: str | None = None,
+    model_explicit_override: bool | None = None,
     require_youtube_examples: bool = False,
     allowed_source_urls: set[str] | None = None,
     allowed_video_source_urls: set[str] | None = None,
@@ -842,6 +844,12 @@ def _attempt(
     elif backend in {"opencode", "opencode_go"}:
         from . import ai_text
 
+        model = model_override or config.RESEARCH_MODEL
+        model_explicit = (
+            config._RESEARCH_MODEL_EXPLICIT
+            if model_explicit_override is None
+            else model_explicit_override
+        )
         if backend in {"opencode", "opencode_go"} and not allowed_source_urls:
             raise ValueError(
                 "OpenCodeリサーチは、実取得済みの候補URLがないため安全側にスキップします"
@@ -849,13 +857,13 @@ def _attempt(
         if backend == "opencode_go":
             raw = ai_text._run_opencode_go(
                 prompt,
-                ai_text._opencode_go_model(config.RESEARCH_MODEL),
+                ai_text._opencode_go_model(model),
                 timeout=config.script_llm_timeout(),
             )
         else:
             raw = ai_text._run_opencode(
                 prompt,
-                ai_text._opencode_cli_model(config.RESEARCH_MODEL),
+                ai_text._opencode_cli_aux_model(model, explicit=model_explicit),
                 config.OPENCODE_AGENT,
                 timeout=config.script_llm_timeout(),
             )
@@ -1026,6 +1034,8 @@ def web_research(
     spec: ChannelSpec | None = None,
     performance_guidance: str = "",
     backend_override: str | None = None,
+    model_override: str | None = None,
+    model_explicit_override: bool | None = None,
     focus_text: str = "",
     require_youtube_examples: bool | None = None,
 ) -> dict | None:
@@ -1067,6 +1077,11 @@ def web_research(
         for normalized in [_normalized_source_url(str(row.get("url")))]
         if normalized
     }
+    if backend in {"opencode", "opencode_go"} and needs_youtube_examples and not allowed_video_source_urls:
+        _log(
+            "警告: YouTube比較事例を実取得できないため、事例必須のリサーチを安全側にスキップ"
+        )
+        return None
     reference_materials = []
     if backend in {"opencode", "opencode_go"}:
         reference_materials = _search_reference_materials(
@@ -1138,6 +1153,8 @@ def web_research(
             return _attempt(
                 prompt,
                 backend_override=backend,
+                model_override=model_override,
+                model_explicit_override=model_explicit_override,
                 require_youtube_examples=needs_youtube_examples,
                 allowed_source_urls=allowed_source_urls,
                 allowed_video_source_urls=allowed_video_source_urls,

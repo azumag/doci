@@ -86,6 +86,22 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertEqual(result["narration"], "確認後の全文です。")
 
+    def test_opencode_cli_prefers_explicit_factcheck_model_over_global_model(self) -> None:
+        raw = '{"narration": "確認後の全文です。", "changed": false, "issues": []}'
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode"),
+            mock.patch.object(config, "FACTCHECK_MODEL", "opencode-go/factcheck-model"),
+            mock.patch.object(config, "OPENCODE_MODEL", "opencode-go/global-model"),
+            mock.patch.object(config, "_FACTCHECK_MODEL_EXPLICIT", True),
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+        ):
+            factcheck.verify_and_correct(
+                "検証対象のナレーション原文",
+                research={"facts": [{"claim": "確認済み", "source_url": "https://example.org/source"}]},
+            )
+
+        self.assertEqual(run_mock.call_args.args[1], "opencode-go/factcheck-model")
+
     def test_explicit_legacy_claude_factcheck_keeps_opus_default(self) -> None:
         raw = '{"narration": "確認後の全文です。", "changed": false, "issues": []}'
         with (

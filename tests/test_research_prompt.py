@@ -664,6 +664,49 @@ class ResearchPromptTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertEqual(result["facts"][0]["claim"], "確認済み")
 
+    def test_factcheck_research_model_override_is_used(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "台本の主張",
+                "facts": [{"claim": "確認済み", "source_url": "https://example.org/source"}],
+            },
+            ensure_ascii=False,
+        )
+        with mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock:
+            research._attempt(
+                "prompt",
+                backend_override="opencode_go",
+                model_override="opencode-go/factcheck-model",
+                model_explicit_override=True,
+                allowed_source_urls={"https://example.org/source"},
+            )
+
+        self.assertEqual(run_mock.call_args.args[1], "opencode-go/factcheck-model")
+
+    def test_youtube_examples_fail_closed_before_web_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            persona = root / "persona.md"
+            corner_prompt = root / "corner.md"
+            persona.write_text("YouTube制作者向け", encoding="utf-8")
+            corner_prompt.write_text("維持率改善", encoding="utf-8")
+            corner = CornerSpec(
+                key="youtube",
+                label="YouTube攻略",
+                persona_path=persona,
+                corner_path=corner_prompt,
+                voice_key="narrator",
+            )
+            with (
+                mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+                mock.patch.object(research, "_youtube_video_candidates", return_value=[]),
+                mock.patch.object(research, "_search_reference_materials") as search_mock,
+            ):
+                result = research.web_research(corner, [])
+
+        self.assertIsNone(result)
+        search_mock.assert_not_called()
+
     def test_explicit_legacy_claude_research_uses_auxiliary_default_model(self) -> None:
         raw = json.dumps(
             {
