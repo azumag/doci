@@ -125,6 +125,42 @@ class WriteTimeoutTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "時間上限"):
                 ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus", timeout=0.001)
 
+    def test_opencode_go_trickling_bytes_cannot_extend_whole_deadline(self) -> None:
+        class TrickleResponse:
+            def __init__(self):
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+            def __iter__(self):
+                return iter(())
+
+            def read(self, _amount=1):
+                time.sleep(0.001)
+                return b"d" if not self.closed else b""
+
+            def close(self):
+                self.closed = True
+
+        response = TrickleResponse()
+        started = time.monotonic()
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=response
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "時間上限"):
+                ai_text._run_opencode_go(
+                    "prompt", "opencode-go/qwen3.7-plus", timeout=0.01
+                )
+
+        self.assertLess(time.monotonic() - started, 0.2)
+
     def test_anthropic_response_has_a_whole_response_deadline(self) -> None:
         class SlowResponse:
             def __enter__(self):

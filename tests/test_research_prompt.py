@@ -255,6 +255,20 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertTrue(any("維持率改善" in query_url for query_url in query_urls))
         self.assertTrue(all('-"維持率改善"' not in query_url for query_url in query_urls))
 
+    def test_factcheck_reference_search_does_not_exclude_past_topics(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b""
+        with mock.patch.object(research, "_safe_urlopen", return_value=response) as open_mock:
+            research._search_reference_materials(
+                "ファクトチェック",
+                search_hint="今回の台本の主張",
+                past_topics=["五カ年計画の統計"],
+            )
+
+        query_urls = [unquote(call.args[0].full_url) for call in open_mock.call_args_list]
+        self.assertTrue(all('-"五カ年計画"' not in query_url for query_url in query_urls))
+
     def test_reference_search_falls_back_to_wikipedia_when_ddg_has_no_results(self) -> None:
         with (
             mock.patch.object(research, "_safe_urlopen") as open_mock,

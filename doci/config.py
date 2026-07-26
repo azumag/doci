@@ -161,7 +161,11 @@ def _migrate_implicit_opencode_model(
 # 既存 .env に残る Claude の本文モデルは、OPENCODE_MODEL が空なら新しい
 # 既定経路へ移行する。provider-qualified な別モデルなど明示的な不整合は
 # _opencode_go_model() で停止し、意図しないモデル実行を防ぐ。
-if TEXT_BACKEND == "opencode_go" and not OPENCODE_MODEL:
+if (
+    TEXT_BACKEND in {"opencode_go", "opencode"}
+    and not OPENCODE_MODEL
+    and not OPENCODE_AGENT
+):
     TEXT_MODEL = _migrate_implicit_opencode_model(
         TEXT_MODEL, TEXT_BACKEND, False
     )

@@ -353,12 +353,18 @@ def _run_opencode_go(
                 stream = iter(resp)
                 stream_timeout_warning_logged = False
                 fallback_reader: _ResponseReadWorker | None = None
+                response_read = getattr(resp, "read", None)
+                byte_mode = callable(response_read)
+                line_buffer = bytearray()
                 while True:
                     remaining = (
                         deadline_timeout - (time.monotonic() - started)
                         if deadline_timeout is not None
                         else None
                     )
+                    if remaining is not None and remaining <= 0:
+                        deadline_expired.set()
+                        raise RuntimeError("OpenCode Go API が時間上限に達しました")
                     if remaining is not None:
                         remaining = max(0.001, remaining)
                     read_timeout = remaining
@@ -374,7 +380,25 @@ def _run_opencode_go(
                             _log("警告: OpenCode Goストリームのソケット期限を設定できません")
                             stream_timeout_warning_logged = True
                     try:
-                        if fallback_reader is not None:
+                        if b"\n" in line_buffer:
+                            raw_line, _, remainder = line_buffer.partition(b"\n")
+                            line_buffer = bytearray(remainder)
+                            raw = raw_line + b"\n"
+                        elif byte_mode:
+                            if fallback_reader is not None:
+                                chunk = fallback_reader.next(read_timeout)
+                            elif stream_timeout_applied:
+                                chunk = response_read(1)
+                            else:
+                                fallback_reader = _ResponseReadWorker(
+                                    lambda: response_read(1), resp
+                                )
+                                chunk = fallback_reader.next(read_timeout)
+                            if not chunk:
+                                raise StopIteration
+                            line_buffer.extend(chunk)
+                            continue
+                        elif fallback_reader is not None:
                             raw = fallback_reader.next(read_timeout)
                         elif stream_timeout_applied:
                             raw = next(stream)

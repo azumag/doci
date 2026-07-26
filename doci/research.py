@@ -771,9 +771,10 @@ def _search_reference_materials(
     context = list(dict.fromkeys(term for term in terms if term))
     # 直近の題材は検索結果から除外し、同じ上位資料への収束を避ける。
     positive_terms = set(context)
-    for term in _query_terms(" ".join((past_topics or [])[-3:]), 4):
-        if term not in positive_terms:
-            context.append(f'-"{term}"')
+    if not search_hint:
+        for term in _query_terms(" ".join((past_topics or [])[-3:]), 4):
+            if term not in positive_terms:
+                context.append(f'-"{term}"')
     context.extend(("公式", "一次資料"))
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -848,6 +849,7 @@ def _search_reference_materials(
     page_timeout = remaining(8)
     executor: ThreadPoolExecutor | None = None
     futures = {}
+    timed_out = False
     try:
         executor = ThreadPoolExecutor(max_workers=max_workers)
         if search_timeout is None:
@@ -880,6 +882,7 @@ def _search_reference_materials(
             if len(materials) >= 4:
                 break
     except FuturesTimeoutError:
+        timed_out = True
         _log("OpenCode Go資料検索: 本文取得が時間上限に達しました")
     except Exception as exc:  # noqa: BLE001 - submission failure is best effort
         _log(f"OpenCode Go資料検索: 本文取得を開始できませんでした: {type(exc).__name__}")
@@ -887,9 +890,10 @@ def _search_reference_materials(
         for future in futures:
             if not future.done():
                 future.cancel()
-        # 実行中の非daemonワーカーを残さず、期限後も本文取得を回収してから解放する。
+        # 期限切れ後は本文取得を待たず、各ページ側の有限timeoutに任せて生成を解放する。
+        # 通常完了時は回収してから解放し、非daemonワーカーを残さない。
         if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
+            executor.shutdown(wait=not timed_out, cancel_futures=True)
     if rows and not materials:
         _log("OpenCode Go資料検索: 取得できる公開一次資料がありませんでした")
     return materials
