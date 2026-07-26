@@ -150,6 +150,21 @@ class _VisibleTextParser(HTMLParser):
 
     _HIDDEN_TAGS = {"script", "style", "template"}
     _BOILERPLATE_TAGS = {"nav", "header", "footer", "aside", "form"}
+    _VOID_TAGS = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    }
     _BOILERPLATE_MARKERS = re.compile(
         r"(?i)(?:^|[-_ ])(?:nav|menu|sidebar|breadcrumb|cookie|toc|header|footer)(?:$|[-_ ])"
     )
@@ -166,6 +181,8 @@ class _VisibleTextParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
+        if tag in self._VOID_TAGS:
+            return
         values = {key.lower(): value or "" for key, value in attrs}
         hidden = tag in self._HIDDEN_TAGS
         boilerplate = tag in self._BOILERPLATE_TAGS or bool(
@@ -605,7 +622,10 @@ def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
 def _query_terms(text: str, limit: int) -> list[str]:
     """散文を検索エンジン向けの短い語へ縮める（プロンプト本文は送らない）。"""
     cleaned = re.sub(r"[、。！？/（）()：:・,\.\n]+", " ", text)
-    chunks = re.findall(r"[A-Za-z][A-Za-z0-9_-]*|[一-龥々〆ヵヶぁ-んァ-ヶー]{2,}", cleaned)
+    chunks = re.findall(
+        r"[A-Za-z][A-Za-z0-9_-]*|[一-龥々〆ヵヶ]{2,}|[ぁ-んー]{2,}|[ァ-ヶー]{2,}",
+        cleaned,
+    )
     terms: list[str] = []
     for chunk in chunks:
         chunk = chunk[:32]
@@ -638,7 +658,9 @@ def _search_reference_materials(
     wikipedia_rows = _wikipedia_search_results(
         " ".join(dict.fromkeys(term for term in fallback_terms if term))
     )
-    for row in wikipedia_rows:
+    # Wikipediaは一般背景の補助資料として最大2件に抑え、公式ヘルプ等の
+    # 検索結果が常に残るようにする。
+    for row in wikipedia_rows[:2]:
         url = str(row.get("url", ""))
         if not url or url in seen:
             continue

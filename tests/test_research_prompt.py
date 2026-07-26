@@ -29,12 +29,24 @@ class ResearchPromptTest(unittest.TestCase):
     def test_visible_parser_prefers_article_body_over_navigation(self) -> None:
         parser = research._VisibleTextParser()
         parser.feed(
-            "<header>ヘッダー</header><main>"
-            "<nav>メニュー</nav><article>本文の事実</article>"
+            '<img class="header-logo"><header>ヘッダー</header><main>'
+            '<input id="nav-search"><nav>メニュー</nav><article>本文の事実</article>'
             "</main><footer>フッター</footer>"
         )
 
         self.assertEqual(parser.text(), "本文の事実")
+
+    def test_query_terms_uses_words_not_long_japanese_sentence_fragments(self) -> None:
+        terms = research._query_terms(
+            "YouTube制作者の維持率改善を支援する。視聴者の冒頭離脱を確認する。",
+            8,
+        )
+
+        self.assertIn("YouTube", terms)
+        self.assertIn("制作者", terms)
+        self.assertIn("維持率改善", terms)
+        self.assertNotIn("YouTube制作者の維持率改善を支援する", terms)
+        self.assertLessEqual(max(map(len, terms)), 32)
 
     def test_pinned_https_connection_keeps_hostname_for_tls_sni(self) -> None:
         connection = research._PinnedHTTPSConnection(
