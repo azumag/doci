@@ -165,9 +165,16 @@ class _VisibleTextParser(HTMLParser):
         "track",
         "wbr",
     }
-    _BOILERPLATE_MARKERS = re.compile(
-        r"(?i)(?:^|[-_ ])(?:nav|menu|sidebar|breadcrumb|cookie|toc|header|footer)(?:$|[-_ ])"
-    )
+    _BOILERPLATE_TOKENS = {
+        "nav",
+        "menu",
+        "sidebar",
+        "breadcrumb",
+        "cookie",
+        "toc",
+        "header",
+        "footer",
+    }
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -185,10 +192,13 @@ class _VisibleTextParser(HTMLParser):
             return
         values = {key.lower(): value or "" for key, value in attrs}
         hidden = tag in self._HIDDEN_TAGS
+        marker_tokens = {
+            token.casefold()
+            for token in re.split(r"\s+", f"{values.get('id', '')} {values.get('class', '')}")
+            if token
+        }
         boilerplate = tag in self._BOILERPLATE_TAGS or bool(
-            self._BOILERPLATE_MARKERS.search(
-                f"{values.get('id', '')} {values.get('class', '')}"
-            )
+            marker_tokens & self._BOILERPLATE_TOKENS
         )
         preferred = (
             tag in {"main", "article"}
@@ -244,7 +254,11 @@ class _VisibleTextParser(HTMLParser):
             self._fallback_parts.append(data)
 
     def text(self) -> str:
-        self.parts = self._preferred_parts or self._fallback_parts
+        self.parts = (
+            self._preferred_parts
+            if any(part.strip() for part in self._preferred_parts)
+            else self._fallback_parts
+        )
         return " ".join(self.parts)
 
 
@@ -545,6 +559,10 @@ def _sanitize_external(value):  # type: ignore[no-untyped-def]
             if key_text.casefold() in {"url", "source_url"} and isinstance(item, str):
                 # URLは許可ソース照合に再利用するため、html.unescapeで query の & を壊さない。
                 sanitized[key_text] = _sanitize_url(item)
+            elif key_text.casefold() in {"description", "transcript", "transcript_excerpt"} and isinstance(item, str):
+                # YouTube説明欄・字幕は1800字では出典や比較事例が欠けるため、
+                # プロンプト境界だけを無害化し、より広い資料上限を使う。
+                sanitized[key_text] = _sanitize_focus(item)
             else:
                 sanitized[key_text] = _sanitize_external(item)
         return sanitized

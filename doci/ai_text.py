@@ -530,7 +530,15 @@ def generate(
         if draft_total_timeout is not None:
             remaining_budget = draft_total_timeout - (time.monotonic() - draft_started)
             if remaining_budget <= 0:
-                last_err = TimeoutError("執筆段全体の時間上限に達しました")
+                detail = ""
+                if last_err is not None:
+                    detail = (
+                        f" (直前の失敗: {type(last_err).__name__}: "
+                        f"{str(last_err)[:160]})"
+                    )
+                last_err = TimeoutError(
+                    f"執筆段全体の時間上限に達しました{detail}"
+                )
                 break
             per_attempt_timeout = _whole_write_timeout()
             attempt_timeout = (

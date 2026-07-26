@@ -328,7 +328,9 @@ factcheck = false
             patch.object(config, "SCRIPT_DRAFT_TOTAL_TIMEOUT", 0.001),
             patch.object(ai_text, "_dispatch", side_effect=fail_after_budget) as dispatch_mock,
         ):
-            with self.assertRaisesRegex(RuntimeError, "執筆段全体の時間上限"):
+            with self.assertRaisesRegex(
+                RuntimeError, r"執筆段全体の時間上限.*backend unavailable"
+            ):
                 ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
 
         self.assertEqual(dispatch_mock.call_count, 1)

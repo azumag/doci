@@ -36,6 +36,18 @@ class ResearchPromptTest(unittest.TestCase):
 
         self.assertEqual(parser.text(), "本文の事実")
 
+    def test_visible_parser_does_not_drop_body_for_ancestor_wrapper_tokens(self) -> None:
+        parser = research._VisibleTextParser()
+        parser.feed('<body class="cookie-consent-active"><p>本文の事実</p></body>')
+
+        self.assertEqual(parser.text(), "本文の事実")
+
+    def test_visible_parser_uses_fallback_when_preferred_container_is_blank(self) -> None:
+        parser = research._VisibleTextParser()
+        parser.feed("<p>本文の事実</p><main>   </main>")
+
+        self.assertEqual(parser.text(), "本文の事実")
+
     def test_visible_parser_recovers_after_unclosed_boilerplate(self) -> None:
         parser = research._VisibleTextParser()
         parser.feed('<aside class="sidebar"><div><main>本文の事実</main>')
@@ -462,6 +474,17 @@ class ResearchPromptTest(unittest.TestCase):
         sanitized = research._sanitize_external({"source_url": url})
 
         self.assertEqual(sanitized["source_url"], url)
+
+    def test_video_descriptions_and_transcripts_keep_extended_context(self) -> None:
+        sanitized = research._sanitize_external(
+            {
+                "description": "説明" * 1500,
+                "transcript_excerpt": "字幕" * 1500,
+            }
+        )
+
+        self.assertGreater(len(sanitized["description"]), 1800)
+        self.assertGreater(len(sanitized["transcript_excerpt"]), 1800)
 
     def test_non_youtube_source_query_and_port_are_part_of_allowlist_key(self) -> None:
         self.assertEqual(
