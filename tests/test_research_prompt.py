@@ -178,6 +178,28 @@ class ResearchPromptTest(unittest.TestCase):
         )
         excerpt_mock.assert_called_once_with("https://support.google.com/youtube/help")
 
+    def test_reference_materials_backfills_after_empty_leading_pages(self) -> None:
+        links = b"".join(
+            f'<a class="result__a" href="https://support.google.com/youtube/help-{index}">Page {index}</a>'.encode()
+            for index in range(1, 6)
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = links
+        with (
+            mock.patch.object(research, "_wikipedia_search_results", return_value=[]),
+            mock.patch.object(research, "_safe_urlopen", return_value=response),
+            mock.patch.object(
+                research,
+                "_page_excerpt",
+                side_effect=["", "", "", "", "5ページ目の本文"],
+            ) as excerpt_mock,
+        ):
+            materials = research._search_reference_materials("YouTube Studio")
+
+        self.assertEqual(materials[0]["url"], "https://support.google.com/youtube/help-5")
+        self.assertEqual(excerpt_mock.call_count, 5)
+
     def test_reference_materials_respects_single_search_budget(self) -> None:
         with (
             mock.patch.object(research, "_wikipedia_search_results", return_value=[]) as wiki_mock,
@@ -279,6 +301,8 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertFalse(research._is_trusted_source_host("random.edu"))
         self.assertFalse(research._is_trusted_source_host("agency.gov"))
         self.assertTrue(research._is_trusted_source_host("loc.gov"))
+        self.assertTrue(research._is_trusted_source_host("www.stat.go.jp"))
+        self.assertTrue(research._is_trusted_source_host("arxiv.org"))
 
     def test_redirect_target_is_revalidated(self) -> None:
         class FakeResponse:
@@ -441,6 +465,17 @@ class ResearchPromptTest(unittest.TestCase):
             excerpt = research._page_excerpt("https://example.org/source")
 
         self.assertTrue(excerpt.startswith("あ"))
+
+    def test_page_excerpt_keeps_extended_source_context(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.getheader.return_value = "text/html; charset=utf-8"
+        response.read.return_value = ("一次資料" * 2500).encode("utf-8")
+        with mock.patch.object(research, "_safe_urlopen", return_value=response):
+            excerpt = research._page_excerpt("https://example.org/source")
+
+        self.assertGreater(len(excerpt), 1800)
+        self.assertLessEqual(len(excerpt), 6000)
 
     def test_private_hosts_are_rejected_before_fetch(self) -> None:
         for url in (

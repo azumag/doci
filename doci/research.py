@@ -303,6 +303,15 @@ _TRUSTED_SOURCE_HOSTS = (
     "worldbank.org",
     "imf.org",
     "wikidata.org",
+    # 代表的な公的統計・厚生資料と学術一次資料。広いTLDサフィックスではなく
+    # 管理主体が明確な登録ドメインだけを列挙し、検索結果の任意ドメインを許可しない。
+    "stat.go.jp",
+    "e-stat.go.jp",
+    "mhlw.go.jp",
+    "arxiv.org",
+    "nature.com",
+    "nih.gov",
+    "ncbi.nlm.nih.gov",
 )
 
 
@@ -544,6 +553,11 @@ def _sanitize_excerpt(text: str) -> str:
     return _sanitize_text(text)[:1800]
 
 
+def _sanitize_source_excerpt(text: str) -> str:
+    """一次資料本文は事実の根拠を保てる範囲で広く渡す。"""
+    return _sanitize_text(text)[:6000]
+
+
 def _sanitize_focus(text: str) -> str:
     """既存台本を資料検索へ渡す。外部本文より広いが、無制限にはしない。"""
     return _sanitize_text(text)[:12000]
@@ -604,7 +618,7 @@ def _page_excerpt(url: str, timeout: float = 8) -> str:
         return ""
     parser = _VisibleTextParser()
     parser.feed(body)
-    return _sanitize_excerpt(parser.text())
+    return _sanitize_source_excerpt(parser.text())
 
 
 def _decode_response_body(response, body: bytes) -> str:  # type: ignore[no-untyped-def]
@@ -754,6 +768,8 @@ def _search_reference_materials(
         _log(f"OpenCode Go補助検索をスキップ: {type(exc).__name__}")
         search_html = ""
     parser.feed(search_html)
+    # 先頭候補が広告・アクセス拒否・空本文でも後続候補を試せるよう、
+    # 本文取得の候補を4件より多く保持する。ただし投入量は bounded のまま。
     for row in parser.results:
         url = _decode_search_url(row["url"], search_url)
         if not url or url in seen:
@@ -763,7 +779,7 @@ def _search_reference_materials(
             continue
         seen.add(url)
         rows.append({"url": url, "title": row["title"]})
-        if len(rows) >= 4:
+        if len(rows) >= 8:
             break
     if not parser.results and not wikipedia_rows:
         _log("OpenCode Go資料検索: API/補助検索の結果を解析できませんでした")
@@ -775,13 +791,13 @@ def _search_reference_materials(
     if search_timeout is None:
         futures = {
             executor.submit(_page_excerpt, row["url"]): row
-            for row in rows[:4]
+            for row in rows[:8]
         }
     else:
         futures = (
             {
                 executor.submit(_page_excerpt, row["url"], timeout=page_timeout): row
-                for row in rows[:4]
+                for row in rows[:8]
             }
             if page_timeout > 0
             else {}
