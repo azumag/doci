@@ -95,10 +95,21 @@ SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
 RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_DEFAULT_MODEL)
 FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_DEFAULT_MODEL)
 # リサーチ・検証・図表背景はOpenCode Goを既定にする。codex は明示時の選択肢、
-# claude は既存設定を明示した場合だけ使える後方互換経路。
-RESEARCH_BACKEND = get("RESEARCH_BACKEND", "opencode_go")
-FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", "opencode_go")
-CHART_BG_BACKEND = get("CHART_BG_BACKEND", "opencode_go")
+# claude は既存設定を明示した場合だけ使える後方互換経路。補助段の設定を省略した
+# 既存ユーザーが TEXT_BACKEND=anthropic/claude_cli を明示している場合だけ、その
+# 互換経路へ追随させ、それ以外はClaudeへ暗黙に戻らない。
+def _default_aux_backend() -> str:
+    if TEXT_BACKEND in {"anthropic", "claude_cli"}:
+        return "claude"
+    if TEXT_BACKEND == "codex":
+        return "codex"
+    return "opencode_go"
+
+
+_AUX_BACKEND_DEFAULT = _default_aux_backend()
+RESEARCH_BACKEND = get("RESEARCH_BACKEND", _AUX_BACKEND_DEFAULT)
+FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", _AUX_BACKEND_DEFAULT)
+CHART_BG_BACKEND = get("CHART_BG_BACKEND", _AUX_BACKEND_DEFAULT)
 # 構成プラン(plan.make_plan)のバックエンド。値は opencode | codex。直契約MiniMaxを
 # opencode-goゲートウェイ経由でなく codex exec 経由で使えるようにする。
 PLAN_BACKEND = get("PLAN_BACKEND", "opencode")

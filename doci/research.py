@@ -146,24 +146,72 @@ class _SearchResultParser(HTMLParser):
 
 
 class _VisibleTextParser(HTMLParser):
-    """HTMLを途中で切ってもscript/styleの内容を本文へ混ぜない。"""
+    """本文コンテナを優先し、ナビゲーションを資料本文へ混ぜない。"""
+
+    _HIDDEN_TAGS = {"script", "style", "template"}
+    _BOILERPLATE_TAGS = {"nav", "header", "footer", "aside", "form"}
+    _BOILERPLATE_MARKERS = re.compile(
+        r"(?i)(?:^|[-_ ])(?:nav|menu|sidebar|breadcrumb|cookie|toc|header|footer)(?:$|[-_ ])"
+    )
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self._preferred_parts: list[str] = []
+        self._fallback_parts: list[str] = []
         self._hidden_depth = 0
+        self._boilerplate_depth = 0
+        self._preferred_depth = 0
+        self._element_flags: list[tuple[str, bool, bool, bool]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() in {"script", "style", "template"}:
+        tag = tag.lower()
+        values = {key.lower(): value or "" for key, value in attrs}
+        hidden = tag in self._HIDDEN_TAGS
+        boilerplate = tag in self._BOILERPLATE_TAGS or bool(
+            self._BOILERPLATE_MARKERS.search(
+                f"{values.get('id', '')} {values.get('class', '')}"
+            )
+        )
+        preferred = (
+            tag in {"main", "article"}
+            or values.get("id") in {"mw-content-text", "content"}
+            or "article-body" in values.get("class", "").split()
+        )
+        self._element_flags.append((tag, hidden, boilerplate, preferred))
+        if hidden:
             self._hidden_depth += 1
+        if boilerplate:
+            self._boilerplate_depth += 1
+        if preferred:
+            self._preferred_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in {"script", "style", "template"} and self._hidden_depth:
-            self._hidden_depth -= 1
+        tag = tag.lower()
+        for index in range(len(self._element_flags) - 1, -1, -1):
+            element_tag, hidden, boilerplate, preferred = self._element_flags[index]
+            if element_tag != tag:
+                continue
+            del self._element_flags[index]
+            if hidden and self._hidden_depth:
+                self._hidden_depth -= 1
+            if boilerplate and self._boilerplate_depth:
+                self._boilerplate_depth -= 1
+            if preferred and self._preferred_depth:
+                self._preferred_depth -= 1
+            break
 
     def handle_data(self, data: str) -> None:
-        if not self._hidden_depth:
-            self.parts.append(data)
+        if self._hidden_depth or self._boilerplate_depth:
+            return
+        if self._preferred_depth:
+            self._preferred_parts.append(data)
+        else:
+            self._fallback_parts.append(data)
+
+    def text(self) -> str:
+        self.parts = self._preferred_parts or self._fallback_parts
+        return " ".join(self.parts)
 
 
 def _decode_search_url(
@@ -245,7 +293,21 @@ def _resolve_addresses(
 def _public_target(
     url: str, *, trusted_only: bool, deadline: float | None = None
 ) -> tuple[str, int, str]:
-    """URLを検証し、接続に使う単一の公開IPへ解決する。"""
+    """URLを検証し、接続に使う最初の公開IPへ解決する（後方互換API）。"""
+    hostname, port, addresses = _public_targets(
+        url, trusted_only=trusted_only, deadline=deadline
+    )
+    return hostname, port, addresses[0]
+
+
+def _public_targets(
+    url: str, *, trusted_only: bool, deadline: float | None = None
+) -> tuple[str, int, list[str]]:
+    """URLを検証し、利用可能な全公開IPを同一DNS回答から返す。
+
+    接続側がAAAAだけを選んで失敗する環境でも、同じ検証済み回答のAレコードへ
+    フォールバックできるよう、名前解決を1回だけ行ってIPを固定する。
+    """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("HTTP(S)以外の資料URLを拒否しました")
@@ -268,11 +330,17 @@ def _public_target(
     infos = _resolve_addresses(hostname, port, dns_timeout)
     if not infos:
         raise ValueError("資料URLのDNS解決が時間内に完了しませんでした")
+    addresses: list[str] = []
     for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_global:
-            return hostname, port, str(ip)
-    raise ValueError("資料URLの接続先に公開IPがありません")
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except (IndexError, KeyError, ValueError, TypeError):
+            continue
+        if ip.is_global and str(ip) not in addresses:
+            addresses.append(str(ip))
+    if not addresses:
+        raise ValueError("資料URLの接続先に公開IPがありません")
+    return hostname, port, addresses
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
@@ -328,11 +396,14 @@ class _PinnedResponse:
     def __enter__(self) -> "_PinnedResponse":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+    def close(self) -> None:
         try:
             self._response.close()
         finally:
             self._connection.close()
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+        self.close()
 
 
 def _safe_urlopen(request: Request, timeout: float, *, trusted_only: bool = False):
@@ -342,7 +413,7 @@ def _safe_urlopen(request: Request, timeout: float, *, trusted_only: bool = Fals
     for _ in range(5):
         if time.monotonic() >= deadline:
             raise TimeoutError("資料取得が時間上限に達しました")
-        hostname, port, ip = _public_target(
+        hostname, port, ips = _public_targets(
             current_url, trusted_only=trusted_only, deadline=deadline
         )
         parsed = urlparse(current_url)
@@ -350,34 +421,57 @@ def _safe_urlopen(request: Request, timeout: float, *, trusted_only: bool = Fals
         if parsed.query:
             path += "?" + parsed.query
         connection_timeout = min(timeout, max(0.1, deadline - time.monotonic()))
-        if parsed.scheme == "https":
-            connection = _PinnedHTTPSConnection(hostname, ip, port, connection_timeout)
-        else:
-            connection = _PinnedHTTPConnection(hostname, ip, port, connection_timeout)
         headers = dict(request.header_items())
         headers["Host"] = parsed.netloc
-        connection.request(request.get_method(), path, headers=headers)
-        response = connection.getresponse()
-        if 300 <= response.status < 400 and response.getheader("Location"):
-            next_url = urljoin(current_url, response.getheader("Location") or "")
-            response.close()
-            connection.close()
-            current_url = next_url
-            continue
-        content_type = (response.getheader("Content-Type", "") or "").lower()
-        if not 200 <= response.status < 300:
-            response.close()
-            connection.close()
-            raise ValueError(f"資料URLのHTTPステータスを拒否しました: {response.status}")
-        if not (
-            content_type.startswith("text/")
-            or content_type.startswith("application/xhtml+xml")
-            or content_type.startswith("application/json")
-        ):
-            response.close()
-            connection.close()
-            raise ValueError("HTML/テキスト以外の資料URLを拒否しました")
-        return _PinnedResponse(connection, response, current_url, deadline)
+        last_connect_error: Exception | None = None
+        for ip in ips:
+            if parsed.scheme == "https":
+                connection = _PinnedHTTPSConnection(hostname, ip, port, connection_timeout)
+            else:
+                connection = _PinnedHTTPConnection(hostname, ip, port, connection_timeout)
+            try:
+                connection.request(request.get_method(), path, headers=headers)
+                response = connection.getresponse()
+            except (OSError, TimeoutError) as exc:
+                last_connect_error = exc
+                connection.close()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("資料取得が時間上限に達しました") from exc
+                continue
+            except BaseException:
+                connection.close()
+                raise
+            try:
+                if 300 <= response.status < 400 and response.getheader("Location"):
+                    next_url = urljoin(current_url, response.getheader("Location") or "")
+                    response.close()
+                    connection.close()
+                    current_url = next_url
+                    break
+                content_type = (response.getheader("Content-Type", "") or "").lower()
+                if not 200 <= response.status < 300:
+                    raise ValueError(
+                        f"資料URLのHTTPステータスを拒否しました: {response.status}"
+                    )
+                if not (
+                    content_type.startswith("text/")
+                    or content_type.startswith("application/xhtml+xml")
+                    or content_type.startswith("application/json")
+                ):
+                    raise ValueError("HTML/テキスト以外の資料URLを拒否しました")
+                return _PinnedResponse(connection, response, current_url, deadline)
+            except BaseException:
+                try:
+                    response.close()
+                finally:
+                    connection.close()
+                raise
+        else:
+            if last_connect_error is not None:
+                raise last_connect_error
+            raise OSError("資料URLの公開IPへ接続できませんでした")
+        # リダイレクトは新しいURLを再解決・再固定してから続行する。
+        continue
     raise ValueError("資料URLのリダイレクト回数が上限を超えました")
 
 
@@ -447,8 +541,7 @@ def _page_excerpt(url: str) -> str:
         return ""
     parser = _VisibleTextParser()
     parser.feed(body)
-    text = " ".join(parser.parts)
-    return _sanitize_excerpt(text)
+    return _sanitize_excerpt(parser.text())
 
 
 def _decode_response_body(response, body: bytes) -> str:  # type: ignore[no-untyped-def]
@@ -539,6 +632,24 @@ def _search_reference_materials(
     for term in _query_terms(" ".join((past_topics or [])[-3:]), 4):
         context.append(f'-"{term}"')
     context.extend(("公式", "一次資料"))
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    fallback_terms = [label, *_query_terms(search_hint, 2)]
+    wikipedia_rows = _wikipedia_search_results(
+        " ".join(dict.fromkeys(term for term in fallback_terms if term))
+    )
+    for row in wikipedia_rows:
+        url = str(row.get("url", ""))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        rows.append({"url": url, "title": str(row.get("title", ""))})
+    if rows:
+        _log("OpenCode Go資料検索: Wikipedia APIを主経路として採用")
+
+    # WikipediaだけではYouTube運用や公式ヘルプの一次資料を拾えないため、
+    # 不足分を検索結果で補う。検索HTMLが制限されても主経路のAPI結果は残る。
+    parser = _SearchResultParser()
     search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
     try:
         with _safe_urlopen(
@@ -547,17 +658,11 @@ def _search_reference_materials(
             trusted_only=True,
         ) as response:
             search_html = _decode_response_body(response, response.read(180000))
-    except Exception as exc:  # noqa: BLE001 - research falls back safely when search is unavailable
-        _log(f"OpenCode Go資料検索をスキップ: {type(exc).__name__}")
+    except Exception as exc:  # noqa: BLE001 - API主経路を残して検索は補助扱い
+        _log(f"OpenCode Go補助検索をスキップ: {type(exc).__name__}")
         search_html = ""
-    parser = _SearchResultParser()
     parser.feed(search_html)
-    if not parser.results:
-        _log("OpenCode Go資料検索: 検索結果を解析できませんでした")
-    rows: list[dict[str, str]] = []
-    seen: set[str] = set()
-    search_rows = parser.results
-    for row in search_rows:
+    for row in parser.results:
         url = _decode_search_url(row["url"], search_url)
         if not url or url in seen:
             continue
@@ -568,11 +673,8 @@ def _search_reference_materials(
         rows.append({"url": url, "title": row["title"]})
         if len(rows) >= 4:
             break
-    if not rows:
-        fallback_terms = [label, *_query_terms(search_hint, 2)]
-        rows = _wikipedia_search_results(" ".join(dict.fromkeys(term for term in fallback_terms if term)))
-        if rows:
-            _log("OpenCode Go資料検索: DuckDuckGo結果なし→Wikipediaへフォールバック")
+    if not parser.results and not wikipedia_rows:
+        _log("OpenCode Go資料検索: API/補助検索の結果を解析できませんでした")
     materials: list[dict[str, str]] = []
     # 取得は同期パイプライン上で行うが、最大8件を並列化して全体の待ち時間を
     # 検索12秒 + 本文取得の目安9秒以内に抑える（本文取得は各8秒の総予算）。
@@ -603,7 +705,7 @@ def _search_reference_materials(
                 future.cancel()
         # 本文取得はbest effort。期限後に残った通信を待たず、生成パイプラインを解放する。
         executor.shutdown(wait=False, cancel_futures=True)
-    if parser.results and not materials:
+    if rows and not materials:
         _log("OpenCode Go資料検索: 取得できる公開一次資料がありませんでした")
     return materials
 

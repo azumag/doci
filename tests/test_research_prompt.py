@@ -26,6 +26,103 @@ class ResearchPromptTest(unittest.TestCase):
             ],
         )
 
+    def test_visible_parser_prefers_article_body_over_navigation(self) -> None:
+        parser = research._VisibleTextParser()
+        parser.feed(
+            "<header>ヘッダー</header><main>"
+            "<nav>メニュー</nav><article>本文の事実</article>"
+            "</main><footer>フッター</footer>"
+        )
+
+        self.assertEqual(parser.text(), "本文の事実")
+
+    def test_pinned_https_connection_keeps_hostname_for_tls_sni(self) -> None:
+        connection = research._PinnedHTTPSConnection(
+            "support.google.com", "93.184.216.34", 443, 3
+        )
+        sock = mock.sentinel.socket
+        wrapped = mock.sentinel.wrapped
+        with (
+            mock.patch.object(research.socket, "create_connection", return_value=sock) as connect_mock,
+            mock.patch.object(connection._context, "wrap_socket", return_value=wrapped) as wrap_mock,
+        ):
+            connection.connect()
+
+        connect_mock.assert_called_once_with(("93.184.216.34", 443), 3)
+        wrap_mock.assert_called_once_with(sock, server_hostname="support.google.com")
+        self.assertIs(connection.sock, wrapped)
+
+    def test_pinned_response_reads_in_chunks_and_enforces_deadline(self) -> None:
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.timeouts: list[float] = []
+
+            def settimeout(self, value: float) -> None:
+                self.timeouts.append(value)
+
+        class FakeResponse:
+            def __init__(self) -> None:
+                self.chunks = iter((b"abc", b"defg", b""))
+
+            def read(self, amount: int) -> bytes:
+                return next(self.chunks)
+
+            def close(self) -> None:
+                return None
+
+            def getheader(self, name: str, default=None):  # type: ignore[no-untyped-def]
+                return default
+
+        sock = FakeSocket()
+        connection = mock.Mock(sock=sock)
+        response = research._PinnedResponse(
+            connection, FakeResponse(), "https://example.org/source", research.time.monotonic() + 1
+        )
+
+        self.assertEqual(response.read(7), b"abcdefg")
+        self.assertTrue(sock.timeouts)
+        with self.assertRaises(TimeoutError):
+            research._PinnedResponse(
+                connection, FakeResponse(), "https://example.org/source", research.time.monotonic() - 1
+            ).read(1)
+
+    def test_safe_urlopen_falls_back_to_another_public_address(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def getheader(self, name: str, default=None):  # type: ignore[no-untyped-def]
+                return "text/html; charset=utf-8" if name == "Content-Type" else default
+
+            def close(self) -> None:
+                return None
+
+        first = mock.Mock(sock=None)
+        first.request.side_effect = OSError("IPv6 route unavailable")
+        second = mock.Mock(sock=None)
+        second.getresponse.return_value = FakeResponse()
+        with (
+            mock.patch.object(
+                research,
+                "_public_targets",
+                return_value=("support.google.com", 443, ["2001:db8::1", "93.184.216.34"]),
+            ),
+            mock.patch.object(
+                research,
+                "_PinnedHTTPSConnection",
+                side_effect=[first, second],
+            ) as connection_mock,
+        ):
+            response = research._safe_urlopen(
+                research.Request("https://support.google.com/youtube/help"),
+                timeout=3,
+                trusted_only=True,
+            )
+
+        self.assertIsInstance(response, research._PinnedResponse)
+        first.close.assert_called_once()
+        self.assertEqual(connection_mock.call_count, 2)
+        response.close()
+
     def test_reference_materials_pipeline_accepts_trusted_subdomains(self) -> None:
         response = mock.MagicMock()
         response.__enter__.return_value = response
@@ -136,9 +233,9 @@ class ResearchPromptTest(unittest.TestCase):
         with (
             mock.patch.object(
                 research,
-                "_public_target",
+                "_public_targets",
                 side_effect=[
-                    ("www.youtube.com", 443, "93.184.216.34"),
+                    ("www.youtube.com", 443, ["93.184.216.34"]),
                     ValueError("ローカル資料URLを拒否しました"),
                 ],
             ),
@@ -186,8 +283,8 @@ class ResearchPromptTest(unittest.TestCase):
                 with (
                     mock.patch.object(
                         research,
-                        "_public_target",
-                        return_value=("support.google.com", 443, "93.184.216.34"),
+                        "_public_targets",
+                        return_value=("support.google.com", 443, ["93.184.216.34"]),
                     ),
                     mock.patch.object(
                         research,

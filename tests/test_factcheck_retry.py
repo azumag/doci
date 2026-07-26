@@ -82,11 +82,16 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         with (
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
             mock.patch("doci.ai_text._run_opencode_go") as run_mock,
+            mock.patch.object(factcheck, "_log") as log_mock,
         ):
             result = factcheck.verify_and_correct("原文を維持する")
 
         run_mock.assert_not_called()
         self.assertIsNone(result)
+        log_mock.assert_called_once_with(
+            "OpenCode Goファクトチェック: 検証済み資料がないため原文を維持"
+            "（検証済み資料を取得できませんでした）"
+        )
 
 
 if __name__ == "__main__":

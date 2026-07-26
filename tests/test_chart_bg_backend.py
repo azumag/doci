@@ -65,6 +65,18 @@ class SelectCodexBackendTest(unittest.TestCase):
         self.assertEqual(result[2], {"query": "テストテーマ", "media": "image"})
 
 
+class AuxiliaryBackendDefaultTest(unittest.TestCase):
+    def test_explicit_legacy_text_backend_keeps_auxiliary_compatibility(self) -> None:
+        with mock.patch.object(config, "TEXT_BACKEND", "anthropic"):
+            self.assertEqual(config._default_aux_backend(), "claude")
+        with mock.patch.object(config, "TEXT_BACKEND", "claude_cli"):
+            self.assertEqual(config._default_aux_backend(), "claude")
+
+    def test_nonlegacy_text_backend_does_not_implicitly_select_claude(self) -> None:
+        with mock.patch.object(config, "TEXT_BACKEND", "opencode_go"):
+            self.assertEqual(config._default_aux_backend(), "opencode_go")
+
+
 class SelectOpenCodeBackendTest(unittest.TestCase):
     def setUp(self) -> None:
         self._orig_backend = config.CHART_BG_BACKEND

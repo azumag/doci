@@ -112,7 +112,7 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
     if backend == "opencode_go" and not (research and research.get("facts")):
         _log(
             "OpenCode Goファクトチェック: 検証済み資料がないため原文を維持"
-            "（リサーチが無効、または資料取得に失敗しました）"
+            "（検証済み資料を取得できませんでした）"
         )
         return None
     prompt = _PROMPT.format(
