@@ -162,9 +162,30 @@ def _run_opencode_go(
                 deadline_timer = threading.Timer(remaining, expire_stream)
                 deadline_timer.daemon = True
                 deadline_timer.start()
+                # HTTPResponse の socket timeoutを短いポーリング間隔にし、
+                # 断続的に届くストリームでも期限をループ内で検知できるようにする。
+                # fake responseやsocketを公開しない実装では何もしない。
+                stream_socket = getattr(
+                    getattr(getattr(resp, "fp", None), "raw", None), "_sock", None
+                )
+                if stream_socket is not None:
+                    try:
+                        stream_socket.settimeout(max(0.001, min(1.0, remaining)))
+                    except (AttributeError, OSError):
+                        pass
             try:
                 stream = iter(resp)
-                for raw in stream:
+                while True:
+                    if deadline_expired.is_set() and not received_terminal:
+                        raise RuntimeError("OpenCode Go API が時間上限に達しました")
+                    try:
+                        raw = next(stream)
+                    except StopIteration:
+                        break
+                    except TimeoutError as exc:
+                        if deadline_expired.is_set() and not received_terminal:
+                            raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
+                        continue
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -385,10 +406,19 @@ def generate(
     )
     # 1) 前段リサーチ（issue #6）: 題材選定＋Web裏取り。失敗してもリサーチ無しで続行。
     research = None
-    if spec.pipeline_get("research", config.SCRIPT_RESEARCH):
+    research_enabled = spec.pipeline_get("research", config.SCRIPT_RESEARCH)
+    factcheck_enabled = spec.pipeline_get("factcheck", config.SCRIPT_FACTCHECK)
+    # OpenCode Goのファクトチェックは、実取得済み資料なしでは安全側に停止する。
+    # ファクトチェックだけを有効にした設定でも、ここで同じ資料取得を行うことで
+    # 「設定上は有効なのに常に原文維持」というデッド設定にしない。
+    research_for_factcheck = (
+        factcheck_enabled and config.FACTCHECK_BACKEND == "opencode_go"
+    )
+    if research_enabled or research_for_factcheck:
         from . import research as research_mod
 
-        _log(f"前段リサーチ ({config.RESEARCH_BACKEND}+Web)…")
+        phase = "前段リサーチ" if research_enabled else "ファクトチェック用リサーチ"
+        _log(f"{phase} ({config.RESEARCH_BACKEND}+Web)…")
         try:
             research = research_mod.web_research(
                 corner,
@@ -477,7 +507,7 @@ def generate(
             _log(f"図表を {used} シーンに配置")
 
     # 3) 後段ファクトチェック（issue #6）: 別モデル＋Web検証で narration を自動修正。
-    if spec.pipeline_get("factcheck", config.SCRIPT_FACTCHECK):
+    if factcheck_enabled:
         from . import factcheck
 
         _log(f"後段ファクトチェック ({config.FACTCHECK_BACKEND}+Web)…")

@@ -65,6 +65,25 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertIn("YouTube", query_url)
         self.assertNotIn("直近の題材", query_url)
 
+    def test_reference_search_falls_back_to_wikipedia_when_ddg_has_no_results(self) -> None:
+        with (
+            mock.patch.object(research, "_safe_urlopen") as open_mock,
+            mock.patch.object(
+                research,
+                "_wikipedia_search_results",
+                return_value=[{"url": "https://ja.wikipedia.org/wiki/題材", "title": "題材"}],
+            ) as wikipedia_mock,
+            mock.patch.object(research, "_page_excerpt", return_value="本文"),
+        ):
+            ddg_response = mock.MagicMock()
+            ddg_response.__enter__.return_value = ddg_response
+            ddg_response.read.return_value = b""
+            open_mock.return_value = ddg_response
+            materials = research._search_reference_materials("歴史")
+
+        wikipedia_mock.assert_called_once()
+        self.assertEqual(materials[0]["url"], "https://ja.wikipedia.org/wiki/題材")
+
     def test_untrusted_source_host_is_rejected(self) -> None:
         self.assertFalse(research._is_trusted_source_host("example.com"))
         self.assertFalse(research._is_trusted_source_host("evil.wikipedia.org.example.com"))
@@ -261,6 +280,12 @@ class ResearchPromptTest(unittest.TestCase):
             research._normalized_source_url(
                 "https://ja.wikipedia.org/wiki/%E5%85%B1%E7%94%A3%E4%B8%BB%E7%BE%A9"
             ),
+        )
+        self.assertEqual(
+            research._normalized_source_url(
+                "https://example.org/doc?utm_source=feed&a=1&fbclid=tracking"
+            ),
+            "https://example.org/doc?a=1",
         )
 
     def test_unretrieved_youtube_examples_are_rejected_for_opencode_go(self) -> None:

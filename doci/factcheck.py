@@ -68,7 +68,7 @@ def _attempt(prompt: str, backend: str) -> dict:
         raw = llm.run_codex(
             prompt,
             config.CODEX_MODEL,
-            timeout=config.SCRIPT_LLM_TIMEOUT,
+            timeout=config.script_llm_timeout(),
             min_web_fetches=1,
         )
     elif backend == "opencode_go":
@@ -84,7 +84,7 @@ def _attempt(prompt: str, backend: str) -> dict:
             prompt,
             config.legacy_claude_model(config.FACTCHECK_MODEL),
             allowed_tools=["WebSearch", "WebFetch"],
-            timeout=config.SCRIPT_LLM_TIMEOUT,
+            timeout=config.script_llm_timeout(),
         )
     else:
         raise ValueError(f"未対応のFACTCHECK_BACKENDです: {backend}")

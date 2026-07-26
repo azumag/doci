@@ -70,8 +70,11 @@ class WriteTimeoutTest(unittest.TestCase):
                 return None
 
             def __iter__(self):
-                time.sleep(0.03)
-                return iter(())
+                def delayed_lines():
+                    time.sleep(0.03)
+                    yield b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"late"}}\n'
+
+                return delayed_lines()
 
             def close(self):
                 return None

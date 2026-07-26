@@ -108,7 +108,7 @@ def _parse_codex_events(stdout: str) -> tuple[str, int]:
     return last_message, fetch_count
 
 
-def run_codex(prompt: str, model: str, timeout: int = 600, min_web_fetches: int = 1) -> str:
+def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetches: int = 1) -> str:
     """codex exec (--json, MiniMax等) をヘッドレスで実行し、最終 agent_message の text を返す。
 
     隔離 CODEX_HOME(config.CODEX_HOME)を毎回用意して実行する（ユーザーの ~/.codex は不使用）。

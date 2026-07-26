@@ -402,6 +402,43 @@ def _page_excerpt(url: str) -> str:
     return _sanitize_excerpt(text)
 
 
+def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
+    """DDGが利用できない場合の軽量な検索フォールバック。"""
+    params = urlencode(
+        {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "srlimit": 4,
+            "format": "json",
+            "utf8": 1,
+        }
+    )
+    url = f"https://ja.wikipedia.org/w/api.php?{params}"
+    try:
+        with _safe_urlopen(
+            Request(url, headers={"User-Agent": "doci/1.0"}),
+            timeout=8,
+            trusted_only=True,
+        ) as response:
+            data = json.loads(response.read(120000).decode("utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001 - fallback is best effort
+        _log(f"Wikipedia資料検索をスキップ: {type(exc).__name__}")
+        return []
+    rows: list[dict[str, str]] = []
+    for item in (data.get("query", {}).get("search", []) if isinstance(data, dict) else []):
+        if not isinstance(item, dict) or not item.get("title"):
+            continue
+        title = str(item["title"])
+        rows.append(
+            {
+                "url": "https://ja.wikipedia.org/wiki/" + quote(title.replace(" ", "_"), safe=""),
+                "title": title,
+            }
+        )
+    return rows
+
+
 def _search_reference_materials(
     label: str,
     channel_guidance: str = "",
@@ -429,7 +466,8 @@ def _search_reference_materials(
         _log("OpenCode Go資料検索: 検索結果を解析できませんでした")
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
-    for row in parser.results:
+    search_rows = parser.results
+    for row in search_rows:
         url = _decode_search_url(row["url"], search_url)
         if not url or url in seen:
             continue
@@ -440,6 +478,10 @@ def _search_reference_materials(
         rows.append({"url": url, "title": row["title"]})
         if len(rows) >= 4:
             break
+    if not rows:
+        rows = _wikipedia_search_results(" ".join(context))
+        if rows:
+            _log("OpenCode Go資料検索: DuckDuckGo結果なし→Wikipediaへフォールバック")
     materials: list[dict[str, str]] = []
     # 取得は同期パイプライン上で行うが、最大8件を並列化して全体の待ち時間を
     # 検索12秒 + 本文取得の目安9秒以内に抑える（本文取得は各8秒の総予算）。
@@ -490,7 +532,7 @@ def _attempt(
         raw = llm.run_codex(
             prompt,
             config.CODEX_MODEL,
-            timeout=config.SCRIPT_LLM_TIMEOUT,
+            timeout=config.script_llm_timeout(),
             min_web_fetches=2,
         )
     elif backend == "opencode_go":
@@ -510,7 +552,7 @@ def _attempt(
             prompt,
             config.legacy_claude_model(config.RESEARCH_MODEL),
             allowed_tools=["WebSearch", "WebFetch"],
-            timeout=config.SCRIPT_LLM_TIMEOUT,
+            timeout=config.script_llm_timeout(),
         )
     else:
         raise ValueError(f"未対応のRESEARCH_BACKENDです: {backend}")
@@ -603,7 +645,16 @@ def _normalized_source_url(url: str) -> str:
         return ""
     default_port = 443 if parsed.scheme.lower() == "https" else 80
     netloc = host if not port or port == default_port else f"{host}:{port}"
-    query = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()), doseq=True)
+    query_values = parse_qs(parsed.query, keep_blank_values=True)
+    query = urlencode(
+        sorted(
+            (key, values)
+            for key, values in query_values.items()
+            if not key.casefold().startswith("utm_")
+            and key.casefold() not in {"fbclid", "gclid", "dclid", "mc_cid", "mc_eid"}
+        ),
+        doseq=True,
+    )
     path = quote(
         unquote(parsed.path),
         safe="/:@-._~!$&'()*+,;=",
