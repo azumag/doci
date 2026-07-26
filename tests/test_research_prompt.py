@@ -51,7 +51,7 @@ class ResearchPromptTest(unittest.TestCase):
         )
         excerpt_mock.assert_called_once_with("https://support.google.com/youtube/help")
 
-    def test_reference_search_includes_guidance_not_past_topics(self) -> None:
+    def test_reference_search_includes_guidance_and_recent_topics(self) -> None:
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.return_value = b""
@@ -59,11 +59,12 @@ class ResearchPromptTest(unittest.TestCase):
             research._search_reference_materials(
                 "ショート攻略",
                 channel_guidance="YouTube制作者の維持率改善",
+                past_topics=["直近の題材"],
             )
 
         query_url = unquote(open_mock.call_args.args[0].full_url)
         self.assertIn("YouTube", query_url)
-        self.assertNotIn("直近の題材", query_url)
+        self.assertIn("直近の題材", query_url)
 
     def test_reference_search_falls_back_to_wikipedia_when_ddg_has_no_results(self) -> None:
         with (

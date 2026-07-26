@@ -442,12 +442,16 @@ def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
 def _search_reference_materials(
     label: str,
     channel_guidance: str = "",
+    past_topics: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
     context = [label]
     guidance = " ".join(channel_guidance.split())[:160]
     if guidance:
         context.append(guidance)
+    recent_topics = [topic.strip() for topic in (past_topics or [])[-5:] if topic.strip()]
+    if recent_topics:
+        context.append("避ける題材 " + "、".join(recent_topics)[:400])
     context.append("公式 一次資料")
     search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
     try:
@@ -523,11 +527,12 @@ def _log(msg: str) -> None:
 def _attempt(
     prompt: str,
     *,
+    backend_override: str | None = None,
     require_youtube_examples: bool = False,
     allowed_source_urls: set[str] | None = None,
     allowed_video_source_urls: set[str] | None = None,
 ) -> dict:
-    backend = config.RESEARCH_BACKEND
+    backend = backend_override or config.RESEARCH_BACKEND
     if backend == "codex":
         raw = llm.run_codex(
             prompt,
@@ -713,10 +718,11 @@ def web_research(
     past_topics: list[str],
     spec: ChannelSpec | None = None,
     performance_guidance: str = "",
+    backend_override: str | None = None,
 ) -> dict | None:
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
-    backend = config.RESEARCH_BACKEND
+    backend = backend_override or config.RESEARCH_BACKEND
     guidance_parts = []
     for path in (corner.persona_path, corner.corner_path):
         try:
@@ -750,6 +756,7 @@ def web_research(
         _search_reference_materials(
             corner.label,
             channel_guidance=channel_guidance,
+            past_topics=past_topics,
         )
         if backend == "opencode_go"
         else []
@@ -793,6 +800,7 @@ def web_research(
         try:
             return _attempt(
                 prompt,
+                backend_override=backend,
                 require_youtube_examples=needs_youtube_examples,
                 allowed_source_urls=allowed_source_urls,
                 allowed_video_source_urls=allowed_video_source_urls,

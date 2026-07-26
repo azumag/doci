@@ -162,17 +162,6 @@ def _run_opencode_go(
                 deadline_timer = threading.Timer(remaining, expire_stream)
                 deadline_timer.daemon = True
                 deadline_timer.start()
-                # HTTPResponse の socket timeoutを短いポーリング間隔にし、
-                # 断続的に届くストリームでも期限をループ内で検知できるようにする。
-                # fake responseやsocketを公開しない実装では何もしない。
-                stream_socket = getattr(
-                    getattr(getattr(resp, "fp", None), "raw", None), "_sock", None
-                )
-                if stream_socket is not None:
-                    try:
-                        stream_socket.settimeout(max(0.001, min(1.0, remaining)))
-                    except (AttributeError, OSError):
-                        pass
             try:
                 stream = iter(resp)
                 while True:
@@ -182,10 +171,6 @@ def _run_opencode_go(
                         raw = next(stream)
                     except StopIteration:
                         break
-                    except TimeoutError as exc:
-                        if deadline_expired.is_set() and not received_terminal:
-                            raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
-                        continue
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -303,8 +288,13 @@ def _dispatch(prompt: str) -> str:
     if backend == "opencode_go":
         return _run_opencode_go(prompt, config.OPENCODE_MODEL or model)
     if backend == "opencode":
+        # agent-only の既存設定では TEXT_MODEL の既定値を混ぜず、
+        # _run_opencode 側に空モデルを渡して --agent を有効にする。
+        opencode_model = config.OPENCODE_MODEL
+        if not opencode_model and not config.OPENCODE_AGENT:
+            opencode_model = model
         return _run_opencode(
-            prompt, config.OPENCODE_MODEL or model, config.OPENCODE_AGENT
+            prompt, opencode_model, config.OPENCODE_AGENT
         )
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")
 
@@ -408,17 +398,10 @@ def generate(
     research = None
     research_enabled = spec.pipeline_get("research", config.SCRIPT_RESEARCH)
     factcheck_enabled = spec.pipeline_get("factcheck", config.SCRIPT_FACTCHECK)
-    # OpenCode Goのファクトチェックは、実取得済み資料なしでは安全側に停止する。
-    # ファクトチェックだけを有効にした設定でも、ここで同じ資料取得を行うことで
-    # 「設定上は有効なのに常に原文維持」というデッド設定にしない。
-    research_for_factcheck = (
-        factcheck_enabled and config.FACTCHECK_BACKEND == "opencode_go"
-    )
-    if research_enabled or research_for_factcheck:
+    if research_enabled:
         from . import research as research_mod
 
-        phase = "前段リサーチ" if research_enabled else "ファクトチェック用リサーチ"
-        _log(f"{phase} ({config.RESEARCH_BACKEND}+Web)…")
+        _log(f"前段リサーチ ({config.RESEARCH_BACKEND}+Web)…")
         try:
             research = research_mod.web_research(
                 corner,
@@ -506,13 +489,37 @@ def generate(
         if used:
             _log(f"図表を {used} シーンに配置")
 
+    # 2.9) OpenCode Goファクトチェックだけを有効にした場合は、下書き後に
+    # 資料取得だけを行う。research=false の題材選定・cooldown意味は変えない。
+    factcheck_research = research
+    if (
+        factcheck_enabled
+        and config.FACTCHECK_BACKEND == "opencode_go"
+        and not research_enabled
+        and not research
+    ):
+        from . import research as research_mod
+
+        _log("ファクトチェック用リサーチ (opencode_go+Web)…")
+        try:
+            factcheck_research = research_mod.web_research(
+                corner,
+                past_topics,
+                spec,
+                performance_guidance=performance_guidance,
+                backend_override="opencode_go",
+            )
+        except Exception as e:  # noqa: BLE001
+            _log(f"ファクトチェック用リサーチ失敗→原文維持: {e}")
+            factcheck_research = None
+
     # 3) 後段ファクトチェック（issue #6）: 別モデル＋Web検証で narration を自動修正。
     if factcheck_enabled:
         from . import factcheck
 
         _log(f"後段ファクトチェック ({config.FACTCHECK_BACKEND}+Web)…")
         try:
-            fc = factcheck.verify_and_correct(script["narration"], research)
+            fc = factcheck.verify_and_correct(script["narration"], factcheck_research)
             if fc and fc.get("narration", "").strip():
                 issues = fc.get("issues") or []
                 if fc.get("changed") and issues:

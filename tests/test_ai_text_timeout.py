@@ -130,7 +130,7 @@ class WriteTimeoutTest(unittest.TestCase):
         ):
             self.assertEqual(ai_text._dispatch("prompt"), "{}")
 
-        run_mock.assert_called_once_with("prompt", "legacy-model", "custom-agent")
+        run_mock.assert_called_once_with("prompt", "", "custom-agent")
 
     def test_zero_disables_explicit_claude_timeout(self) -> None:
         with (
