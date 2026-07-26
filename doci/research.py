@@ -443,12 +443,16 @@ def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
 def _search_reference_materials(
     label: str,
     channel_guidance: str = "",
+    search_hint: str = "",
 ) -> list[dict[str, str]]:
     """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
     context = [label]
     guidance = " ".join(channel_guidance.split())[:160]
     if guidance:
         context.append(guidance)
+    hint = _sanitize_excerpt(search_hint)[:240]
+    if hint:
+        context.append(hint)
     context.append("公式 一次資料")
     search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
     try:
@@ -755,6 +759,7 @@ def web_research(
         _search_reference_materials(
             corner.label,
             channel_guidance=channel_guidance,
+            search_hint=focus_text,
         )
         if backend == "opencode_go"
         else []
