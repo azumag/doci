@@ -140,7 +140,13 @@ def _run_opencode_go(
     text_chars = 0
     stop_reason = ""
     deadline_timeout = _whole_write_timeout() if timeout is None else (timeout if timeout > 0 else None)
-    idle_timeout = config.WRITE_LLM_IDLE_TIMEOUT if config.WRITE_LLM_IDLE_TIMEOUT > 0 else None
+    # 全体上限とidle上限を同時に0にすると、Claudeフォールバックなしの既定経路が
+    # 無音SSEで復帰不能になるため、明示的な全体無制限時にもidleだけは残す。
+    idle_timeout = (
+        config.WRITE_LLM_IDLE_TIMEOUT
+        if config.WRITE_LLM_IDLE_TIMEOUT > 0
+        else (300 if deadline_timeout is None else None)
+    )
     request_limits = [value for value in (deadline_timeout, idle_timeout) if value is not None]
     request_timeout = min(request_limits) if request_limits else None
     deadline_expired = threading.Event()
@@ -522,18 +528,19 @@ def generate(
         else None
     )
     for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
+        attempt_timeout = None
+        if draft_total_timeout is not None:
+            remaining_budget = draft_total_timeout - (time.monotonic() - draft_started)
+            if remaining_budget <= 0:
+                last_err = TimeoutError("執筆段全体の時間上限に達しました")
+                break
+            per_attempt_timeout = _whole_write_timeout()
+            attempt_timeout = (
+                min(per_attempt_timeout, remaining_budget)
+                if per_attempt_timeout is not None
+                else remaining_budget
+            )
         try:
-            attempt_timeout = None
-            if draft_total_timeout is not None:
-                remaining_budget = draft_total_timeout - (time.monotonic() - draft_started)
-                if remaining_budget <= 0:
-                    raise TimeoutError("執筆段全体の時間上限に達しました")
-                per_attempt_timeout = _whole_write_timeout()
-                attempt_timeout = (
-                    min(per_attempt_timeout, remaining_budget)
-                    if per_attempt_timeout is not None
-                    else remaining_budget
-                )
             script = _validate(_extract_json(_dispatch(prompt, timeout=attempt_timeout)))
             break
         except (ValueError, TimeoutError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:

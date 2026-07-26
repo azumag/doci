@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from . import config, llm
 
+
+class UnsupportedFactcheckBackendError(ValueError):
+    """FACTCHECK_BACKEND の設定値が未対応であることを示す。"""
+
 # バックエンドごとの「必要なら裏取りする」手順の言い回し。OpenCode Goは提示された参考資料を
 # 参照し、codex はシェルの curl 等での取得を明示的に指示する。
 _WEB_HOWTO = {
@@ -87,7 +91,7 @@ def _attempt(prompt: str, backend: str) -> dict:
             timeout=config.script_llm_timeout(),
         )
     else:
-        raise ValueError(f"未対応のFACTCHECK_BACKENDです: {backend}")
+        raise UnsupportedFactcheckBackendError(f"未対応のFACTCHECK_BACKENDです: {backend}")
     data = llm.extract_json(raw)
     if not data.get("narration", "").strip():
         raise ValueError("ファクトチェック結果に narration がありません")
@@ -103,6 +107,8 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
     if not narration.strip():
         return None
     backend = config.FACTCHECK_BACKEND
+    if backend not in {"codex", "opencode_go", "claude"}:
+        raise UnsupportedFactcheckBackendError(f"未対応のFACTCHECK_BACKENDです: {backend}")
     if backend == "opencode_go" and not (research and research.get("facts")):
         _log(
             "OpenCode Goファクトチェック: 検証済み資料がないため原文を維持"

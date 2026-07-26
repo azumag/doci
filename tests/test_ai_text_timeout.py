@@ -111,6 +111,29 @@ class WriteTimeoutTest(unittest.TestCase):
 
         self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 300)
 
+    def test_opencode_go_keeps_idle_guard_when_both_limits_are_zero(self) -> None:
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        events = b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n'
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(config, "WRITE_LLM_IDLE_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ) as urlopen_mock,
+        ):
+            self.assertEqual(
+                ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus"), "ok"
+            )
+
+        self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 300)
+
     def test_opencode_go_sets_socket_timeout_before_each_stream_read(self) -> None:
         class FakeSocket:
             def __init__(self):

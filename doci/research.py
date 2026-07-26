@@ -27,6 +27,11 @@ from urllib.request import Request
 from . import config, llm
 from .channel import ChannelSpec, CornerSpec
 
+
+class UnsupportedResearchBackendError(ValueError):
+    """RESEARCH_BACKEND の設定値が未対応であることを示す。"""
+
+
 # バックエンドごとの「Webで確認する」手順の言い回し。OpenCode Goは候補・一次資料URLを
 # 参照して整理し、codex はシェルの curl 等での取得を明示的に指示する。
 _WEB_HOWTO = {
@@ -639,7 +644,7 @@ def _attempt(
             timeout=config.script_llm_timeout(),
         )
     else:
-        raise ValueError(f"未対応のRESEARCH_BACKENDです: {backend}")
+        raise UnsupportedResearchBackendError(f"未対応のRESEARCH_BACKENDです: {backend}")
     data = llm.extract_json(raw)
     facts = data.get("facts")
     if not data.get("topic") or not isinstance(facts, list) or not facts:
@@ -804,6 +809,8 @@ def web_research(
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
     backend = backend_override or config.RESEARCH_BACKEND
+    if backend not in {"codex", "opencode_go", "claude"}:
+        raise UnsupportedResearchBackendError(f"未対応のRESEARCH_BACKENDです: {backend}")
     guidance_parts = []
     for path in (corner.persona_path, corner.corner_path):
         try:
@@ -837,15 +844,13 @@ def web_research(
         for normalized in [_normalized_source_url(str(row.get("url")))]
         if normalized
     }
-    reference_materials = (
-        _search_reference_materials(
+    reference_materials = []
+    if backend == "opencode_go" and not allowed_source_urls:
+        reference_materials = _search_reference_materials(
             corner.label,
             channel_guidance=channel_guidance,
             search_hint=focus_text,
         )
-        if backend == "opencode_go"
-        else []
-    )
     allowed_source_urls.update(
         normalized
         for row in reference_materials
