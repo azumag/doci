@@ -319,6 +319,13 @@ factcheck = false
         def fail_after_budget(_prompt, timeout=None):
             raise RuntimeError("backend unavailable")
 
+        clock = [100.0]
+
+        def monotonic() -> float:
+            current = clock[0]
+            clock[0] += 0.0005
+            return current
+
         with (
             patch.object(config, "TEXT_BACKEND", "opencode_go"),
             patch.object(config, "SCRIPT_DRAFT_RETRIES", 3),
@@ -327,7 +334,7 @@ factcheck = false
             patch.object(
                 ai_text.time,
                 "monotonic",
-                side_effect=[100.0, 100.0005, 100.001],
+                side_effect=monotonic,
             ),
             patch.object(ai_text, "_dispatch", side_effect=fail_after_budget) as dispatch_mock,
         ):

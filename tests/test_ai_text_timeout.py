@@ -19,6 +19,8 @@ class WriteTimeoutTest(unittest.TestCase):
     def test_opencode_go_rejects_other_provider_qualified_models(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "opencode-go/<model>"):
             ai_text._opencode_go_model("minimax/m3")
+        with self.assertRaisesRegex(RuntimeError, "Claudeモデル"):
+            ai_text._opencode_go_model("opencode-go/claude-opus-4-8")
         self.assertEqual(
             ai_text._opencode_go_model("opencode-go/qwen3.7-plus"),
             "opencode-go/qwen3.7-plus",

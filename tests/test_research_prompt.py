@@ -276,6 +276,9 @@ class ResearchPromptTest(unittest.TestCase):
     def test_untrusted_source_host_is_rejected(self) -> None:
         self.assertFalse(research._is_trusted_source_host("example.com"))
         self.assertFalse(research._is_trusted_source_host("evil.wikipedia.org.example.com"))
+        self.assertFalse(research._is_trusted_source_host("random.edu"))
+        self.assertFalse(research._is_trusted_source_host("agency.gov"))
+        self.assertTrue(research._is_trusted_source_host("loc.gov"))
 
     def test_redirect_target_is_revalidated(self) -> None:
         class FakeResponse:

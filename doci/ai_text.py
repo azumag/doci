@@ -82,12 +82,14 @@ def _run_anthropic(
             "content-type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=_write_timeout(timeout)) as resp:
-        read_timeout = _write_timeout(timeout)
-        if read_timeout is None:
+    request_timeout = _write_timeout(timeout)
+    deadline = (
+        time.monotonic() + request_timeout if request_timeout is not None else None
+    )
+    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+        if deadline is None:
             payload = resp.read()
         else:
-            deadline = time.monotonic() + read_timeout
             chunks: list[bytes] = []
             while True:
                 remaining = deadline - time.monotonic()
@@ -149,7 +151,8 @@ def _opencode_go_model(model: str) -> str:
             "TEXT_BACKEND=opencode_go では OPENCODE_MODEL を "
             "opencode-go/<model> 形式で指定してください"
         )
-    if model.startswith("claude-"):
+    model_id = model.split("/", 1)[1] if separator else model
+    if model_id.startswith(("claude-", "anthropic/")):
         raise RuntimeError(
             "TEXT_BACKEND=opencode_go ではClaudeモデルを使えません。 "
             f"{config.OPENCODE_GO_DEFAULT_MODEL} を指定してください"

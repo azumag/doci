@@ -310,10 +310,7 @@ def _is_trusted_source_host(hostname: str) -> bool:
     host = hostname.rstrip(".").lower()
     if any(host == trusted or host.endswith("." + trusted) for trusted in _TRUSTED_SOURCE_HOSTS):
         return True
-    return any(
-        host.endswith(suffix)
-        for suffix in (".gov", ".gov.uk", ".go.jp", ".ac.jp", ".edu")
-    )
+    return False
 
 
 def _resolve_addresses(
