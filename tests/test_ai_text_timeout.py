@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import socket
+import json
 import subprocess
 import tempfile
 import time
@@ -324,6 +325,24 @@ class WriteTimeoutTest(unittest.TestCase):
             self.assertEqual(ai_text._dispatch("prompt"), "{}")
 
         run_mock.assert_called_once_with("prompt", "", "custom-agent")
+
+    def test_bare_opencode_go_model_is_sent_as_model_id(self) -> None:
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        events = b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n'
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)) as urlopen_mock,
+        ):
+            self.assertEqual(ai_text._run_opencode_go("prompt", "qwen3.7-plus", timeout=7), "ok")
+
+        request_body = json.loads(urlopen_mock.call_args.args[0].data)
+        self.assertEqual(request_body["model"], "qwen3.7-plus")
 
     def test_zero_disables_explicit_claude_timeout(self) -> None:
         with (

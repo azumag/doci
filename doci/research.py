@@ -845,7 +845,7 @@ def _attempt(
         else:
             raw = ai_text._run_opencode(
                 prompt,
-                config.OPENCODE_MODEL or config.RESEARCH_MODEL,
+                ai_text._opencode_cli_model(config.RESEARCH_MODEL),
                 config.OPENCODE_AGENT,
                 timeout=config.script_llm_timeout(),
             )

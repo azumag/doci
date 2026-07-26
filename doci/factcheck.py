@@ -89,7 +89,7 @@ def _attempt(prompt: str, backend: str) -> dict:
 
         raw = ai_text._run_opencode(
             prompt,
-            config.OPENCODE_MODEL or config.FACTCHECK_MODEL,
+            ai_text._opencode_cli_model(config.FACTCHECK_MODEL),
             config.OPENCODE_AGENT,
             timeout=config.script_llm_timeout(),
         )

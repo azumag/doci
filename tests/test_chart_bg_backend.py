@@ -118,6 +118,18 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertEqual(result, [{"query": "old library shelves", "media": "image"}])
 
+    def test_agent_only_opencode_cli_does_not_inject_model(self) -> None:
+        config.CHART_BG_BACKEND = "opencode"
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
+            mock.patch.object(config, "OPENCODE_AGENT", "custom-agent"),
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], "")
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         config.CHART_BG_BACKEND = "opencode-go"
         with mock.patch.object(chart_bg.llm, "run_claude") as claude_mock:

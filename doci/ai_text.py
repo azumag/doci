@@ -381,6 +381,13 @@ def _run_opencode(
     return proc.stdout
 
 
+def _opencode_cli_model(model: str) -> str:
+    """OpenCode CLIのagent-only設定を補助段でも維持する。"""
+    if config.OPENCODE_MODEL:
+        return config.OPENCODE_MODEL
+    return "" if config.OPENCODE_AGENT else model
+
+
 def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
     backend = config.TEXT_BACKEND
     model = config.TEXT_MODEL
@@ -399,9 +406,7 @@ def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
     if backend == "opencode":
         # agent-only の既存設定では TEXT_MODEL の既定値を混ぜず、
         # _run_opencode 側に空モデルを渡して --agent を有効にする。
-        opencode_model = config.OPENCODE_MODEL
-        if not opencode_model and not config.OPENCODE_AGENT:
-            opencode_model = model
+        opencode_model = _opencode_cli_model(model)
         if timeout is None:
             return _run_opencode(prompt, opencode_model, config.OPENCODE_AGENT)
         return _run_opencode(
