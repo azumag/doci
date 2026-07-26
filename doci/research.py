@@ -269,7 +269,8 @@ def _decode_search_url(
 ) -> str:
     url = urljoin(base_url, url)
     parsed = urlparse(url if not url.startswith("//") else f"https:{url}")
-    if (parsed.hostname or "").endswith("duckduckgo.com"):
+    hostname = (parsed.hostname or "").lower()
+    if hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com"):
         target = parse_qs(parsed.query).get("uddg", [""])[0]
         # parse_qs() が uddg のパーセントエスケープを一度だけ復号している。
         # ここで unquote() を重ねると、URL内の %25 / %2F の意味を壊す。
@@ -842,23 +843,21 @@ def _search_reference_materials(
     # 取得は同期パイプライン上で行うが、最大8件を4件ずつ並列化する。
     # 候補が2波に分かれる場合も後半を待てるよう、待機期限を波数から算出する。
     max_workers = 4
-    executor = ThreadPoolExecutor(max_workers=max_workers)
     page_timeout = remaining(8)
-    if search_timeout is None:
-        futures = {
-            executor.submit(_page_excerpt, row["url"]): row
-            for row in rows[:8]
-        }
-    else:
-        futures = (
-            {
+    executor: ThreadPoolExecutor | None = None
+    futures = {}
+    try:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        if search_timeout is None:
+            futures = {
+                executor.submit(_page_excerpt, row["url"]): row
+                for row in rows[:8]
+            }
+        elif page_timeout > 0:
+            futures = {
                 executor.submit(_page_excerpt, row["url"], timeout=page_timeout): row
                 for row in rows[:8]
             }
-            if page_timeout > 0
-            else {}
-        )
-    try:
         wave_count = max(1, (len(futures) + max_workers - 1) // max_workers)
         # 各本文取得の上限に波数を掛け、スケジューリング余裕を1秒加える。
         # remaining() が共有の検索期限を優先するため、長時間の無制限待機にはならない。
@@ -880,12 +879,15 @@ def _search_reference_materials(
                 break
     except FuturesTimeoutError:
         _log("OpenCode Go資料検索: 本文取得が時間上限に達しました")
+    except Exception as exc:  # noqa: BLE001 - submission failure is best effort
+        _log(f"OpenCode Go資料検索: 本文取得を開始できませんでした: {type(exc).__name__}")
     finally:
         for future in futures:
             if not future.done():
                 future.cancel()
-        # 本文取得はbest effort。期限後に残った通信を待たず、生成パイプラインを解放する。
-        executor.shutdown(wait=False, cancel_futures=True)
+        # 実行中の非daemonワーカーを残さず、期限後も本文取得を回収してから解放する。
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
     if rows and not materials:
         _log("OpenCode Go資料検索: 取得できる公開一次資料がありませんでした")
     return materials

@@ -30,7 +30,26 @@ REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
 _DEFAULT_WRITE_TIMEOUT = object()
 
 
-def _call_with_timeout(func: Callable[[], object], timeout_seconds: float) -> object:
+def _shutdown_response(response) -> None:  # type: ignore[no-untyped-def]
+    """読み取り待ちのソケットを、可能ならshutdownしてワーカーを解放する。"""
+    for candidate in (
+        getattr(response, "fp", None),
+        getattr(getattr(response, "fp", None), "raw", None),
+        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+    ):
+        shutdown = getattr(candidate, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+            except (OSError, TypeError):
+                pass
+
+
+def _call_with_timeout(
+    func: Callable[[], object],
+    timeout_seconds: float,
+    on_timeout: Callable[[], None] | None = None,
+) -> object:
     """settimeout非対応のラッパーでも、読み取り待ちで呼び出し側を塞がない。"""
     result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
 
@@ -45,6 +64,8 @@ def _call_with_timeout(func: Callable[[], object], timeout_seconds: float) -> ob
     try:
         succeeded, value = result_queue.get(timeout=max(0.001, timeout_seconds))
     except queue.Empty as exc:
+        if on_timeout is not None:
+            on_timeout()
         raise socket.timeout("stream read timeout") from exc
     if succeeded:
         return value
@@ -143,7 +164,11 @@ def _run_anthropic(
                     chunk = (
                         resp.read(4096)
                         if response_timeout_supported
-                        else _call_with_timeout(lambda: resp.read(4096), remaining)
+                        else _call_with_timeout(
+                            lambda: resp.read(4096),
+                            remaining,
+                            lambda: _shutdown_response(resp),
+                        )
                     )
                 except socket.timeout as exc:
                     raise TimeoutError(
@@ -303,7 +328,11 @@ def _run_opencode_go(
                         raw = (
                             next(stream)
                             if stream_timeout_applied
-                            else _call_with_timeout(lambda: next(stream), read_timeout)
+                            else _call_with_timeout(
+                                lambda: next(stream),
+                                read_timeout,
+                                lambda: _shutdown_response(resp),
+                            )
                         )
                     except socket.timeout as exc:
                         if (

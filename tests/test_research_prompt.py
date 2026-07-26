@@ -408,6 +408,10 @@ class ResearchPromptTest(unittest.TestCase):
             ),
             "https://example.org/relative",
         )
+        evil_host_url = (
+            "https://evilduckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Frelative"
+        )
+        self.assertEqual(research._decode_search_url(evil_host_url), evil_host_url)
 
     def test_youtube_source_normalizes_shorts_embed_and_live_urls(self) -> None:
         for path in ("shorts", "embed", "live"):
