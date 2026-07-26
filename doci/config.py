@@ -162,7 +162,7 @@ def _migrate_implicit_opencode_model(
 # 既定経路へ移行する。provider-qualified な別モデルなど明示的な不整合は
 # _opencode_go_model() で停止し、意図しないモデル実行を防ぐ。
 if TEXT_BACKEND == "opencode_go" and not OPENCODE_MODEL:
-    TEXT_MODEL = _migrate_implicit_opencode_go_model(
+    TEXT_MODEL = _migrate_implicit_opencode_model(
         TEXT_MODEL, TEXT_BACKEND, False
     )
 if RESEARCH_BACKEND in {"opencode_go", "opencode"}:
