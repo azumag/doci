@@ -51,7 +51,7 @@ class ResearchPromptTest(unittest.TestCase):
         )
         excerpt_mock.assert_called_once_with("https://support.google.com/youtube/help")
 
-    def test_reference_search_includes_date_and_guidance_not_past_topics(self) -> None:
+    def test_reference_search_includes_guidance_not_past_topics(self) -> None:
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.read.return_value = b""

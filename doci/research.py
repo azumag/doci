@@ -14,7 +14,6 @@ import re
 import socket
 import threading
 import time
-from datetime import date
 from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
     ThreadPoolExecutor,
@@ -407,7 +406,7 @@ def _search_reference_materials(
     channel_guidance: str = "",
 ) -> list[dict[str, str]]:
     """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
-    context = [label, date.today().isoformat()]
+    context = [label]
     guidance = " ".join(channel_guidance.split())[:160]
     if guidance:
         context.append(guidance)
@@ -440,7 +439,7 @@ def _search_reference_materials(
         rows.append({"url": url, "title": row["title"]})
     materials: list[dict[str, str]] = []
     # 取得は同期パイプライン上で行うが、最大8件を並列化して全体の待ち時間を
-    # 検索12秒 + 本文取得の目安9秒以内に抑える（各資料は3秒・リダイレクト1回）。
+    # 検索12秒 + 本文取得の目安9秒以内に抑える（本文取得は各8秒の総予算）。
     executor = ThreadPoolExecutor(max_workers=4)
     futures = {executor.submit(_page_excerpt, row["url"]): row for row in rows}
     try:
@@ -679,7 +678,17 @@ def web_research(
         for normalized in [_normalized_source_url(str(row.get("url")))]
         if normalized
     }
-    allowed_source_urls: set[str] = set()
+    # YouTube候補は、Data APIの説明欄または公開字幕を実取得できたものだけを
+    # factsの出典として許可する。タイトルだけの候補はexamples専用とする。
+    allowed_source_urls = {
+        normalized
+        for row in video_candidates
+        if isinstance(row, dict)
+        and row.get("url")
+        and (row.get("description") or row.get("transcript_excerpt"))
+        for normalized in [_normalized_source_url(str(row.get("url")))]
+        if normalized
+    }
     reference_materials = (
         _search_reference_materials(
             corner.label,
@@ -696,7 +705,10 @@ def web_research(
         if normalized
     )
     if backend == "opencode_go" and not allowed_source_urls:
-        _log("OpenCode Goリサーチ: 実取得済み候補・資料がないため安全側にスキップ")
+        _log(
+            "警告: OpenCode Goリサーチを実取得済み資料0件のため安全側にスキップ"
+            "（ファクトチェックも原文維持）"
+        )
         return None
     prompt = _PROMPT.format(
         label=corner.label,

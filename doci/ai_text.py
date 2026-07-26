@@ -134,20 +134,33 @@ def _run_opencode_go(
     request_timeout = _write_timeout() if timeout is None else (timeout if timeout > 0 else None)
     deadline_expired = threading.Event()
     deadline_timer: threading.Timer | None = None
+    response_holder: list[object | None] = [None]
+    received_terminal = False
 
     def expire_stream() -> None:
         deadline_expired.set()
-        try:
-            resp.close()  # type: ignore[name-defined]
-        except Exception:  # noqa: BLE001 - closing an already-finished response
+        response = response_holder[0]
+        if response is None:
             return
+        for candidate in (
+            response,
+            getattr(response, "fp", None),
+            getattr(getattr(response, "fp", None), "raw", None),
+            getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+        ):
+            try:
+                if candidate is not None:
+                    candidate.close()
+            except Exception:  # noqa: BLE001 - closing an already-finished response
+                continue
 
+    if request_timeout is not None:
+        deadline_timer = threading.Timer(request_timeout, expire_stream)
+        deadline_timer.daemon = True
+        deadline_timer.start()
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-            if request_timeout is not None:
-                deadline_timer = threading.Timer(request_timeout, expire_stream)
-                deadline_timer.daemon = True
-                deadline_timer.start()
+            response_holder[0] = resp
             try:
                 stream = iter(resp)
                 for raw in stream:
@@ -155,7 +168,10 @@ def _run_opencode_go(
                     if not line.startswith("data:"):
                         continue
                     payload = line[5:].lstrip()
-                    if not payload or payload == "[DONE]":
+                    if not payload:
+                        continue
+                    if payload == "[DONE]":
+                        received_terminal = True
                         continue
                     try:
                         event = json.loads(payload)
@@ -171,6 +187,8 @@ def _run_opencode_go(
                         text_chars += len(part)
                     if event_type == "message_delta":
                         stop_reason = delta.get("stop_reason") or stop_reason
+                        if stop_reason:
+                            received_terminal = True
                     elapsed = time.monotonic() - started
                     if elapsed >= next_progress:
                         _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
@@ -178,15 +196,18 @@ def _run_opencode_go(
             finally:
                 if deadline_timer is not None:
                     deadline_timer.cancel()
-            if deadline_expired.is_set():
+            if deadline_expired.is_set() and not received_terminal:
                 raise RuntimeError("OpenCode Go API が時間上限に達しました")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"OpenCode Go API failed (HTTP {exc.code}): {detail}") from exc
     except (TimeoutError, OSError, ValueError) as exc:
-        if deadline_expired.is_set():
+        if deadline_expired.is_set() and not received_terminal:
             raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
         raise
+    finally:
+        if deadline_timer is not None:
+            deadline_timer.cancel()
 
     text = "".join(text_parts)
     if stop_reason == "max_tokens":

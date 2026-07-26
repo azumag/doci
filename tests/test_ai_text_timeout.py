@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import time
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -59,6 +60,30 @@ class WriteTimeoutTest(unittest.TestCase):
         request = urlopen_mock.call_args.args[0]
         self.assertEqual(request.headers["X-api-key"], "test-key")
         self.assertEqual(request.headers["User-agent"], "doci/1.0")
+
+    def test_opencode_go_stream_has_a_whole_response_deadline(self) -> None:
+        class SlowResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                time.sleep(0.03)
+                return iter(())
+
+            def close(self):
+                return None
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=SlowResponse()
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "時間上限"):
+                ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus", timeout=0.001)
 
     def test_opencode_go_default_uses_write_timeout(self) -> None:
         class FakeResponse(BytesIO):
