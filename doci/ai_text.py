@@ -31,7 +31,14 @@ _extract_json = llm.extract_json
 
 
 def _write_timeout() -> int | None:
-    """台本執筆の待機上限。0以下は長文生成を途中で切らない無制限モード。"""
+    """CLI/ソケットの待機上限。全体上限0でも無音idle上限を適用する。"""
+    if config.WRITE_LLM_TIMEOUT > 0:
+        return config.WRITE_LLM_TIMEOUT
+    return config.WRITE_LLM_IDLE_TIMEOUT if config.WRITE_LLM_IDLE_TIMEOUT > 0 else None
+
+
+def _whole_write_timeout() -> int | None:
+    """ストリーム全体の上限。0は長文を最後まで待つ。"""
     return config.WRITE_LLM_TIMEOUT if config.WRITE_LLM_TIMEOUT > 0 else None
 
 
@@ -131,10 +138,10 @@ def _run_opencode_go(
     text_parts: list[str] = []
     text_chars = 0
     stop_reason = ""
-    deadline_timeout = _write_timeout() if timeout is None else (timeout if timeout > 0 else None)
-    request_timeout = deadline_timeout or config.WRITE_LLM_IDLE_TIMEOUT
-    if request_timeout <= 0:
-        request_timeout = None
+    deadline_timeout = _whole_write_timeout() if timeout is None else (timeout if timeout > 0 else None)
+    idle_timeout = config.WRITE_LLM_IDLE_TIMEOUT if config.WRITE_LLM_IDLE_TIMEOUT > 0 else None
+    request_limits = [value for value in (deadline_timeout, idle_timeout) if value is not None]
+    request_timeout = min(request_limits) if request_limits else None
     deadline_expired = threading.Event()
     deadline_timer: threading.Timer | None = None
     response_holder: list[object | None] = [None]

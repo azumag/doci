@@ -250,6 +250,16 @@ class ResearchPromptTest(unittest.TestCase):
 
         self.assertEqual(excerpt, "公式の本文")
 
+    def test_page_excerpt_keeps_utf8_text_when_read_limit_splits_character(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.getheader.return_value = "text/html; charset=utf-8"
+        response.read.return_value = ("あ" * 4001).encode("utf-8")[:12000]
+        with mock.patch.object(research, "_safe_urlopen", return_value=response):
+            excerpt = research._page_excerpt("https://example.org/source")
+
+        self.assertTrue(excerpt.startswith("あ"))
+
     def test_private_hosts_are_rejected_before_fetch(self) -> None:
         for url in (
             "http://127.0.0.1:8080/",

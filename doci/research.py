@@ -417,8 +417,8 @@ def _decode_response_body(response, body: bytes) -> str:  # type: ignore[no-unty
     if isinstance(charset, bytes):
         charset = charset.decode("ascii", errors="ignore")
     try:
-        return body.decode(str(charset), errors="strict")
-    except (LookupError, UnicodeDecodeError):
+        return body.decode(str(charset), errors="replace")
+    except LookupError:
         return ""
 
 
@@ -462,20 +462,32 @@ def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
     return rows
 
 
+def _query_terms(text: str, limit: int) -> list[str]:
+    """散文を検索エンジン向けの短い語へ縮める（プロンプト本文は送らない）。"""
+    cleaned = re.sub(r"[、。！？/（）()：:・,\.\n]+", " ", text)
+    chunks = re.findall(r"[A-Za-z][A-Za-z0-9_-]*|[一-龥々〆ヵヶぁ-んァ-ヶー]{2,}", cleaned)
+    terms: list[str] = []
+    for chunk in chunks:
+        chunk = chunk[:32]
+        if len(chunk) < 2 or chunk in terms:
+            continue
+        terms.append(chunk)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
 def _search_reference_materials(
     label: str,
     channel_guidance: str = "",
     search_hint: str = "",
 ) -> list[dict[str, str]]:
     """非Claude経路用に、検索結果ではなく取得ページの短い本文を渡す。"""
-    context = [label]
-    guidance = " ".join(channel_guidance.split())[:160]
-    if guidance:
-        context.append(guidance)
-    hint = _sanitize_excerpt(search_hint)[:240]
-    if hint:
-        context.append(hint)
-    context.append("公式 一次資料")
+    terms = [label]
+    terms.extend(_query_terms(channel_guidance, 3))
+    terms.extend(_query_terms(search_hint, 5))
+    context = list(dict.fromkeys(term for term in terms if term))
+    context.extend(("公式", "一次資料"))
     search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
     try:
         with _safe_urlopen(
