@@ -28,6 +28,11 @@ from .channel import ChannelSpec, CornerSpec
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
 _DEFAULT_WRITE_TIMEOUT = object()
 
+
+def _monotonic() -> float:
+    """差し替え可能な時計。全体予算のテストが標準timeを汚染しないようにする。"""
+    return time.monotonic()
+
 # 互換用エイリアス（JSON抽出/CLI実行は共通モジュール llm に集約）
 _extract_json = llm.extract_json
 
@@ -263,15 +268,11 @@ def _run_opencode_go(
                 stream = iter(resp)
                 stream_timeout_warning_logged = False
                 while True:
-                    if deadline_expired.is_set() and not received_terminal:
-                        raise RuntimeError("OpenCode Go API が時間上限に達しました")
                     remaining = (
                         deadline_timeout - (time.monotonic() - started)
                         if deadline_timeout is not None
                         else None
                     )
-                    if remaining is not None and remaining <= 0:
-                        raise RuntimeError("OpenCode Go API が時間上限に達しました")
                     if remaining is not None:
                         remaining = max(0.001, remaining)
                     read_timeout = remaining
@@ -298,6 +299,9 @@ def _run_opencode_go(
                             raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
                         raise RuntimeError("OpenCode Go API の無通信タイムアウト") from exc
                     except StopIteration:
+                        # [DONE]/stop_reasonを省略するゲートウェイでも、ストリームの
+                        # 自然終了は完全な本文の終端として受け入れる。
+                        received_terminal = True
                         break
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
@@ -325,6 +329,17 @@ def _run_opencode_go(
                         if stop_reason:
                             received_terminal = True
                             break
+                    if (
+                        not received_terminal
+                        and (
+                            deadline_expired.is_set()
+                            or (
+                                deadline_timeout is not None
+                                and time.monotonic() - started >= deadline_timeout
+                            )
+                        )
+                    ):
+                        raise RuntimeError("OpenCode Go API が時間上限に達しました")
                     elapsed = time.monotonic() - started
                     if elapsed >= next_progress:
                         _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
@@ -600,7 +615,7 @@ def generate(
     )
     script = None
     last_err: Exception | None = None
-    draft_started = time.monotonic()
+    draft_started = _monotonic()
     draft_total_timeout = (
         config.SCRIPT_DRAFT_TOTAL_TIMEOUT
         if config.SCRIPT_DRAFT_TOTAL_TIMEOUT > 0
@@ -609,7 +624,7 @@ def generate(
     for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
         attempt_timeout = None
         if draft_total_timeout is not None:
-            remaining_budget = draft_total_timeout - (time.monotonic() - draft_started)
+            remaining_budget = draft_total_timeout - (_monotonic() - draft_started)
             if remaining_budget <= 0:
                 detail = ""
                 if last_err is not None:

@@ -323,17 +323,17 @@ factcheck = false
 
         def monotonic() -> float:
             current = clock[0]
-            clock[0] += 0.0005
+            clock[0] += 0.5
             return current
 
         with (
             patch.object(config, "TEXT_BACKEND", "opencode_go"),
             patch.object(config, "SCRIPT_DRAFT_RETRIES", 3),
             patch.object(config, "WRITE_LLM_TIMEOUT", 900),
-            patch.object(config, "SCRIPT_DRAFT_TOTAL_TIMEOUT", 0.001),
+            patch.object(config, "SCRIPT_DRAFT_TOTAL_TIMEOUT", 1),
             patch.object(
-                ai_text.time,
-                "monotonic",
+                ai_text,
+                "_monotonic",
                 side_effect=monotonic,
             ),
             patch.object(ai_text, "_dispatch", side_effect=fail_after_budget) as dispatch_mock,
