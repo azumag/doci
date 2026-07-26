@@ -282,7 +282,9 @@ def _dispatch(prompt: str) -> str:
     if backend == "opencode_go":
         return _run_opencode_go(prompt, config.OPENCODE_MODEL or model)
     if backend == "opencode":
-        return _run_opencode(prompt, config.OPENCODE_MODEL, config.OPENCODE_AGENT)
+        return _run_opencode(
+            prompt, config.OPENCODE_MODEL or model, config.OPENCODE_AGENT
+        )
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")
 
 
