@@ -503,13 +503,23 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
         config.YOUTUBE_TOKEN_FILE,
         "YouTube token",
     )
+    youtube_privacy = _string(
+        youtube,
+        "privacy",
+        config.YOUTUBE_PRIVACY,
+        "publish.youtube.",
+    )
+    if review_enabled and youtube_privacy != "unlisted":
+        raise ChannelConfigError(
+            "publish.youtube.privacy must be unlisted when "
+            "publish.youtube.review.enabled is true; review decides the "
+            "final public or unlisted upload state"
+        )
 
     return PublishSpec(
         platforms=tuple(platforms),
         youtube=YouTubePublishSpec(
-            privacy=_string(
-                youtube, "privacy", config.YOUTUBE_PRIVACY, "publish.youtube."
-            ),
+            privacy=youtube_privacy,
             client_secret=youtube_client_secret,
             token=youtube_token,
             review=YouTubeReviewSpec(

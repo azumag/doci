@@ -48,8 +48,13 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAX_REVIEW_DIFF_BYTES: "600000"
         run: |
-          git diff --no-ext-diff --unified=20 "${BASE_SHA}...${HEAD_SHA}" > /tmp/doci-pr.diff
+          git diff --no-ext-diff --unified=5 "${BASE_SHA}...${HEAD_SHA}" > /tmp/doci-pr.diff
+          if [ "$(wc -c < /tmp/doci-pr.diff)" -gt "$MAX_REVIEW_DIFF_BYTES" ]; then
+            echo "::error title=Claude review input too large::Split this PR so its complete diff fits the review context; the Action never truncates a review."
+            exit 1
+          fi
           {
             cat <<'REVIEW_INSTRUCTIONS'
           次のPull Request差分だけをread-onlyでレビューしてください。

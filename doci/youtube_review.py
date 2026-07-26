@@ -27,6 +27,9 @@ _GH_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _CYCLE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
 _LOCK_WAIT_TIMEOUT_SECONDS = 30.0
 _LOCK_RETRY_SECONDS = 0.25
+_MAX_ISSUE_LIST_PAGES = 10
+_MAX_RETRY_PLAN_FILES = 64
+_OUTBOX_COMPACT_MIN_EVENTS = 100
 _MARKER_RE = re.compile(
     r"<!--\s*doci-youtube-review\s+video_id=([A-Za-z0-9_-]{6,20})\s*-->"
 )
@@ -376,8 +379,7 @@ def _find_issue(
     expected_author = expected_author or _current_gh_login()
     if not _GH_LOGIN_RE.fullmatch(expected_author):
         raise RuntimeError("outboxのIssue作成者が不正なため検索を拒否します")
-    page = 1
-    while True:
+    for page in range(1, _MAX_ISSUE_LIST_PAGES + 1):
         raw = _run_gh(
             [
                 "api",
@@ -412,9 +414,60 @@ def _find_issue(
             ):
                 return issue
         if len(rows) < 100:
-            break
-        page += 1
-    return None
+            return None
+    raise RuntimeError(
+        "GitHub Issue検索が安全なページ上限に達しました。"
+        "重複作成を避けるため自動作成を停止します"
+    )
+
+
+def _list_open_tracking_issues(
+    review: YouTubeReviewSpec,
+    expected_author: str,
+) -> dict[int, TrackingIssue]:
+    """Openな確認Issueをまとめて取得し、未決件数に比例するAPI呼出しを避ける。"""
+    if not _GH_LOGIN_RE.fullmatch(expected_author):
+        raise RuntimeError("Issue一覧の作成者が不正なため取得を拒否します")
+    issues: dict[int, TrackingIssue] = {}
+    for page in range(1, _MAX_ISSUE_LIST_PAGES + 1):
+        raw = _run_gh(
+            [
+                "api",
+                f"repos/{review.repository}/issues",
+                "--method",
+                "GET",
+                "-f",
+                "state=open",
+                "-f",
+                f"creator={expected_author}",
+                "-f",
+                "per_page=100",
+                "-f",
+                f"page={page}",
+                "-f",
+                "sort=updated",
+                "-f",
+                "direction=desc",
+            ]
+        )
+        rows = json.loads(raw or "[]")
+        if not isinstance(rows, list):
+            raise RuntimeError("GitHub Issue一覧の形式が不正です")
+        for row in rows:
+            if not isinstance(row, dict) or row.get("pull_request"):
+                continue
+            issue = _parse_issue(row)
+            if (
+                issue is not None
+                and issue.author.casefold() == expected_author.casefold()
+            ):
+                issues[issue.number] = issue
+        if len(rows) < 100:
+            return issues
+    raise RuntimeError(
+        "OpenなGitHub Issue一覧が安全なページ上限に達しました。"
+        "一部だけを処理せず確認処理を停止します"
+    )
 
 
 def _get_issue(
@@ -548,6 +601,31 @@ def _retry_plan_path(spec: ChannelSpec, cycle_id: str) -> Path:
     return spec.output_dir / ".youtube_review_retry" / f"{digest}.json"
 
 
+def _prune_retry_plans(directory: Path, keep: Path) -> None:
+    """Overlapping cyclesを残しつつ、補助planの総数を一定以下に保つ。"""
+    def modified_at(candidate: Path) -> int:
+        try:
+            return candidate.stat().st_mtime_ns
+        except FileNotFoundError:
+            return -1
+
+    plans = sorted(
+        (
+            candidate
+            for candidate in directory.glob("*.json")
+            if candidate != keep
+        ),
+        key=modified_at,
+        reverse=True,
+    )
+    retained_others = max(0, _MAX_RETRY_PLAN_FILES - 1)
+    for stale in plans[retained_others:]:
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def save_retry_plan(
     spec: ChannelSpec,
     cycle_id: str,
@@ -578,6 +656,7 @@ def save_retry_plan(
             file.flush()
             os.fsync(file.fileno())
         os.replace(tmp, path)
+        _prune_retry_plans(path.parent, path)
     finally:
         try:
             tmp.unlink()
@@ -675,11 +754,8 @@ def _latest_records(spec: ChannelSpec) -> dict[str, ReviewRecord]:
     return latest
 
 
-def _append_record(spec: ChannelSpec, record: ReviewRecord) -> None:
-    """callerがoperation lockを保持した状態で、outboxイベントを耐久追記する。"""
-    path = _outbox_path(spec)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    row = {
+def _record_row(record: ReviewRecord) -> dict:
+    return {
         "ts": datetime.now(timezone.utc).isoformat(),
         "video_id": record.video_id,
         "title": record.title,
@@ -689,10 +765,45 @@ def _append_record(spec: ChannelSpec, record: ReviewRecord) -> None:
         "issue_url": record.issue_url,
         "issue_author": record.issue_author,
     }
+
+
+def _append_record(spec: ChannelSpec, record: ReviewRecord) -> None:
+    """callerがoperation lockを保持した状態で、outboxイベントを耐久追記する。"""
+    path = _outbox_path(spec)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = _record_row(record)
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
         file.flush()
         os.fsync(file.fileno())
+
+
+def _compact_outbox_locked(spec: ChannelSpec) -> None:
+    """イベント増幅分だけをatomicに畳み、各動画の最新状態は永久保持する。"""
+    path = _outbox_path(spec)
+    if not path.is_file():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) < _OUTBOX_COMPACT_MIN_EVENTS:
+        return
+    latest = _latest_records(spec)
+    if len(lines) <= max(_OUTBOX_COMPACT_MIN_EVENTS, len(latest) * 2):
+        return
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8") as file:
+            for record in latest.values():
+                file.write(
+                    json.dumps(_record_row(record), ensure_ascii=False) + "\n"
+                )
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def queue_pending(
@@ -744,6 +855,8 @@ def _with_status(record: ReviewRecord, status: str) -> ReviewRecord:
 def _ensure_issue_locked(
     spec: ChannelSpec,
     record: ReviewRecord,
+    *,
+    prefetched_issues: dict[int, TrackingIssue] | None = None,
 ) -> tuple[ReviewRecord, TrackingIssue]:
     review = spec.publish.youtube.review
     current_author = _current_gh_login()
@@ -751,7 +864,14 @@ def _ensure_issue_locked(
     if not _GH_LOGIN_RE.fullmatch(expected_author):
         raise RuntimeError("outboxのIssue作成者が不正なため処理を拒否します")
     if record.issue_number is not None:
-        issue = _get_issue(review, record.issue_number)
+        issue = (
+            prefetched_issues.get(record.issue_number)
+            if prefetched_issues is not None
+            else None
+        )
+        if issue is None:
+            # Closed・marker欠損など、open一覧に無い記録だけ個別取得して確定する。
+            issue = _get_issue(review, record.issue_number)
         if issue is None:
             raise RuntimeError(
                 "記録済みの確認Issueから追跡markerを確認できません。"
@@ -915,16 +1035,34 @@ def reconcile_result(
                 _append_record(spec, candidate)
                 records[candidate.video_id] = candidate
 
-        for original in list(records.values()):
-            if original.status in _TERMINAL_OUTBOX_STATUSES:
-                continue
-            if (
-                only_video_ids is not None
-                and original.video_id not in only_video_ids
-            ):
-                continue
+        active = [
+            record
+            for record in records.values()
+            if record.status not in _TERMINAL_OUTBOX_STATUSES
+            and (
+                only_video_ids is None
+                or record.video_id in only_video_ids
+            )
+        ]
+        current_author = _current_gh_login() if active else ""
+        expected_authors = {
+            record.issue_author or current_author
+            for record in active
+        }
+        # 全actorの一覧取得が成功してから動画単位処理へ進み、ページ上限時に
+        # 一部だけ公開変更されることを防ぐ。
+        prefetched_by_author = {
+            author: _list_open_tracking_issues(review, author)
+            for author in expected_authors
+        }
+        for original in active:
             try:
-                record, issue = _ensure_issue_locked(spec, original)
+                expected_author = original.issue_author or current_author
+                record, issue = _ensure_issue_locked(
+                    spec,
+                    original,
+                    prefetched_issues=prefetched_by_author[expected_author],
+                )
                 # _ensure_issue_lockedの取得結果を通常確認に再利用する。公開変更または
                 # terminal化の直前だけ再取得し、安全境界を維持しつつgh呼出しを半減する。
                 fresh = issue
@@ -1034,6 +1172,7 @@ def reconcile_result(
                     f"動画 {original.video_id}: 確認処理失敗 "
                     f"{type(exc).__name__}: {_redact(str(exc))[:180]}"
                 )
+        _compact_outbox_locked(spec)
     return ReconcileResult(
         tuple(events),
         failed_count,

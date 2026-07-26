@@ -384,6 +384,29 @@ repository = "not-an-owner-repo"
         ):
             channel.load("sample", channels_dir=self.channels_dir)
 
+    def test_review_requires_unlisted_staging_privacy(self) -> None:
+        self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube]
+privacy = "private"
+[publish.youtube.review]
+enabled = true
+repository = "owner/repo"
+''')
+
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError,
+            "must be unlisted",
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
     def test_ideology_uses_legacy_youtube_files_until_migrated(self) -> None:
         self._write_channel(
             "ideology",

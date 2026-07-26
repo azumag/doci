@@ -281,6 +281,14 @@ class IssueWorkflowTest(unittest.TestCase):
         )
         login_patch.start()
         self.addCleanup(login_patch.stop)
+        self.list_open_impl = youtube_review._list_open_tracking_issues
+        issue_list_patch = mock.patch.object(
+            youtube_review,
+            "_list_open_tracking_issues",
+            return_value={},
+        )
+        self.issue_list_mock = issue_list_patch.start()
+        self.addCleanup(issue_list_patch.stop)
 
     def _issue(
         self,
@@ -376,6 +384,50 @@ class IssueWorkflowTest(unittest.TestCase):
             youtube_review._retry_plan_path(self.spec, "cron-124"),
         )
         self.assertIsNone(youtube_review.load_retry_plan(self.spec, ""))
+
+    def test_retry_plan_count_is_bounded_without_removing_current_cycle(self) -> None:
+        with mock.patch.object(youtube_review, "_MAX_RETRY_PLAN_FILES", 2):
+            for index in range(3):
+                youtube_review.save_retry_plan(
+                    self.spec,
+                    f"cron-{index}",
+                    (f"video{index}99",),
+                )
+
+        plan_dir = self.spec.output_dir / ".youtube_review_retry"
+        self.assertLessEqual(len(list(plan_dir.glob("*.json"))), 2)
+        self.assertEqual(
+            youtube_review.load_retry_plan(self.spec, "cron-2"),
+            ("video299",),
+        )
+
+    def test_outbox_compaction_preserves_latest_state_per_video(self) -> None:
+        self._queue()
+        record = youtube_review._latest_records(self.spec)["abc123XYZ"]
+        youtube_review._append_record(
+            self.spec,
+            youtube_review._with_status(record, "hold"),
+        )
+        youtube_review._append_record(
+            self.spec,
+            youtube_review._with_status(record, "keep_unlisted"),
+        )
+
+        with mock.patch.object(
+            youtube_review,
+            "_OUTBOX_COMPACT_MIN_EVENTS",
+            2,
+        ):
+            youtube_review._compact_outbox_locked(self.spec)
+
+        lines = youtube_review._outbox_path(self.spec).read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(
+            youtube_review._latest_records(self.spec)["abc123XYZ"].status,
+            "keep_unlisted",
+        )
 
     def test_queue_is_fsynced_before_issue_creation_and_reused(self) -> None:
         self._queue()
@@ -633,11 +685,11 @@ class IssueWorkflowTest(unittest.TestCase):
         before_lines = youtube_review._outbox_path(self.spec).read_text(
             encoding="utf-8"
         ).splitlines()
+        self.issue_list_mock.return_value = {issue.number: issue}
         with (
             mock.patch.object(
                 youtube_review,
                 "_get_issue",
-                return_value=issue,
             ) as get_mock,
             mock.patch("doci.youtube.privacy_status") as privacy_mock,
         ):
@@ -645,12 +697,89 @@ class IssueWorkflowTest(unittest.TestCase):
 
         self.assertEqual(outcome.failed_count, 0)
         self.assertIn("保留（変更なし）", outcome.events[0])
-        get_mock.assert_called_once_with(self.review, issue.number)
+        self.issue_list_mock.assert_called_once_with(self.review, "owner")
+        get_mock.assert_not_called()
         privacy_mock.assert_not_called()
         after_lines = youtube_review._outbox_path(self.spec).read_text(
             encoding="utf-8"
         ).splitlines()
         self.assertEqual(after_lines, before_lines)
+
+    def test_linked_issues_are_batched_for_each_recorded_actor(self) -> None:
+        actor_a = self._issue(
+            labels=("保留",),
+            video_id="actorA11",
+            number=11,
+            author="actor-a",
+        )
+        actor_b = self._issue(
+            video_id="actorB22",
+            number=22,
+            author="actor-b",
+        )
+        for issue in (actor_a, actor_b):
+            self._queue(issue.video_id)
+            record = youtube_review._latest_records(self.spec)[issue.video_id]
+            youtube_review._append_record(
+                self.spec,
+                youtube_review._with_issue(record, issue),
+            )
+        by_author = {
+            "actor-a": {actor_a.number: actor_a},
+            "actor-b": {actor_b.number: actor_b},
+        }
+        self.issue_list_mock.side_effect = (
+            lambda _review, author: by_author[author]
+        )
+        with mock.patch.object(youtube_review, "_get_issue") as get_mock:
+            outcome = youtube_review.reconcile_result(self.spec)
+
+        self.assertEqual(outcome.failed_count, 0)
+        self.assertCountEqual(
+            self.issue_list_mock.call_args_list,
+            [
+                mock.call(self.review, "actor-a"),
+                mock.call(self.review, "actor-b"),
+            ],
+        )
+        get_mock.assert_not_called()
+
+    def test_actor_batch_failure_happens_before_any_video_change(self) -> None:
+        actor_a = self._issue(
+            labels=("公開承認",),
+            video_id="actorA11",
+            number=11,
+            author="actor-a",
+        )
+        actor_b = self._issue(
+            labels=("公開承認",),
+            video_id="actorB22",
+            number=22,
+            author="actor-b",
+        )
+        for issue in (actor_a, actor_b):
+            self._queue(issue.video_id)
+            record = youtube_review._latest_records(self.spec)[issue.video_id]
+            youtube_review._append_record(
+                self.spec,
+                youtube_review._with_issue(record, issue),
+            )
+
+        def list_for_actor(_review, author):
+            if author == "actor-b":
+                raise RuntimeError("ページ上限")
+            return {actor_a.number: actor_a}
+
+        self.issue_list_mock.side_effect = list_for_actor
+        with (
+            mock.patch.object(youtube_review, "_get_issue") as get_mock,
+            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ページ上限"):
+                youtube_review.reconcile_result(self.spec)
+
+        get_mock.assert_not_called()
+        privacy_mock.assert_not_called()
 
     def test_retry_targets_only_failed_video_and_does_not_refetch_hold(self) -> None:
         hold = self._issue(labels=("保留",), video_id="hold123", number=1)
@@ -822,6 +951,54 @@ class IssueWorkflowTest(unittest.TestCase):
         self.assertEqual(issue.number, 101)
         self.assertEqual(gh_mock.call_count, 2)
         self.assertIn("page=2", gh_mock.call_args.args[0])
+
+    def test_issue_lookup_fails_closed_at_page_limit(self) -> None:
+        full_page = [
+            {
+                "number": number,
+                "title": "unrelated",
+                "body": "",
+                "labels": [],
+                "html_url": f"https://github.com/owner/repo/issues/{number}",
+                "state": "open",
+                "user": {"login": "owner"},
+            }
+            for number in range(1, 101)
+        ]
+        with (
+            mock.patch.object(youtube_review, "_MAX_ISSUE_LIST_PAGES", 2),
+            mock.patch.object(
+                youtube_review,
+                "_run_gh",
+                return_value=json.dumps(full_page),
+            ) as gh_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ページ上限"):
+                youtube_review._find_issue(self.review, "abc123XYZ")
+
+        self.assertEqual(gh_mock.call_count, 2)
+
+    def test_open_tracking_issues_are_fetched_as_one_page(self) -> None:
+        row = {
+            "number": 42,
+            "title": "target",
+            "body": "<!-- doci-youtube-review video_id=abc123XYZ -->",
+            "labels": [{"name": "保留"}],
+            "html_url": "https://github.com/owner/repo/issues/42",
+            "state": "open",
+            "user": {"login": "owner"},
+        }
+        with mock.patch.object(
+            youtube_review,
+            "_run_gh",
+            return_value=json.dumps([row]),
+        ) as gh_mock:
+            issues = self.list_open_impl(self.review, "owner")
+
+        self.assertEqual(issues[42].video_id, "abc123XYZ")
+        args = gh_mock.call_args.args[0]
+        self.assertIn("state=open", args)
+        self.assertIn("creator=owner", args)
 
     def test_issue_lookup_ignores_matching_marker_from_another_author(self) -> None:
         row = {
