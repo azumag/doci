@@ -663,7 +663,7 @@ class ResearchPromptTest(unittest.TestCase):
         )
         with (
             mock.patch.object(config, "RESEARCH_MODEL", config.OPENCODE_GO_DEFAULT_MODEL),
-            mock.patch.object(config, "LEGACY_CLAUDE_AUX_MODEL", "claude-sonnet-4-6"),
+            mock.patch.object(config, "LEGACY_CLAUDE_RESEARCH_MODEL", "claude-sonnet-4-6"),
             mock.patch("doci.research.llm.run_claude", return_value=raw) as run_mock,
         ):
             research._attempt("prompt", backend_override="claude")

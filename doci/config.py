@@ -64,11 +64,18 @@ def legacy_claude_model(model: str) -> str:
     return LEGACY_CLAUDE_MODEL
 
 
-def legacy_claude_aux_model(model: str) -> str:
-    """明示されたClaude補助段だけに、補助段用の互換モデル名を渡す。"""
+def legacy_claude_research_model(model: str) -> str:
+    """明示されたClaudeリサーチ段に、従来の互換モデル名を渡す。"""
     if model.startswith(("claude-", "anthropic/")):
         return model
-    return LEGACY_CLAUDE_AUX_MODEL
+    return LEGACY_CLAUDE_RESEARCH_MODEL
+
+
+def legacy_claude_factcheck_model(model: str) -> str:
+    """明示されたClaudeファクトチェック段に、従来の互換モデル名を渡す。"""
+    if model.startswith(("claude-", "anthropic/")):
+        return model
+    return LEGACY_CLAUDE_FACTCHECK_MODEL
 
 
 # --- text ---
@@ -76,9 +83,12 @@ OPENCODE_GO_DEFAULT_MODEL = "opencode-go/qwen3.7-plus"
 # Claudeは明示された旧経路だけで使う。TEXT_MODEL等の既定値がOpenCode Goモデルでも、
 # 旧経路を明示した利用者がモデル名を設定し忘れた場合に不正なモデル名を渡さない。
 LEGACY_CLAUDE_MODEL = get("CLAUDE_MODEL", "claude-opus-4-8")
-# 旧Claudeの補助段は従来のsonnet既定を維持し、既定OpenCode Goモデルを
-# CLAUDE_MODEL（本文用opus）へ暗黙に丸めてコストを増やさない。
-LEGACY_CLAUDE_AUX_MODEL = get("CLAUDE_AUX_MODEL", "claude-sonnet-4-6")
+# 旧Claudeの補助段は段ごとの従来既定を維持し、既定OpenCode Goモデルを
+# 本文用モデルへ暗黙に丸めて品質やコストを変えない。
+LEGACY_CLAUDE_RESEARCH_MODEL = get("CLAUDE_RESEARCH_MODEL", "claude-sonnet-4-6")
+LEGACY_CLAUDE_FACTCHECK_MODEL = get(
+    "CLAUDE_FACTCHECK_MODEL", LEGACY_CLAUDE_MODEL
+)
 # 運用の既定経路はOpenCode Go直API。Claudeは明示的に選んだ旧経路以外では呼ばない。
 TEXT_BACKEND = get("TEXT_BACKEND", "opencode_go")
 TEXT_MODEL = get("TEXT_MODEL", OPENCODE_GO_DEFAULT_MODEL)

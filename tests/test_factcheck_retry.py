@@ -86,6 +86,17 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertEqual(result["narration"], "確認後の全文です。")
 
+    def test_explicit_legacy_claude_factcheck_keeps_opus_default(self) -> None:
+        raw = '{"narration": "確認後の全文です。", "changed": false, "issues": []}'
+        with (
+            mock.patch.object(config, "FACTCHECK_MODEL", config.OPENCODE_GO_DEFAULT_MODEL),
+            mock.patch.object(config, "LEGACY_CLAUDE_FACTCHECK_MODEL", "claude-opus-4-8"),
+            mock.patch.object(factcheck.llm, "run_claude", return_value=raw) as run_mock,
+        ):
+            factcheck._attempt("prompt", "claude")
+
+        self.assertEqual(run_mock.call_args.args[1], "claude-opus-4-8")
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
             mock.patch.object(factcheck.llm, "run_claude") as claude_mock,

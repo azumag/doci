@@ -852,7 +852,7 @@ def _attempt(
     elif backend == "claude":
         raw = llm.run_claude(
             prompt,
-            config.legacy_claude_aux_model(config.RESEARCH_MODEL),
+            config.legacy_claude_research_model(config.RESEARCH_MODEL),
             allowed_tools=["WebSearch", "WebFetch"],
             timeout=config.script_llm_timeout(),
         )
