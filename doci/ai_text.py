@@ -353,9 +353,10 @@ def _run_opencode_go(
                 stream = iter(resp)
                 stream_timeout_warning_logged = False
                 fallback_reader: _ResponseReadWorker | None = None
-                response_read = getattr(resp, "read", None)
+                response_read = getattr(resp, "read1", None) or getattr(resp, "read", None)
                 byte_mode = callable(response_read)
                 line_buffer = bytearray()
+                last_socket_timeout: float | None = None
                 while True:
                     remaining = (
                         deadline_timeout - (time.monotonic() - started)
@@ -374,7 +375,21 @@ def _run_opencode_go(
                             if read_timeout is not None
                             else idle_timeout
                         )
-                    stream_timeout_applied = set_stream_timeout(resp, read_timeout)
+                    update_socket_timeout = (
+                        read_timeout is not None
+                        and (
+                            last_socket_timeout is None
+                            or abs(read_timeout - last_socket_timeout) >= 0.1
+                        )
+                    )
+                    if read_timeout is None:
+                        stream_timeout_applied = True
+                    elif update_socket_timeout:
+                        stream_timeout_applied = set_stream_timeout(resp, read_timeout)
+                    else:
+                        stream_timeout_applied = last_socket_timeout is not None
+                    if update_socket_timeout and stream_timeout_applied:
+                        last_socket_timeout = read_timeout
                     if not stream_timeout_applied:
                         if not stream_timeout_warning_logged:
                             _log("警告: OpenCode Goストリームのソケット期限を設定できません")
@@ -388,16 +403,21 @@ def _run_opencode_go(
                             if fallback_reader is not None:
                                 chunk = fallback_reader.next(read_timeout)
                             elif stream_timeout_applied:
-                                chunk = response_read(1)
+                                chunk = response_read(4096)
                             else:
                                 fallback_reader = _ResponseReadWorker(
-                                    lambda: response_read(1), resp
+                                    lambda: response_read(4096), resp
                                 )
                                 chunk = fallback_reader.next(read_timeout)
                             if not chunk:
-                                raise StopIteration
-                            line_buffer.extend(chunk)
-                            continue
+                                if line_buffer:
+                                    raw = bytes(line_buffer)
+                                    line_buffer.clear()
+                                else:
+                                    raise StopIteration
+                            else:
+                                line_buffer.extend(chunk)
+                                continue
                         elif fallback_reader is not None:
                             raw = fallback_reader.next(read_timeout)
                         elif stream_timeout_applied:

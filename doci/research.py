@@ -1248,7 +1248,13 @@ def web_research(
     last_err: Exception | None = None
     for attempt in range(1, config.SCRIPT_RESEARCH_RETRIES + 1):
         try:
-            attempt_timeout = require_research_budget()
+            remaining = require_research_budget()
+            remaining_attempts = config.SCRIPT_RESEARCH_RETRIES - attempt + 1
+            attempt_timeout = (
+                remaining / remaining_attempts
+                if remaining is not None
+                else None
+            )
             return _attempt(
                 prompt,
                 timeout=attempt_timeout,
@@ -1259,7 +1265,7 @@ def web_research(
                 allowed_source_urls=allowed_source_urls,
                 allowed_video_source_urls=allowed_video_source_urls,
             )
-        except (ValueError, RuntimeError) as e:  # JSON不正/不十分/CLI失敗を再試行
+        except (TimeoutError, ValueError, RuntimeError) as e:  # JSON/期限/CLI失敗を再試行
             last_err = e
             if attempt < config.SCRIPT_RESEARCH_RETRIES:
                 _log(f"リサーチ不良(試行{attempt}/{config.SCRIPT_RESEARCH_RETRIES})→再試行: {str(e)[:120]}")
