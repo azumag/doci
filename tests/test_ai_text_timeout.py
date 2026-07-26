@@ -146,6 +146,18 @@ class WriteTimeoutTest(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "時間上限"):
                 ai_text._run_anthropic("prompt", "claude-sonnet-4-6", timeout=0.001)
 
+    def test_anthropic_connection_uses_the_remaining_deadline(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = [b'{"content": []}', b'']
+        with (
+            mock.patch.object(config, "get", return_value="test-key"),
+            mock.patch.object(ai_text.urllib.request, "urlopen", return_value=response) as urlopen_mock,
+        ):
+            ai_text._run_anthropic("prompt", "claude-sonnet-4-6", timeout=17)
+
+        self.assertLessEqual(urlopen_mock.call_args.kwargs["timeout"], 17)
+
     def test_opencode_go_deadline_timer_closes_response_and_socket(self) -> None:
         class Closable:
             def __init__(self):

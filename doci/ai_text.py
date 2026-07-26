@@ -91,7 +91,10 @@ def _run_anthropic(
     deadline = (
         time.monotonic() + request_timeout if request_timeout is not None else None
     )
-    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+    open_timeout = request_timeout
+    if deadline is not None:
+        open_timeout = max(0.001, deadline - time.monotonic())
+    with urllib.request.urlopen(req, timeout=open_timeout) as resp:
         if deadline is None:
             payload = resp.read()
         else:
@@ -304,6 +307,17 @@ def _run_opencode_go(
                             raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
                         raise RuntimeError("OpenCode Go API の無通信タイムアウト") from exc
                     except StopIteration:
+                        if (
+                            deadline_expired.is_set()
+                            or (
+                                deadline_timeout is not None
+                                and time.monotonic() - started >= deadline_timeout
+                            )
+                        ):
+                            deadline_expired.set()
+                            raise RuntimeError(
+                                "OpenCode Go API が時間上限に達しました"
+                            )
                         # [DONE]/stop_reasonを省略するゲートウェイでも、ストリームの
                         # 自然終了は完全な本文の終端として受け入れる。
                         received_terminal = True
@@ -703,6 +717,7 @@ def generate(
     factcheck_research = research
     if (
         factcheck_enabled
+        and config.SCRIPT_FACTCHECK_RESEARCH
         and config.FACTCHECK_BACKEND in {"opencode", "opencode_go"}
         and not research
     ):

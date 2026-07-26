@@ -387,6 +387,42 @@ factcheck = true
         factcheck_mock.assert_called_once_with("本題から始まるナレーションです。", research_data)
         self.assertEqual(script["narration"], "確認済みのナレーションです。")
 
+    def test_factcheck_research_can_be_disabled_independently(self) -> None:
+        spec = self._make_spec(
+            "factcheck-no-research",
+            pipeline="""\
+[pipeline]
+research = false
+plan = false
+factcheck = true
+""",
+        )
+        raw = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        corrected = {
+            "narration": "原文を確認しました。",
+            "changed": False,
+            "issues": [],
+        }
+        with (
+            patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_FACTCHECK", False),
+            patch.object(config, "SCRIPT_FACTCHECK_RESEARCH", False),
+            patch("doci.research.web_research") as research_mock,
+            patch("doci.factcheck.verify_and_correct", return_value=corrected),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+        ):
+            ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        research_mock.assert_not_called()
+
     def test_generate_guards_researched_topic_before_drafting(self) -> None:
         spec = self._make_spec(
             "alpha",
