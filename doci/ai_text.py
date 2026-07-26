@@ -105,8 +105,6 @@ def _run_opencode_go(
 ) -> str:
     """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
     model = _opencode_go_model(model)
-    if not model:
-        raise RuntimeError("OPENCODE_MODEL が未設定です (TEXT_BACKEND=opencode_go)")
     provider, sep, model_id = model.partition("/")
     if sep and provider != "opencode-go":
         raise RuntimeError(

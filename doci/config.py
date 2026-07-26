@@ -124,7 +124,7 @@ SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # 下書き再試行を含む執筆段全体の予算。個別試行の残り時間をこの上限で絞り、
 # Claudeフォールバックなしでも複数コーナーを長時間占有し続けないようにする。
 SCRIPT_DRAFT_TOTAL_TIMEOUT = get_int(
-    "SCRIPT_DRAFT_TOTAL_TIMEOUT", WRITE_LLM_TIMEOUT * max(1, SCRIPT_DRAFT_RETRIES)
+    "SCRIPT_DRAFT_TOTAL_TIMEOUT", 2700
 )
 # リサーチの再試行回数。外部Web取得が稀に不正JSONを返すため。高価なので控えめ。
 SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)

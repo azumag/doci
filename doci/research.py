@@ -542,12 +542,12 @@ def _search_reference_materials(
             timeout=12,
             trusted_only=True,
         ) as response:
-            html = _decode_response_body(response, response.read(180000))
+            search_html = _decode_response_body(response, response.read(180000))
     except Exception as exc:  # noqa: BLE001 - research falls back safely when search is unavailable
         _log(f"OpenCode Go資料検索をスキップ: {type(exc).__name__}")
-        html = ""
+        search_html = ""
     parser = _SearchResultParser()
-    parser.feed(html)
+    parser.feed(search_html)
     if not parser.results:
         _log("OpenCode Go資料検索: 検索結果を解析できませんでした")
     rows: list[dict[str, str]] = []

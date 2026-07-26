@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -304,6 +305,33 @@ factcheck = false
 
         claude_mock.assert_not_called()
         self.assertLessEqual(dispatch_mock.call_args.kwargs["timeout"], 900)
+
+    def test_generate_stops_retrying_after_draft_total_budget(self) -> None:
+        spec = self._make_spec(
+            "draft-budget",
+            pipeline="""\
+[pipeline]
+research = false
+plan = false
+factcheck = false
+""",
+        )
+
+        def fail_after_budget(_prompt, timeout=None):
+            time.sleep(0.01)
+            raise RuntimeError("backend unavailable")
+
+        with (
+            patch.object(config, "TEXT_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_DRAFT_RETRIES", 3),
+            patch.object(config, "WRITE_LLM_TIMEOUT", 900),
+            patch.object(config, "SCRIPT_DRAFT_TOTAL_TIMEOUT", 0.001),
+            patch.object(ai_text, "_dispatch", side_effect=fail_after_budget) as dispatch_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "執筆段全体の時間上限"):
+                ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        self.assertEqual(dispatch_mock.call_count, 1)
 
     def test_factcheck_only_opencode_go_fetches_research_materials(self) -> None:
         spec = self._make_spec(
