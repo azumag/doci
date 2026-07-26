@@ -140,17 +140,17 @@ _RESEARCH_BACKEND_EXPLICIT = bool(get("RESEARCH_BACKEND"))
 _FACTCHECK_BACKEND_EXPLICIT = bool(get("FACTCHECK_BACKEND"))
 
 
-def _migrate_implicit_opencode_go_model(
+def _migrate_implicit_opencode_model(
     model: str, backend: str, backend_explicit: bool
 ) -> str:
-    """旧Claudeモデルを、暗黙のOpenCode Go既定経路だけ安全に移行する。
+    """旧Claudeモデルを、暗黙のOpenCode補助経路だけ安全に移行する。
 
     明示的に選ばれたバックエンドの不整合は ``ai_text`` 側で fail-closed にする。
     一方、旧 .env に残った Claude 補助モデルを、バックエンド未指定の新既定値で
     恒久的に無効化しないため、暗黙の補助段だけQwen既定へ移行する。
     """
     if (
-        backend == "opencode_go"
+        backend in {"opencode_go", "opencode"}
         and not backend_explicit
         and model.startswith(("claude-", "anthropic/"))
     ):
@@ -165,12 +165,12 @@ if TEXT_BACKEND == "opencode_go" and not OPENCODE_MODEL:
     TEXT_MODEL = _migrate_implicit_opencode_go_model(
         TEXT_MODEL, TEXT_BACKEND, False
     )
-if RESEARCH_BACKEND == "opencode_go":
-    RESEARCH_MODEL = _migrate_implicit_opencode_go_model(
+if RESEARCH_BACKEND in {"opencode_go", "opencode"}:
+    RESEARCH_MODEL = _migrate_implicit_opencode_model(
         RESEARCH_MODEL, RESEARCH_BACKEND, _RESEARCH_BACKEND_EXPLICIT
     )
-if FACTCHECK_BACKEND == "opencode_go":
-    FACTCHECK_MODEL = _migrate_implicit_opencode_go_model(
+if FACTCHECK_BACKEND in {"opencode_go", "opencode"}:
+    FACTCHECK_MODEL = _migrate_implicit_opencode_model(
         FACTCHECK_MODEL, FACTCHECK_BACKEND, _FACTCHECK_BACKEND_EXPLICIT
     )
 # 構成プラン(plan.make_plan)のバックエンド。値は opencode | codex。直契約MiniMaxを

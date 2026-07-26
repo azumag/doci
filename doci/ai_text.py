@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import re
 import socket
 import subprocess
@@ -27,6 +28,27 @@ from .channel import ChannelSpec, CornerSpec
 
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
 _DEFAULT_WRITE_TIMEOUT = object()
+
+
+def _call_with_timeout(func: Callable[[], object], timeout_seconds: float) -> object:
+    """settimeout非対応のラッパーでも、読み取り待ちで呼び出し側を塞がない。"""
+    result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def invoke() -> None:
+        try:
+            result_queue.put((True, func()))
+        except BaseException as exc:  # noqa: BLE001 - propagate worker exceptions
+            result_queue.put((False, exc))
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+    try:
+        succeeded, value = result_queue.get(timeout=max(0.001, timeout_seconds))
+    except queue.Empty as exc:
+        raise socket.timeout("stream read timeout") from exc
+    if succeeded:
+        return value
+    raise value  # type: ignore[misc]
 
 
 def _monotonic() -> float:
@@ -99,6 +121,7 @@ def _run_anthropic(
             payload = resp.read()
         else:
             chunks: list[bytes] = []
+            response_timeout_supported = False
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -114,7 +137,18 @@ def _run_anthropic(
                             setter(remaining)
                         except OSError:
                             pass
-                chunk = resp.read(4096)
+                        else:
+                            response_timeout_supported = True
+                try:
+                    chunk = (
+                        resp.read(4096)
+                        if response_timeout_supported
+                        else _call_with_timeout(lambda: resp.read(4096), remaining)
+                    )
+                except socket.timeout as exc:
+                    raise TimeoutError(
+                        "Anthropic API が時間上限に達しました"
+                    ) from exc
                 if not chunk:
                     break
                 chunks.append(chunk)
@@ -219,26 +253,7 @@ def _run_opencode_go(
     request_limits = [value for value in (deadline_timeout, idle_timeout) if value is not None]
     request_timeout = min(request_limits) if request_limits else None
     deadline_expired = threading.Event()
-    deadline_timer: threading.Timer | None = None
-    response_holder: list[object | None] = [None]
     received_terminal = False
-
-    def expire_stream() -> None:
-        deadline_expired.set()
-        response = response_holder[0]
-        if response is None:
-            return
-        for candidate in (
-            response,
-            getattr(response, "fp", None),
-            getattr(getattr(response, "fp", None), "raw", None),
-            getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
-        ):
-            try:
-                if candidate is not None:
-                    candidate.close()
-            except Exception:  # noqa: BLE001 - closing an already-finished response
-                continue
 
     def set_stream_timeout(response, timeout_seconds: float | None) -> bool:  # type: ignore[no-untyped-def]
         """各行の読み取り前にソケットへ残り時間を設定し、全体上限をreadlineにも適用する。"""
@@ -261,7 +276,6 @@ def _run_opencode_go(
 
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-            response_holder[0] = resp
             try:
                 stream = iter(resp)
                 stream_timeout_warning_logged = False
@@ -282,22 +296,15 @@ def _run_opencode_go(
                         )
                     stream_timeout_applied = set_stream_timeout(resp, read_timeout)
                     if not stream_timeout_applied:
-                        if deadline_timeout is not None and deadline_timer is None:
-                            # 通常はソケット期限でreadlineを解放する。期限設定に
-                            # 対応しないラッパーだけ、最後の保険としてタイマーを使う。
-                            timer_remaining = max(
-                                0.001, deadline_timeout - (time.monotonic() - started)
-                            )
-                            deadline_timer = threading.Timer(
-                                timer_remaining, expire_stream
-                            )
-                            deadline_timer.daemon = True
-                            deadline_timer.start()
                         if not stream_timeout_warning_logged:
                             _log("警告: OpenCode Goストリームのソケット期限を設定できません")
                             stream_timeout_warning_logged = True
                     try:
-                        raw = next(stream)
+                        raw = (
+                            next(stream)
+                            if stream_timeout_applied
+                            else _call_with_timeout(lambda: next(stream), read_timeout)
+                        )
                     except socket.timeout as exc:
                         if (
                             deadline_timeout is not None
@@ -364,8 +371,7 @@ def _run_opencode_go(
                         _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
                         next_progress += 60.0
             finally:
-                if deadline_timer is not None:
-                    deadline_timer.cancel()
+                pass
             if deadline_expired.is_set() and not received_terminal:
                 raise RuntimeError("OpenCode Go API が時間上限に達しました")
     except urllib.error.HTTPError as exc:
@@ -375,10 +381,6 @@ def _run_opencode_go(
         if deadline_expired.is_set() and not received_terminal:
             raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
         raise
-    finally:
-        if deadline_timer is not None:
-            deadline_timer.cancel()
-
     text = "".join(text_parts)
     if stop_reason == "max_tokens":
         raise RuntimeError(

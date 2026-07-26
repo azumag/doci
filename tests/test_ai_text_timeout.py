@@ -158,7 +158,7 @@ class WriteTimeoutTest(unittest.TestCase):
 
         self.assertLessEqual(urlopen_mock.call_args.kwargs["timeout"], 17)
 
-    def test_opencode_go_deadline_timer_closes_response_and_socket(self) -> None:
+    def test_opencode_go_read_fallback_closes_response_and_socket(self) -> None:
         class Closable:
             def __init__(self):
                 self.close_mock = mock.Mock()

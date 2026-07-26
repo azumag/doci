@@ -66,6 +66,20 @@ class SelectCodexBackendTest(unittest.TestCase):
 
 
 class AuxiliaryBackendDefaultTest(unittest.TestCase):
+    def test_implicit_opencode_cli_migrates_legacy_aux_model(self) -> None:
+        self.assertEqual(
+            config._migrate_implicit_opencode_model(
+                "claude-sonnet-4-6", "opencode", False
+            ),
+            config.OPENCODE_GO_DEFAULT_MODEL,
+        )
+        self.assertEqual(
+            config._migrate_implicit_opencode_model(
+                "claude-sonnet-4-6", "opencode", True
+            ),
+            "claude-sonnet-4-6",
+        )
+
     def test_explicit_legacy_text_backend_keeps_auxiliary_compatibility(self) -> None:
         with mock.patch.object(config, "TEXT_BACKEND", "anthropic"):
             self.assertEqual(config._default_aux_backend(), "claude")
