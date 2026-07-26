@@ -503,7 +503,6 @@ def generate(
     if (
         factcheck_enabled
         and config.FACTCHECK_BACKEND == "opencode_go"
-        and not research_enabled
         and not research
     ):
         from . import research as research_mod

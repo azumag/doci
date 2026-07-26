@@ -61,9 +61,9 @@ class ResearchPromptTest(unittest.TestCase):
                 channel_guidance="YouTube制作者の維持率改善",
             )
 
-        query_url = unquote(open_mock.call_args.args[0].full_url)
-        self.assertIn("YouTube", query_url)
-        self.assertNotIn("直近の題材", query_url)
+        query_urls = [unquote(call.args[0].full_url) for call in open_mock.call_args_list]
+        self.assertTrue(any("YouTube" in query_url for query_url in query_urls))
+        self.assertTrue(all("直近の題材" not in query_url for query_url in query_urls))
 
     def test_reference_search_falls_back_to_wikipedia_when_ddg_has_no_results(self) -> None:
         with (
@@ -82,6 +82,8 @@ class ResearchPromptTest(unittest.TestCase):
             materials = research._search_reference_materials("歴史")
 
         wikipedia_mock.assert_called_once()
+        self.assertNotIn("公式", wikipedia_mock.call_args.args[0])
+        self.assertNotIn("一次資料", wikipedia_mock.call_args.args[0])
         self.assertEqual(materials[0]["url"], "https://ja.wikipedia.org/wiki/題材")
 
     def test_reference_search_falls_back_to_wikipedia_when_ddg_fetch_fails(self) -> None:

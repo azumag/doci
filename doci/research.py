@@ -518,7 +518,8 @@ def _search_reference_materials(
         if len(rows) >= 4:
             break
     if not rows:
-        rows = _wikipedia_search_results(" ".join(context))
+        fallback_terms = [label, *_query_terms(search_hint, 2)]
+        rows = _wikipedia_search_results(" ".join(dict.fromkeys(term for term in fallback_terms if term)))
         if rows:
             _log("OpenCode Go資料検索: DuckDuckGo結果なし→Wikipediaへフォールバック")
     materials: list[dict[str, str]] = []
