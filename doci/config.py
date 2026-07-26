@@ -132,6 +132,43 @@ _AUX_BACKEND_DEFAULT = _default_aux_backend()
 RESEARCH_BACKEND = get("RESEARCH_BACKEND", _AUX_BACKEND_DEFAULT)
 FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", _AUX_BACKEND_DEFAULT)
 CHART_BG_BACKEND = get("CHART_BG_BACKEND", _AUX_BACKEND_DEFAULT)
+_RESEARCH_BACKEND_EXPLICIT = "RESEARCH_BACKEND" in os.environ
+_FACTCHECK_BACKEND_EXPLICIT = "FACTCHECK_BACKEND" in os.environ
+
+
+def _migrate_implicit_opencode_go_model(
+    model: str, backend: str, backend_explicit: bool
+) -> str:
+    """旧Claudeモデルを、暗黙のOpenCode Go既定経路だけ安全に移行する。
+
+    明示的に選ばれたバックエンドの不整合は ``ai_text`` 側で fail-closed にする。
+    一方、旧 .env に残った Claude 補助モデルを、バックエンド未指定の新既定値で
+    恒久的に無効化しないため、暗黙の補助段だけQwen既定へ移行する。
+    """
+    if (
+        backend == "opencode_go"
+        and not backend_explicit
+        and model.startswith(("claude-", "anthropic/"))
+    ):
+        return OPENCODE_GO_DEFAULT_MODEL
+    return model
+
+
+# 既存 .env に残る Claude の本文モデルは、OPENCODE_MODEL が空なら新しい
+# 既定経路へ移行する。provider-qualified な別モデルなど明示的な不整合は
+# _opencode_go_model() で停止し、意図しないモデル実行を防ぐ。
+if TEXT_BACKEND == "opencode_go" and not OPENCODE_MODEL:
+    TEXT_MODEL = _migrate_implicit_opencode_go_model(
+        TEXT_MODEL, TEXT_BACKEND, False
+    )
+if RESEARCH_BACKEND == "opencode_go":
+    RESEARCH_MODEL = _migrate_implicit_opencode_go_model(
+        RESEARCH_MODEL, RESEARCH_BACKEND, _RESEARCH_BACKEND_EXPLICIT
+    )
+if FACTCHECK_BACKEND == "opencode_go":
+    FACTCHECK_MODEL = _migrate_implicit_opencode_go_model(
+        FACTCHECK_MODEL, FACTCHECK_BACKEND, _FACTCHECK_BACKEND_EXPLICIT
+    )
 # 構成プラン(plan.make_plan)のバックエンド。値は opencode | codex。直契約MiniMaxを
 # opencode-goゲートウェイ経由でなく codex exec 経由で使えるようにする。
 PLAN_BACKEND = get("PLAN_BACKEND", "opencode")

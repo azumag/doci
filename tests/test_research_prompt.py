@@ -182,6 +182,15 @@ class ResearchPromptTest(unittest.TestCase):
         with (
             mock.patch.object(research, "_wikipedia_search_results", return_value=[]) as wiki_mock,
             mock.patch.object(research, "_safe_urlopen") as open_mock,
+            mock.patch.object(
+                research.time,
+                "monotonic",
+                side_effect=(
+                    lambda clock=iter([100.0, 100.0001, 100.0002]): next(
+                        clock, 100.0003
+                    )
+                ),
+            ),
         ):
             research._search_reference_materials("YouTube Studio", search_timeout=0.001)
 

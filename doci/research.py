@@ -470,17 +470,27 @@ def _safe_urlopen(request: Request, timeout: float, *, trusted_only: bool = Fals
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
-        connection_timeout = min(timeout, max(0.1, deadline - time.monotonic()))
         headers = dict(request.header_items())
         headers["Host"] = parsed.netloc
         last_connect_error: Exception | None = None
         for ip in ips:
+            remaining_timeout = deadline - time.monotonic()
+            if remaining_timeout <= 0:
+                raise TimeoutError("資料取得が時間上限に達しました")
+            connection_timeout = min(timeout, remaining_timeout)
             if parsed.scheme == "https":
                 connection = _PinnedHTTPSConnection(hostname, ip, port, connection_timeout)
             else:
                 connection = _PinnedHTTPConnection(hostname, ip, port, connection_timeout)
             try:
                 connection.request(request.get_method(), path, headers=headers)
+                remaining_timeout = deadline - time.monotonic()
+                if remaining_timeout <= 0:
+                    raise TimeoutError("資料取得が時間上限に達しました")
+                sock = getattr(connection, "sock", None)
+                settimeout = getattr(sock, "settimeout", None)
+                if callable(settimeout):
+                    settimeout(min(timeout, remaining_timeout))
                 response = connection.getresponse()
             except (OSError, TimeoutError) as exc:
                 last_connect_error = exc

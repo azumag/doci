@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -318,7 +317,6 @@ factcheck = false
         )
 
         def fail_after_budget(_prompt, timeout=None):
-            time.sleep(0.01)
             raise RuntimeError("backend unavailable")
 
         with (
@@ -326,6 +324,11 @@ factcheck = false
             patch.object(config, "SCRIPT_DRAFT_RETRIES", 3),
             patch.object(config, "WRITE_LLM_TIMEOUT", 900),
             patch.object(config, "SCRIPT_DRAFT_TOTAL_TIMEOUT", 0.001),
+            patch.object(
+                ai_text.time,
+                "monotonic",
+                side_effect=[100.0, 100.0005, 100.001],
+            ),
             patch.object(ai_text, "_dispatch", side_effect=fail_after_budget) as dispatch_mock,
         ):
             with self.assertRaisesRegex(
