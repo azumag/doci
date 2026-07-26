@@ -189,6 +189,10 @@ class ReconcileResult:
     failed_video_ids: tuple[str, ...] = ()
 
 
+class _DeferUntilNextCycle(RuntimeError):
+    """短時間の同一cycle再試行ではなく、次の3時間runまで待つ。"""
+
+
 def _text(value: object, limit: int = 500) -> str:
     if not isinstance(value, str):
         return ""
@@ -957,7 +961,7 @@ def _ensure_issue_locked(
         # 動画IDで絞った検索で作成済みIssueが無いことを1run後に確認したため、
         # pendingへ戻す。次の3時間runでだけ再試行し、直後の重複作成を避ける。
         _append_record(spec, _with_status(record, "pending"))
-        raise RuntimeError(
+        raise _DeferUntilNextCycle(
             "確認Issueの作成結果を確認できませんでした。"
             "重複作成を避け、次回runで作成を再試行します"
         )
@@ -1242,24 +1246,13 @@ def reconcile_result(
                 if decision == review.publish_label:
                     from . import youtube
 
-                    current = youtube.privacy_status(
+                    youtube.set_privacy(
                         record.video_id,
+                        "public",
+                        expected_privacy="unlisted",
                         token_file=spec.publish.youtube.token,
                         client_secret_file=spec.publish.youtube.client_secret,
                     )
-                    if current == "unlisted":
-                        youtube.set_privacy(
-                            record.video_id,
-                            "public",
-                            expected_privacy="unlisted",
-                            token_file=spec.publish.youtube.token,
-                            client_secret_file=spec.publish.youtube.client_secret,
-                        )
-                    elif current != "public":
-                        events.append(
-                            f"確認Issue #{fresh.number}: 現在{current}のため公開変更を拒否"
-                        )
-                        continue
                     confirmed = _with_status(record, "public_confirmed")
                     if confirmed != record:
                         # Issue closeより先に公開済み状態をfsyncし、close後の書込み失敗を
@@ -1290,6 +1283,14 @@ def reconcile_result(
                         f"確認Issue #{fresh.number}: "
                         "限定公開で保持してIssueをクローズ（動画変更なし）"
                     )
+            except _DeferUntilNextCycle as exc:
+                # failed_countはcronへ伝えるがretry planには入れず、直後の
+                # channel runでSearch index反映前に重複Issueを作らない。
+                failed_count += 1
+                events.append(
+                    f"動画 {original.video_id}: 次cycleまで確認処理を延期 "
+                    f"{_redact(str(exc))[:180]}"
+                )
             except Exception as exc:  # 1件の不調で他のpending動画を止めない
                 failed_count += 1
                 failed_video_ids.append(original.video_id)

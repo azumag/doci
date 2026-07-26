@@ -28,7 +28,7 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("--unified=5", self.workflow)
-        self.assertIn('MAX_REVIEW_DIFF_BYTES: "600000"', self.workflow)
+        self.assertIn('MAX_REVIEW_DIFF_BYTES: "250000"', self.workflow)
         self.assertIn("the Action never truncates a review", self.workflow)
         self.assertNotIn("head -c", self.workflow)
         self.assertIn("cat /tmp/doci-pr.diff", self.workflow)

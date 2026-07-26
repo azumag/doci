@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from doci import youtube_review
+from doci import history, youtube_review
 from doci.channel import YouTubeReviewSpec
 
 
@@ -52,6 +52,7 @@ def _spec(
         review=review,
     )
     return SimpleNamespace(
+        id="youtube-growth",
         publish=SimpleNamespace(youtube=youtube),
         history_file=root / "history.jsonl",
         output_dir=root / "output",
@@ -465,10 +466,6 @@ class IssueWorkflowTest(unittest.TestCase):
                 "_get_issue",
                 return_value=issue,
             ),
-            mock.patch(
-                "doci.youtube.privacy_status",
-                return_value="unlisted",
-            ),
             mock.patch("doci.youtube.set_privacy") as privacy_mock,
             mock.patch.object(
                 youtube_review,
@@ -493,8 +490,13 @@ class IssueWorkflowTest(unittest.TestCase):
         with (
             mock.patch.object(youtube_review, "_find_issue", return_value=issue),
             mock.patch.object(youtube_review, "_get_issue", return_value=issue),
-            mock.patch("doci.youtube.privacy_status", return_value="private"),
-            mock.patch("doci.youtube.set_privacy") as privacy_mock,
+            mock.patch(
+                "doci.youtube.set_privacy",
+                side_effect=RuntimeError(
+                    "YouTube公開設定が想定外です: "
+                    "expected=unlisted actual=private"
+                ),
+            ) as privacy_mock,
             mock.patch.object(
                 youtube_review,
                 "_close_published_issue",
@@ -502,9 +504,9 @@ class IssueWorkflowTest(unittest.TestCase):
         ):
             events = youtube_review.reconcile(self.spec)
 
-        privacy_mock.assert_not_called()
+        privacy_mock.assert_called_once()
         close_mock.assert_not_called()
-        self.assertIn("公開変更を拒否", events[0])
+        self.assertIn("actual=private", events[0])
 
     def test_closed_issue_recovers_after_terminal_append_failure(self) -> None:
         approved = self._issue(labels=("公開承認",))
@@ -533,8 +535,8 @@ class IssueWorkflowTest(unittest.TestCase):
                 return_value=approved,
             ),
             mock.patch(
-                "doci.youtube.privacy_status",
-                return_value="public",
+                "doci.youtube.set_privacy",
+                return_value="unchanged",
             ) as privacy_mock,
             mock.patch.object(
                 youtube_review,
@@ -588,8 +590,8 @@ class IssueWorkflowTest(unittest.TestCase):
                 return_value=approved,
             ),
             mock.patch(
-                "doci.youtube.privacy_status",
-                return_value="public",
+                "doci.youtube.set_privacy",
+                return_value="unchanged",
             ) as privacy_mock,
             mock.patch.object(
                 youtube_review,
@@ -616,7 +618,7 @@ class IssueWorkflowTest(unittest.TestCase):
     def test_forged_issue_without_outbox_is_ignored(self) -> None:
         with (
             mock.patch.object(youtube_review, "_find_issue") as find_mock,
-            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+            mock.patch("doci.youtube.set_privacy") as privacy_mock,
         ):
             events = youtube_review.reconcile(self.spec)
 
@@ -639,7 +641,7 @@ class IssueWorkflowTest(unittest.TestCase):
                 "_get_issue",
                 return_value=withdrawn,
             ),
-            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+            mock.patch("doci.youtube.set_privacy") as privacy_mock,
         ):
             events = youtube_review.reconcile(self.spec)
 
@@ -678,7 +680,7 @@ class IssueWorkflowTest(unittest.TestCase):
                         return_value=issue,
                     ),
                     mock.patch(
-                        "doci.youtube.privacy_status"
+                        "doci.youtube.set_privacy"
                     ) as privacy_mock,
                     mock.patch.object(
                         youtube_review,
@@ -728,7 +730,7 @@ class IssueWorkflowTest(unittest.TestCase):
                 "_close_kept_unlisted_issue",
                 side_effect=fail_first_close,
             ) as close_mock,
-            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+            mock.patch("doci.youtube.set_privacy") as privacy_mock,
         ):
             first = youtube_review.reconcile(self.spec)
             self.assertEqual(
@@ -765,7 +767,7 @@ class IssueWorkflowTest(unittest.TestCase):
                 youtube_review,
                 "_get_issue",
             ) as get_mock,
-            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+            mock.patch("doci.youtube.set_privacy") as privacy_mock,
         ):
             outcome = youtube_review.reconcile_result(self.spec)
 
@@ -859,7 +861,7 @@ class IssueWorkflowTest(unittest.TestCase):
         self.issue_batch_mock.side_effect = list_for_actor
         with (
             mock.patch.object(youtube_review, "_get_issue") as get_mock,
-            mock.patch("doci.youtube.privacy_status") as privacy_mock,
+            mock.patch("doci.youtube.set_privacy") as privacy_mock,
         ):
             with self.assertRaisesRegex(RuntimeError, "ページ上限"):
                 youtube_review.reconcile_result(self.spec)
@@ -924,17 +926,60 @@ class IssueWorkflowTest(unittest.TestCase):
         self.assertEqual(second.failed_video_ids, ("broken123",))
         get_mock.assert_not_called()
 
-    def test_missing_issue_is_retried_from_unlisted_history(self) -> None:
-        row = {
-            "video_id": "retry123",
-            "title": "確認待ち",
-            "youtube_privacy": "unlisted",
-            "youtube_theme_review": self.assessment.to_dict(),
-        }
-        self.spec.history_file.write_text(
-            json.dumps(row, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+    def test_uncertain_issue_creation_is_not_retried_in_same_cycle(self) -> None:
+        self._queue()
+        pending = youtube_review._latest_records(self.spec)["abc123XYZ"]
+        creating = youtube_review.ReviewRecord(
+            video_id=pending.video_id,
+            title=pending.title,
+            assessment=pending.assessment,
+            status="issue_creating",
+            issue_author="owner",
         )
+        youtube_review._append_record(self.spec, creating)
+        with (
+            mock.patch.object(
+                youtube_review,
+                "_find_issue",
+                return_value=None,
+            ) as find_mock,
+            mock.patch.object(
+                youtube_review,
+                "_create_issue",
+            ) as create_mock,
+        ):
+            first = youtube_review.reconcile_result(self.spec)
+            second = youtube_review.reconcile_result(
+                self.spec,
+                only_video_ids=set(first.failed_video_ids),
+            )
+
+        self.assertEqual(first.failed_count, 1)
+        self.assertEqual(first.failed_video_ids, ())
+        self.assertEqual(second.failed_count, 0)
+        self.assertEqual(find_mock.call_count, 1)
+        create_mock.assert_not_called()
+        self.assertEqual(
+            youtube_review._latest_records(self.spec)["abc123XYZ"].status,
+            "pending",
+        )
+
+    def test_missing_issue_is_retried_from_unlisted_history(self) -> None:
+        history.record(
+            self.spec,
+            "shorts",
+            "確認待ち",
+            "retry123",
+            extra={
+                "youtube_privacy": "unlisted",
+                "youtube_theme_review": self.assessment.to_dict(),
+            },
+        )
+        stored = json.loads(
+            self.spec.history_file.read_text(encoding="utf-8").splitlines()[0]
+        )
+        self.assertEqual(stored["video_id"], "retry123")
+        self.assertEqual(stored["youtube_privacy"], "unlisted")
         created = self._issue(video_id="retry123")
         with (
             mock.patch.object(youtube_review, "_find_issue", return_value=None),
@@ -1232,7 +1277,7 @@ class IssueWorkflowTest(unittest.TestCase):
                     "_get_issue",
                 ) as get_mock,
                 mock.patch(
-                    "doci.youtube.privacy_status"
+                    "doci.youtube.set_privacy"
                 ) as privacy_mock,
                 mock.patch.object(
                     youtube_review,

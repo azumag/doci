@@ -506,7 +506,7 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
     youtube_privacy = _string(
         youtube,
         "privacy",
-        config.YOUTUBE_PRIVACY,
+        "unlisted" if review_enabled else config.YOUTUBE_PRIVACY,
         "publish.youtube.",
     )
     if review_enabled and youtube_privacy != "unlisted":

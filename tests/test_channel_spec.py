@@ -407,6 +407,28 @@ repository = "owner/repo"
         ):
             channel.load("sample", channels_dir=self.channels_dir)
 
+    def test_review_defaults_to_unlisted_independent_of_global_privacy(
+        self,
+    ) -> None:
+        self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube.review]
+enabled = true
+repository = "owner/repo"
+''')
+
+        with patch.object(config, "YOUTUBE_PRIVACY", "private"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+
+        self.assertEqual(spec.publish.youtube.privacy, "unlisted")
+
     def test_ideology_uses_legacy_youtube_files_until_migrated(self) -> None:
         self._write_channel(
             "ideology",

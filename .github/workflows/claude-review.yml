@@ -48,7 +48,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MAX_REVIEW_DIFF_BYTES: "600000"
+          MAX_REVIEW_DIFF_BYTES: "250000"
         run: |
           git diff --no-ext-diff --unified=5 "${BASE_SHA}...${HEAD_SHA}" > /tmp/doci-pr.diff
           if [ "$(wc -c < /tmp/doci-pr.diff)" -gt "$MAX_REVIEW_DIFF_BYTES" ]; then

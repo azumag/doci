@@ -200,7 +200,8 @@ YouTube投稿成功1本へ適用する。その動画が評価閾値に届くま
 `youtube-growth` は、企画に次の3点が明記され、主題適合も `clear` の場合だけ自動で
 `public` 投稿する。
 この運用を有効にするチャンネルの `publish.youtube.privacy` は、確認待ちの安全な
-基準値として `unlisted` を必須とする。最終状態はこの基準値を暗黙上書きするのではなく、
+基準値として `unlisted` を必須とし、未指定時もグローバル設定に関係なく `unlisted` になる。
+最終状態はこの基準値を暗黙上書きするのではなく、
 上記判定による `public` または `unlisted` のどちらかとして明示的に決まる。
 
 - 対象者がYouTube制作者
@@ -230,6 +231,8 @@ python -m doci.youtube --auth --analytics --manage --channel youtube-growth
 CLIの非zero終了へ伝搬し、その場合は後続のチャンネルrunでも生成前に再試行する。限定公開アップロードは
 Issue作成より先に `output/<channel>/youtube_review_outbox.jsonl` へ耐久記録されるため、
 Issue作成や後続の履歴保存に失敗しても次の3時間実行で再試行される。
+Issue作成結果が不明な動画だけはSearch index反映前の重複作成を避け、同一cron内では
+再試行せず次の3時間cycleまで待つ。
 `保留` は3時間周期に1回だけIssueを再取得し、動画状態もoutbox状態も変更・追記しない。
 記録済みの確認Issue番号は作成者単位のGraphQL batchで直接取得し、無関係なIssue総数に
 依存しない。公開・限定公開保持の変更直前だけ対象Issueを個別再取得する。

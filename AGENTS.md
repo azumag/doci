@@ -10,9 +10,9 @@
 ## Required validation
 
 - Run focused tests for the changed behavior.
-- Run the full suite with the project environment:
-  `/Users/azumag/work/doci/.venv/bin/python -m unittest discover -s tests -v`.
-- Run `/Users/azumag/work/doci/.venv/bin/python -m compileall -q doci tests` and
+- Run the full suite with the active project environment:
+  `python -m unittest discover -s tests -v`.
+- Run `python -m compileall -q doci tests` and
   `git diff --check`.
 
 ## Required review sequence
