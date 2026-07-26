@@ -13,13 +13,14 @@ import json
 import re
 import socket
 import threading
+import time
 from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
     ThreadPoolExecutor,
     as_completed,
 )
 from html.parser import HTMLParser
-from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request
 
 from . import config, llm
@@ -177,8 +178,10 @@ def _is_trusted_source_host(hostname: str) -> bool:
     )
 
 
-def _resolve_addresses(hostname: str, port: int | None = None) -> list[tuple]:
-    """DNS解決を短い予算で行い、停止しない resolver はdaemon threadに隔離する。"""
+def _resolve_addresses(
+    hostname: str, port: int | None = None, timeout: float = 3.0
+) -> list[tuple]:
+    """DNS解決を予算内で行い、停止しない resolver はdaemon threadに隔離する。"""
     result: list[tuple] = []
 
     def resolve() -> None:
@@ -195,7 +198,7 @@ def _resolve_addresses(hostname: str, port: int | None = None) -> list[tuple]:
 
     worker = threading.Thread(target=resolve, daemon=True)
     worker.start()
-    worker.join(1.0)
+    worker.join(timeout)
     return result
 
 
@@ -220,14 +223,30 @@ def _is_public_http_url(url: str, *, trusted_only: bool = False) -> bool:
     return bool(addresses) and all(address.is_global for address in addresses)
 
 
-def _public_target(url: str, *, trusted_only: bool) -> tuple[str, int, str]:
+def _public_target(
+    url: str, *, trusted_only: bool, deadline: float | None = None
+) -> tuple[str, int, str]:
     """URLを検証し、接続に使う単一の公開IPへ解決する。"""
     parsed = urlparse(url)
-    if not _is_public_http_url(url, trusted_only=trusted_only):
-        raise ValueError("公開ホスト以外の資料URLを拒否しました")
-    hostname = parsed.hostname or ""
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    infos = _resolve_addresses(hostname, port)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("HTTP(S)以外の資料URLを拒否しました")
+    if parsed.username or parsed.password:
+        raise ValueError("認証情報付きの資料URLを拒否しました")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".local"):
+        raise ValueError("ローカル資料URLを拒否しました")
+    if trusted_only and not _is_trusted_source_host(hostname):
+        raise ValueError("許可された資料ホストではありません")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError("不正な資料URLポートです") from exc
+    dns_timeout = 3.0
+    if deadline is not None:
+        dns_timeout = min(dns_timeout, max(0.1, deadline - time.monotonic()))
+    infos = _resolve_addresses(hostname, port, dns_timeout)
+    if not infos:
+        raise ValueError("資料URLのDNS解決が時間内に完了しませんでした")
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if ip.is_global:
@@ -255,13 +274,29 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 
 class _PinnedResponse:
-    def __init__(self, connection, response, url: str) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, connection, response, url: str, deadline: float) -> None:  # type: ignore[no-untyped-def]
         self._connection = connection
         self._response = response
         self._url = url
+        self._deadline = deadline
 
     def read(self, amount: int = -1) -> bytes:
-        return self._response.read(amount)
+        if amount < 0:
+            amount = 12000
+        chunks: list[bytes] = []
+        remaining = amount
+        while remaining > 0:
+            left = self._deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("資料本文取得が時間上限に達しました")
+            if self._connection.sock is not None:
+                self._connection.sock.settimeout(left)
+            chunk = self._response.read(min(4096, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
     def geturl(self) -> str:
         return self._url
@@ -282,27 +317,33 @@ class _PinnedResponse:
 def _safe_urlopen(request: Request, timeout: float, *, trusted_only: bool = False):
     """検証済みIPへ固定接続し、各リダイレクトも再検証する（SSRF対策）。"""
     current_url = request.full_url
-    for _ in range(2):
-        hostname, port, ip = _public_target(current_url, trusted_only=trusted_only)
+    deadline = time.monotonic() + timeout
+    for _ in range(5):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("資料取得が時間上限に達しました")
+        hostname, port, ip = _public_target(
+            current_url, trusted_only=trusted_only, deadline=deadline
+        )
         parsed = urlparse(current_url)
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
+        connection_timeout = min(timeout, max(0.1, deadline - time.monotonic()))
         if parsed.scheme == "https":
-            connection = _PinnedHTTPSConnection(hostname, ip, port, timeout)
+            connection = _PinnedHTTPSConnection(hostname, ip, port, connection_timeout)
         else:
-            connection = _PinnedHTTPConnection(hostname, ip, port, timeout)
+            connection = _PinnedHTTPConnection(hostname, ip, port, connection_timeout)
         headers = dict(request.header_items())
         headers["Host"] = parsed.netloc
         connection.request(request.get_method(), path, headers=headers)
         response = connection.getresponse()
         if 300 <= response.status < 400 and response.getheader("Location"):
             next_url = urljoin(current_url, response.getheader("Location") or "")
-            response.read()
+            response.close()
             connection.close()
             current_url = next_url
             continue
-        return _PinnedResponse(connection, response, current_url)
+        return _PinnedResponse(connection, response, current_url, deadline)
     raise ValueError("資料URLのリダイレクト回数が上限を超えました")
 
 
@@ -530,8 +571,12 @@ def _normalized_source_url(url: str) -> str:
     default_port = 443 if parsed.scheme.lower() == "https" else 80
     netloc = host if not port or port == default_port else f"{host}:{port}"
     query = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()), doseq=True)
+    path = quote(
+        unquote(parsed.path),
+        safe="/:@-._~!$&'()*+,;=",
+    ).rstrip("/")
     suffix = f"?{query}" if query else ""
-    return f"{parsed.scheme.lower()}://{netloc}{parsed.path.rstrip('/')}" + suffix
+    return f"{parsed.scheme.lower()}://{netloc}{path}" + suffix
 
 
 def _is_official_youtube_source(url: str) -> bool:

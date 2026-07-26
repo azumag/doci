@@ -50,6 +50,50 @@ class ResearchPromptTest(unittest.TestCase):
         )
         excerpt_mock.assert_called_once_with("https://www.youtube.com/help")
 
+    def test_untrusted_source_host_is_rejected(self) -> None:
+        self.assertFalse(research._is_trusted_source_host("example.com"))
+        self.assertFalse(research._is_trusted_source_host("evil.wikipedia.org.example.com"))
+
+    def test_redirect_target_is_revalidated(self) -> None:
+        class FakeResponse:
+            status = 302
+
+            def getheader(self, name: str, default=None):  # type: ignore[no-untyped-def]
+                return "http://127.0.0.1/metadata" if name == "Location" else default
+
+            def close(self) -> None:
+                return None
+
+        class FakeConnection:
+            sock = None
+
+            def request(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                return None
+
+            def getresponse(self):  # type: ignore[no-untyped-def]
+                return FakeResponse()
+
+            def close(self) -> None:
+                return None
+
+        with (
+            mock.patch.object(
+                research,
+                "_public_target",
+                side_effect=[
+                    ("www.youtube.com", 443, "93.184.216.34"),
+                    ValueError("ローカル資料URLを拒否しました"),
+                ],
+            ),
+            mock.patch.object(research, "_PinnedHTTPSConnection", return_value=FakeConnection()),
+        ):
+            with self.assertRaisesRegex(ValueError, "ローカル資料URL"):
+                research._safe_urlopen(
+                    research.Request("https://www.youtube.com/help"),
+                    timeout=3,
+                    trusted_only=True,
+                )
+
     def test_search_url_decode_does_not_double_unquote(self) -> None:
         self.assertEqual(
             research._decode_search_url(
@@ -93,12 +137,9 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertFalse(research._is_public_http_url("http://169.254.169.254/"))
         self.assertFalse(research._is_public_http_url("http://localhost/"))
 
-    def test_dns_answer_change_is_rejected_before_connect(self) -> None:
-        public = [(2, 1, 6, "", ("93.184.216.34", 443))]
+    def test_private_dns_answer_is_rejected_before_connect(self) -> None:
         private = [(2, 1, 6, "", ("169.254.169.254", 443))]
-        with mock.patch.object(
-            research.socket, "getaddrinfo", side_effect=[public, private]
-        ):
+        with mock.patch.object(research.socket, "getaddrinfo", return_value=private):
             with self.assertRaises(ValueError):
                 research._public_target("https://example.org/source", trusted_only=False)
 
@@ -139,6 +180,12 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertNotEqual(
             research._normalized_source_url("https://example.org:8443/doc"),
             research._normalized_source_url("https://example.org/doc"),
+        )
+        self.assertEqual(
+            research._normalized_source_url("https://ja.wikipedia.org/wiki/共産主義"),
+            research._normalized_source_url(
+                "https://ja.wikipedia.org/wiki/%E5%85%B1%E7%94%A3%E4%B8%BB%E7%BE%A9"
+            ),
         )
 
     def test_unretrieved_youtube_examples_are_rejected_for_opencode_go(self) -> None:
