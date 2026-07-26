@@ -100,13 +100,14 @@ class WriteTimeoutTest(unittest.TestCase):
         with (
             mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
             mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(config, "WRITE_LLM_IDLE_TIMEOUT", 300),
             mock.patch.object(
                 ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
             ) as urlopen_mock,
         ):
             self.assertEqual(ai_text._run_opencode_go("prompt", "opencode-go/qwen3.7-plus"), "ok")
 
-        self.assertIsNone(urlopen_mock.call_args.kwargs["timeout"])
+        self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 300)
 
     def test_positive_value_is_kept(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")

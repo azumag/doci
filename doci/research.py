@@ -393,7 +393,9 @@ def _page_excerpt(url: str) -> str:
     try:
         request = Request(url, headers={"User-Agent": "doci/1.0"})
         with _safe_urlopen(request, timeout=8, trusted_only=True) as response:
-            body = response.read(12000).decode("utf-8", errors="replace")
+            body = _decode_response_body(response, response.read(12000))
+            if not body:
+                return ""
     except Exception as exc:  # noqa: BLE001 - source discovery is best effort
         _log(f"OpenCode Go資料本文をスキップ: {type(exc).__name__}")
         return ""
@@ -401,6 +403,23 @@ def _page_excerpt(url: str) -> str:
     parser.feed(body)
     text = " ".join(parser.parts)
     return _sanitize_excerpt(text)
+
+
+def _decode_response_body(response, body: bytes) -> str:  # type: ignore[no-untyped-def]
+    """Content-Type/metaのcharsetを尊重し、判定不能な文字化け本文は採用しない。"""
+    content_type = str(response.getheader("Content-Type", "") or "")
+    match = re.search(r"charset\s*=\s*[\"']?\s*([\w.-]+)", content_type, re.IGNORECASE)
+    if not match:
+        match = re.search(
+            rb"charset\s*=\s*[\"']?\s*([\w.-]+)", body[:4096], re.IGNORECASE
+        )
+    charset = match.group(1) if match else "utf-8"
+    if isinstance(charset, bytes):
+        charset = charset.decode("ascii", errors="ignore")
+    try:
+        return body.decode(str(charset), errors="strict")
+    except (LookupError, UnicodeDecodeError):
+        return ""
 
 
 def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
@@ -422,7 +441,10 @@ def _wikipedia_search_results(query: str) -> list[dict[str, str]]:
             timeout=8,
             trusted_only=True,
         ) as response:
-            data = json.loads(response.read(120000).decode("utf-8", errors="replace"))
+            body = _decode_response_body(response, response.read(120000))
+            if not body:
+                return []
+            data = json.loads(body)
     except Exception as exc:  # noqa: BLE001 - fallback is best effort
         _log(f"Wikipedia資料検索をスキップ: {type(exc).__name__}")
         return []
@@ -461,10 +483,10 @@ def _search_reference_materials(
             timeout=12,
             trusted_only=True,
         ) as response:
-            html = response.read(180000).decode("utf-8", errors="replace")
+            html = _decode_response_body(response, response.read(180000))
     except Exception as exc:  # noqa: BLE001 - research falls back safely when search is unavailable
         _log(f"OpenCode Go資料検索をスキップ: {type(exc).__name__}")
-        return []
+        html = ""
     parser = _SearchResultParser()
     parser.feed(html)
     if not parser.results:

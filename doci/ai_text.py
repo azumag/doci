@@ -131,7 +131,10 @@ def _run_opencode_go(
     text_parts: list[str] = []
     text_chars = 0
     stop_reason = ""
-    request_timeout = _write_timeout() if timeout is None else (timeout if timeout > 0 else None)
+    deadline_timeout = _write_timeout() if timeout is None else (timeout if timeout > 0 else None)
+    request_timeout = deadline_timeout or config.WRITE_LLM_IDLE_TIMEOUT
+    if request_timeout <= 0:
+        request_timeout = None
     deadline_expired = threading.Event()
     deadline_timer: threading.Timer | None = None
     response_holder: list[object | None] = [None]
@@ -157,8 +160,8 @@ def _run_opencode_go(
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             response_holder[0] = resp
-            if request_timeout is not None:
-                remaining = max(0.001, request_timeout - (time.monotonic() - started))
+            if deadline_timeout is not None:
+                remaining = max(0.001, deadline_timeout - (time.monotonic() - started))
                 deadline_timer = threading.Timer(remaining, expire_stream)
                 deadline_timer.daemon = True
                 deadline_timer.start()
@@ -208,26 +211,9 @@ def _run_opencode_go(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"OpenCode Go API failed (HTTP {exc.code}): {detail}") from exc
-    except RuntimeError as exc:
-        if deadline_expired.is_set() and not received_terminal:
-            candidate = "".join(text_parts)
-            try:
-                llm.extract_json(candidate)
-            except (ValueError, TypeError):
-                pass
-            else:
-                _log("OpenCode Go APIは時間上限到達時点で完全なJSONを返したため採用")
-                return candidate
-        raise
     except (TimeoutError, OSError, ValueError) as exc:
         if deadline_expired.is_set() and not received_terminal:
-            candidate = "".join(text_parts)
-            try:
-                llm.extract_json(candidate)
-            except (ValueError, TypeError):
-                raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
-            _log("OpenCode Go APIは時間上限到達時点で完全なJSONを返したため採用")
-            return candidate
+            raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
         raise
     finally:
         if deadline_timer is not None:

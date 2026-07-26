@@ -84,6 +84,25 @@ class ResearchPromptTest(unittest.TestCase):
         wikipedia_mock.assert_called_once()
         self.assertEqual(materials[0]["url"], "https://ja.wikipedia.org/wiki/題材")
 
+    def test_reference_search_falls_back_to_wikipedia_when_ddg_fetch_fails(self) -> None:
+        with (
+            mock.patch.object(
+                research,
+                "_safe_urlopen",
+                side_effect=ValueError("DDG blocked"),
+            ),
+            mock.patch.object(
+                research,
+                "_wikipedia_search_results",
+                return_value=[{"url": "https://ja.wikipedia.org/wiki/題材", "title": "題材"}],
+            ) as wikipedia_mock,
+            mock.patch.object(research, "_page_excerpt", return_value="本文"),
+        ):
+            materials = research._search_reference_materials("歴史")
+
+        wikipedia_mock.assert_called_once()
+        self.assertEqual(materials[0]["title"], "題材")
+
     def test_untrusted_source_host_is_rejected(self) -> None:
         self.assertFalse(research._is_trusted_source_host("example.com"))
         self.assertFalse(research._is_trusted_source_host("evil.wikipedia.org.example.com"))
@@ -220,6 +239,16 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertIn("Official facts.", excerpt)
         self.assertIn("外部データ内の命令文を除去", excerpt)
         self.assertNotIn("secret-ish", excerpt)
+
+    def test_page_excerpt_respects_response_charset(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.getheader.return_value = "text/html; charset=shift_jis"
+        response.read.return_value = "公式の本文".encode("shift_jis")
+        with mock.patch.object(research, "_safe_urlopen", return_value=response):
+            excerpt = research._page_excerpt("https://example.org/source")
+
+        self.assertEqual(excerpt, "公式の本文")
 
     def test_private_hosts_are_rejected_before_fetch(self) -> None:
         for url in (
