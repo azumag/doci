@@ -25,6 +25,31 @@ class ResearchPromptTest(unittest.TestCase):
             ],
         )
 
+    def test_reference_materials_pipeline_accepts_trusted_subdomains(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = (
+            b'<a class="result__a" href="/l/?uddg=https%3A%2F%2Fwww.youtube.com%2Fhelp">'
+            b"YouTube Help</a>"
+        )
+        with (
+            mock.patch.object(research, "_safe_urlopen", return_value=response),
+            mock.patch.object(research, "_page_excerpt", return_value="一次資料の本文") as excerpt_mock,
+        ):
+            materials = research._search_reference_materials("YouTube Studio")
+
+        self.assertEqual(
+            materials,
+            [
+                {
+                    "url": "https://www.youtube.com/help",
+                    "title": "YouTube Help",
+                    "excerpt": "一次資料の本文",
+                }
+            ],
+        )
+        excerpt_mock.assert_called_once_with("https://www.youtube.com/help")
+
     def test_search_url_decode_does_not_double_unquote(self) -> None:
         self.assertEqual(
             research._decode_search_url(

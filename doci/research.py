@@ -12,7 +12,12 @@ import http.client
 import json
 import re
 import socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import (
+    TimeoutError as FuturesTimeoutError,
+    ThreadPoolExecutor,
+    as_completed,
+)
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlparse
 from urllib.request import Request
@@ -164,12 +169,34 @@ _TRUSTED_SOURCE_HOSTS = (
 
 def _is_trusted_source_host(hostname: str) -> bool:
     host = hostname.rstrip(".").lower()
-    if host in _TRUSTED_SOURCE_HOSTS:
+    if any(host == trusted or host.endswith("." + trusted) for trusted in _TRUSTED_SOURCE_HOSTS):
         return True
     return any(
         host.endswith(suffix)
         for suffix in (".gov", ".gov.uk", ".go.jp", ".ac.jp", ".edu")
     )
+
+
+def _resolve_addresses(hostname: str, port: int | None = None) -> list[tuple]:
+    """DNS解決を短い予算で行い、停止しない resolver はdaemon threadに隔離する。"""
+    result: list[tuple] = []
+
+    def resolve() -> None:
+        try:
+            result.extend(
+                socket.getaddrinfo(
+                    hostname,
+                    port,
+                    type=socket.SOCK_STREAM,
+                )
+            )
+        except (OSError, ValueError):
+            return
+
+    worker = threading.Thread(target=resolve, daemon=True)
+    worker.start()
+    worker.join(1.0)
+    return result
 
 
 def _is_public_http_url(url: str, *, trusted_only: bool = False) -> bool:
@@ -187,13 +214,9 @@ def _is_public_http_url(url: str, *, trusted_only: bool = False) -> bool:
         return False
     if trusted_only and not _is_trusted_source_host(hostname):
         return False
-    try:
-        addresses = {
-            ipaddress.ip_address(info[4][0])
-            for info in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-        }
-    except (OSError, ValueError):
-        return False
+    addresses = {
+        ipaddress.ip_address(info[4][0]) for info in _resolve_addresses(hostname)
+    }
     return bool(addresses) and all(address.is_global for address in addresses)
 
 
@@ -204,7 +227,7 @@ def _public_target(url: str, *, trusted_only: bool) -> tuple[str, int, str]:
         raise ValueError("公開ホスト以外の資料URLを拒否しました")
     hostname = parsed.hostname or ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    infos = _resolve_addresses(hostname, port)
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if ip.is_global:
@@ -259,7 +282,7 @@ class _PinnedResponse:
 def _safe_urlopen(request: Request, timeout: float, *, trusted_only: bool = False):
     """検証済みIPへ固定接続し、各リダイレクトも再検証する（SSRF対策）。"""
     current_url = request.full_url
-    for _ in range(5):
+    for _ in range(2):
         hostname, port, ip = _public_target(current_url, trusted_only=trusted_only)
         parsed = urlparse(current_url)
         path = parsed.path or "/"
@@ -314,7 +337,7 @@ def _sanitize_external(value):  # type: ignore[no-untyped-def]
 def _page_excerpt(url: str) -> str:
     try:
         request = Request(url, headers={"User-Agent": "doci/1.0"})
-        with _safe_urlopen(request, timeout=8, trusted_only=True) as response:
+        with _safe_urlopen(request, timeout=3, trusted_only=True) as response:
             body = response.read(12000).decode("utf-8", errors="replace")
     except Exception:  # noqa: BLE001 - source discovery is best effort
         return ""
@@ -350,7 +373,7 @@ def _search_reference_materials(label: str) -> list[dict[str, str]]:
         rows.append({"url": url, "title": row["title"]})
     materials: list[dict[str, str]] = []
     # 取得は同期パイプライン上で行うが、最大8件を並列化して全体の待ち時間を
-    # 検索12秒 + 本文取得の目安9秒以内に抑える（4件取得できれば打ち切る）。
+    # 検索12秒 + 本文取得の目安9秒以内に抑える（各資料は3秒・リダイレクト1回）。
     executor = ThreadPoolExecutor(max_workers=4)
     futures = {executor.submit(_page_excerpt, row["url"]): row for row in rows}
     try:
@@ -367,7 +390,7 @@ def _search_reference_materials(label: str) -> list[dict[str, str]]:
             )
             if len(materials) >= 4:
                 break
-    except TimeoutError:
+    except FuturesTimeoutError:
         _log("OpenCode Go資料検索: 本文取得が時間上限に達しました")
     finally:
         for future in futures:
