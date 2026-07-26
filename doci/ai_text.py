@@ -26,16 +26,21 @@ from . import channel, config, corners, llm
 from .channel import ChannelSpec, CornerSpec
 
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
+_DEFAULT_WRITE_TIMEOUT = object()
 
 # 互換用エイリアス（JSON抽出/CLI実行は共通モジュール llm に集約）
 _extract_json = llm.extract_json
 
 
-def _write_timeout(override: int | float | None = None) -> int | float | None:
+def _write_timeout(
+    override: int | float | None | object = _DEFAULT_WRITE_TIMEOUT,
+) -> int | float | None:
     """CLI/APIの全体待機上限。0は明示的な長文待機モード。"""
-    if override is not None:
-        return override if override > 0 else None
-    return _whole_write_timeout()
+    if override is _DEFAULT_WRITE_TIMEOUT:
+        return _whole_write_timeout()
+    if override is None:
+        return None
+    return override if override > 0 else None
 
 
 def _whole_write_timeout() -> int | None:
@@ -43,13 +48,21 @@ def _whole_write_timeout() -> int | None:
     return config.WRITE_LLM_TIMEOUT if config.WRITE_LLM_TIMEOUT > 0 else None
 
 
-def _run_claude_cli(prompt: str, model: str, timeout: int | float | None = None) -> str:
+def _run_claude_cli(
+    prompt: str,
+    model: str,
+    timeout: int | float | None | object = _DEFAULT_WRITE_TIMEOUT,
+) -> str:
     return llm.run_claude(
         prompt, config.legacy_claude_model(model), timeout=_write_timeout(timeout)
     )
 
 
-def _run_anthropic(prompt: str, model: str, timeout: int | float | None = None) -> str:
+def _run_anthropic(
+    prompt: str,
+    model: str,
+    timeout: int | float | None | object = _DEFAULT_WRITE_TIMEOUT,
+) -> str:
     key = config.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY が未設定です (TEXT_BACKEND=anthropic)")
@@ -103,6 +116,10 @@ def _opencode_go_model(model: str) -> str:
         return config.OPENCODE_GO_DEFAULT_MODEL
     provider, separator, _ = model.partition("/")
     if separator and provider != "opencode-go":
+        _log(
+            "警告: OpenCode Goでは別プロバイダのモデル指定 "
+            f"{model!r} を使えないため、既定モデルへ戻します"
+        )
         return config.OPENCODE_GO_DEFAULT_MODEL
     return model
 
@@ -312,7 +329,7 @@ def _run_opencode(
     prompt: str,
     model: str,
     agent: str,
-    timeout: int | float | None = None,
+    timeout: int | float | None | object = _DEFAULT_WRITE_TIMEOUT,
 ) -> str:
     if not model and not agent:
         raise RuntimeError(
@@ -368,8 +385,12 @@ def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
     backend = config.TEXT_BACKEND
     model = config.TEXT_MODEL
     if backend == "claude_cli":
+        if timeout is None:
+            return _run_claude_cli(prompt, model)
         return _run_claude_cli(prompt, model, timeout=timeout)
     if backend == "anthropic":
+        if timeout is None:
+            return _run_anthropic(prompt, model)
         return _run_anthropic(prompt, model, timeout=timeout)
     if backend == "opencode_go":
         if timeout is None:

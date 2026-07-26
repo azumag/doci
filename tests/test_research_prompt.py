@@ -653,6 +653,23 @@ class ResearchPromptTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertEqual(result["facts"][0]["claim"], "確認済み")
 
+    def test_explicit_legacy_claude_research_uses_auxiliary_default_model(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "題材",
+                "facts": [{"claim": "確認済み", "source_url": "https://example.org/source"}],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "RESEARCH_MODEL", config.OPENCODE_GO_DEFAULT_MODEL),
+            mock.patch.object(config, "LEGACY_CLAUDE_AUX_MODEL", "claude-sonnet-4-6"),
+            mock.patch("doci.research.llm.run_claude", return_value=raw) as run_mock,
+        ):
+            research._attempt("prompt", backend_override="claude")
+
+        self.assertEqual(run_mock.call_args.args[1], "claude-sonnet-4-6")
+
     def test_prompt_includes_channel_guidance_and_primary_source_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

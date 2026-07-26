@@ -96,7 +96,7 @@ def _attempt(prompt: str, backend: str) -> dict:
     elif backend == "claude":
         raw = llm.run_claude(
             prompt,
-            config.legacy_claude_model(config.FACTCHECK_MODEL),
+            config.legacy_claude_aux_model(config.FACTCHECK_MODEL),
             allowed_tools=["WebSearch", "WebFetch"],
             timeout=config.script_llm_timeout(),
         )

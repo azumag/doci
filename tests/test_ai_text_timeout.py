@@ -16,10 +16,12 @@ from doci import ai_text, config
 
 class WriteTimeoutTest(unittest.TestCase):
     def test_opencode_go_rejects_other_provider_qualified_models(self) -> None:
-        self.assertEqual(
-            ai_text._opencode_go_model("minimax/m3"),
-            config.OPENCODE_GO_DEFAULT_MODEL,
-        )
+        with mock.patch.object(ai_text, "_log") as log_mock:
+            self.assertEqual(
+                ai_text._opencode_go_model("minimax/m3"),
+                config.OPENCODE_GO_DEFAULT_MODEL,
+            )
+        log_mock.assert_called_once()
         self.assertEqual(
             ai_text._opencode_go_model("opencode-go/qwen3.7-plus"),
             "opencode-go/qwen3.7-plus",
@@ -34,6 +36,20 @@ class WriteTimeoutTest(unittest.TestCase):
             mock.patch.object(ai_text.subprocess, "run", return_value=completed) as run_mock,
         ):
             ai_text._run_opencode("prompt", "opencode-go/qwen3.7-plus", "")
+
+        self.assertIsNone(run_mock.call_args.kwargs["timeout"])
+
+    def test_explicit_unlimited_opencode_cli_timeout_is_not_write_timeout(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(config, "OUTPUT", Path(tmp)),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 17),
+            mock.patch.object(ai_text.subprocess, "run", return_value=completed) as run_mock,
+        ):
+            ai_text._run_opencode(
+                "prompt", "opencode-go/qwen3.7-plus", "", timeout=None
+            )
 
         self.assertIsNone(run_mock.call_args.kwargs["timeout"])
 
