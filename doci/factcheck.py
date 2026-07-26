@@ -104,7 +104,10 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
         return None
     backend = config.FACTCHECK_BACKEND
     if backend == "opencode_go" and not (research and research.get("facts")):
-        _log("OpenCode Goファクトチェック: 検証済み資料がないため原文を維持")
+        _log(
+            "OpenCode Goファクトチェック: 検証済み資料がないため原文を維持"
+            "（SCRIPT_RESEARCH=1でリサーチを有効化してください）"
+        )
         return None
     prompt = _PROMPT.format(
         reference=_reference_block(research),
