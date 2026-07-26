@@ -832,9 +832,9 @@ def _attempt(
     elif backend in {"opencode", "opencode_go"}:
         from . import ai_text
 
-        if backend == "opencode_go" and not allowed_source_urls:
+        if backend in {"opencode", "opencode_go"} and not allowed_source_urls:
             raise ValueError(
-                "OpenCode Goリサーチは、実取得済みの候補URLがないため安全側にスキップします"
+                "OpenCodeリサーチは、実取得済みの候補URLがないため安全側にスキップします"
             )
         if backend == "opencode_go":
             raw = ai_text._run_opencode_go(
@@ -864,14 +864,14 @@ def _attempt(
         raise ValueError(f"リサーチ結果が不十分です: {str(data)[:300]}")
     # 出典の無い事実は除外（裏取り済みのみ採用）
     data["facts"] = [f for f in facts if isinstance(f, dict) and f.get("claim") and f.get("source_url")]
-    if backend == "opencode_go":
+    if backend in {"opencode", "opencode_go"}:
         data["facts"] = [
             fact
             for fact in data["facts"]
             if _normalized_source_url(str(fact.get("source_url"))) in allowed_source_urls
         ]
     if not data["facts"]:
-        if backend == "opencode_go":
+        if backend in {"opencode", "opencode_go"}:
             raise ValueError("許可済みURLに紐づく出典付きの事実がありませんでした")
         raise ValueError("出典付きの事実がありませんでした")
     examples = data.get("examples", [])
@@ -891,7 +891,7 @@ def _attempt(
         )
         and _is_youtube_video_url(str(example.get("url", "")))
         and (
-            backend != "opencode_go"
+            backend not in {"opencode", "opencode_go"}
             or _normalized_source_url(str(example.get("url", "")))
             in (allowed_video_source_urls or set())
         )
@@ -1073,9 +1073,9 @@ def web_research(
         for normalized in [_normalized_source_url(str(row.get("url")))]
         if normalized
     )
-    if backend == "opencode_go" and not allowed_source_urls:
+    if backend in {"opencode", "opencode_go"} and not allowed_source_urls:
         _log(
-            "警告: OpenCode Goリサーチを実取得済み資料0件のため安全側にスキップ"
+            "警告: OpenCodeリサーチを実取得済み資料0件のため安全側にスキップ"
             "（ファクトチェックも原文維持）"
         )
         return None

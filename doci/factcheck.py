@@ -119,9 +119,9 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
     backend = config.FACTCHECK_BACKEND
     if backend not in {"codex", "opencode", "opencode_go", "claude"}:
         raise UnsupportedFactcheckBackendError(f"未対応のFACTCHECK_BACKENDです: {backend}")
-    if backend == "opencode_go" and not (research and research.get("facts")):
+    if backend in {"opencode", "opencode_go"} and not (research and research.get("facts")):
         _log(
-            "OpenCode Goファクトチェック: 検証済み資料がないため原文を維持"
+            "OpenCodeファクトチェック: 検証済み資料がないため原文を維持"
             "（検証済み資料を取得できませんでした）"
         )
         return None

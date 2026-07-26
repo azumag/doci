@@ -112,7 +112,14 @@ def _opencode_go_model(model: str) -> str:
     provider-qualified な別プロバイダ名をそのまま送ると、Go APIではなく別の
     認証経路を暗黙に要求するため、既定のQwenへ安全に戻す。
     """
-    if not model or model.startswith(("claude-", "anthropic/")):
+    if not model:
+        _log("警告: OpenCode Goのモデル未指定のため既定モデルへ戻します")
+        return config.OPENCODE_GO_DEFAULT_MODEL
+    if model.startswith(("claude-", "anthropic/")):
+        _log(
+            "警告: OpenCode GoではClaude系モデルを使わないため、 "
+            f"{model!r} を既定モデルへ戻します"
+        )
         return config.OPENCODE_GO_DEFAULT_MODEL
     provider, separator, _ = model.partition("/")
     if separator and provider != "opencode-go":

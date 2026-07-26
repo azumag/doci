@@ -117,7 +117,22 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         run_mock.assert_not_called()
         self.assertIsNone(result)
         log_mock.assert_called_once_with(
-            "OpenCode Goファクトチェック: 検証済み資料がないため原文を維持"
+            "OpenCodeファクトチェック: 検証済み資料がないため原文を維持"
+            "（検証済み資料を取得できませんでした）"
+        )
+
+    def test_opencode_cli_without_research_keeps_original(self) -> None:
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode"),
+            mock.patch("doci.ai_text._run_opencode") as run_mock,
+            mock.patch.object(factcheck, "_log") as log_mock,
+        ):
+            result = factcheck.verify_and_correct("原文を維持する")
+
+        run_mock.assert_not_called()
+        self.assertIsNone(result)
+        log_mock.assert_called_once_with(
+            "OpenCodeファクトチェック: 検証済み資料がないため原文を維持"
             "（検証済み資料を取得できませんでした）"
         )
 

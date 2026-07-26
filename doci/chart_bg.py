@@ -68,7 +68,7 @@ def select(spec: dict, theme: str) -> list[dict]:
 
         txt = ai_text._run_opencode_go(
             prompt,
-            ai_text._opencode_go_model(config.TEXT_MODEL),
+            ai_text._opencode_go_model(config.OPENCODE_MODEL or config.TEXT_MODEL),
             timeout=120,
         )
     elif config.CHART_BG_BACKEND == "opencode":

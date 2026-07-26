@@ -646,7 +646,9 @@ class ResearchPromptTest(unittest.TestCase):
             mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
             mock.patch.object(research.llm, "run_claude") as claude_mock,
         ):
-            result = research._attempt("prompt")
+            result = research._attempt(
+                "prompt", allowed_source_urls={"https://example.org/source"}
+            )
 
         run_mock.assert_called_once()
         self.assertEqual(run_mock.call_args.kwargs["timeout"], config.script_llm_timeout())

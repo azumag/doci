@@ -180,6 +180,16 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
 
         self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_GO_DEFAULT_MODEL)
 
+    def test_opencode_go_prefers_explicit_opencode_model(self) -> None:
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "OPENCODE_MODEL", "opencode-go/custom"),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], "opencode-go/custom")
+
     def test_explicit_claude_backend_uses_legacy_model_when_text_default_is_qwen(self) -> None:
         config.CHART_BG_BACKEND = "claude"
         raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
