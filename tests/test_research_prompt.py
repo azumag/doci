@@ -36,6 +36,12 @@ class ResearchPromptTest(unittest.TestCase):
 
         self.assertEqual(parser.text(), "本文の事実")
 
+    def test_visible_parser_recovers_after_unclosed_boilerplate(self) -> None:
+        parser = research._VisibleTextParser()
+        parser.feed('<aside class="sidebar"><div><main>本文の事実</main>')
+
+        self.assertEqual(parser.text(), "本文の事実")
+
     def test_query_terms_uses_words_not_long_japanese_sentence_fragments(self) -> None:
         terms = research._query_terms(
             "YouTube制作者の維持率改善を支援する。視聴者の冒頭離脱を確認する。",
@@ -168,13 +174,28 @@ class ResearchPromptTest(unittest.TestCase):
             research._search_reference_materials(
                 "ショート攻略",
                 channel_guidance="YouTube制作者の維持率改善",
-                past_topics=["維持率改善"],
+                past_topics=["維持率対策"],
             )
 
         query_urls = [unquote(call.args[0].full_url) for call in open_mock.call_args_list]
         self.assertTrue(any("YouTube" in query_url for query_url in query_urls))
-        self.assertTrue(any('-"維持率改善"' in query_url for query_url in query_urls))
+        self.assertTrue(any('-"維持率対策"' in query_url for query_url in query_urls))
         self.assertTrue(all("直近の題材" not in query_url for query_url in query_urls))
+
+    def test_reference_search_does_not_exclude_positive_topic_terms(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b""
+        with mock.patch.object(research, "_safe_urlopen", return_value=response) as open_mock:
+            research._search_reference_materials(
+                "ショート攻略",
+                channel_guidance="YouTube制作者の維持率改善",
+                past_topics=["維持率改善"],
+            )
+
+        query_urls = [unquote(call.args[0].full_url) for call in open_mock.call_args_list]
+        self.assertTrue(any("維持率改善" in query_url for query_url in query_urls))
+        self.assertTrue(all('-"維持率改善"' not in query_url for query_url in query_urls))
 
     def test_reference_search_falls_back_to_wikipedia_when_ddg_has_no_results(self) -> None:
         with (

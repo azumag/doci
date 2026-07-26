@@ -195,6 +195,13 @@ class _VisibleTextParser(HTMLParser):
             or values.get("id") in {"mw-content-text", "content"}
             or "article-body" in values.get("class", "").split()
         )
+        if preferred and self._boilerplate_depth and not self._preferred_depth:
+            # 崩れたHTMLでaside/navの閉じタグが欠けても、本文コンテナを境界として
+            # staleな補助要素を捨て、以降の本文を復帰させる。
+            for index, (_, _, is_boilerplate, _) in enumerate(self._element_flags):
+                if is_boilerplate:
+                    self._remove_open_elements(index)
+                    break
         self._element_flags.append((tag, hidden, boilerplate, preferred))
         if hidden:
             self._hidden_depth += 1
@@ -205,18 +212,28 @@ class _VisibleTextParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        for index in range(len(self._element_flags) - 1, -1, -1):
-            element_tag, hidden, boilerplate, preferred = self._element_flags[index]
-            if element_tag != tag:
-                continue
-            del self._element_flags[index]
+        if not self._element_flags:
+            return
+        index = len(self._element_flags) - 1
+        if self._element_flags[index][0] != tag:
+            for candidate in range(index - 1, -1, -1):
+                if self._element_flags[candidate][0] == tag:
+                    index = candidate
+                    break
+            else:
+                return
+        self._remove_open_elements(index)
+
+    def _remove_open_elements(self, start: int) -> None:
+        """閉じタグと、その内側に残った壊れた要素をまとめて閉じる。"""
+        for _, hidden, boilerplate, preferred in self._element_flags[start:]:
             if hidden and self._hidden_depth:
                 self._hidden_depth -= 1
             if boilerplate and self._boilerplate_depth:
                 self._boilerplate_depth -= 1
             if preferred and self._preferred_depth:
                 self._preferred_depth -= 1
-            break
+        del self._element_flags[start:]
 
     def handle_data(self, data: str) -> None:
         if self._hidden_depth or self._boilerplate_depth:
@@ -649,8 +666,10 @@ def _search_reference_materials(
     terms.extend(_query_terms(search_hint, 5))
     context = list(dict.fromkeys(term for term in terms if term))
     # 直近の題材は検索結果から除外し、同じ上位資料への収束を避ける。
+    positive_terms = set(context)
     for term in _query_terms(" ".join((past_topics or [])[-3:]), 4):
-        context.append(f'-"{term}"')
+        if term not in positive_terms:
+            context.append(f'-"{term}"')
     context.extend(("公式", "一次資料"))
     rows: list[dict[str, str]] = []
     seen: set[str] = set()

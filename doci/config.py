@@ -118,8 +118,8 @@ CODEX_MODEL = get("CODEX_MODEL", "MiniMax-M3")
 CODEX_MINIMAX_BASE_URL = get("CODEX_MINIMAX_BASE_URL", "https://api.minimax.io/v1")
 # リサーチ/チェックは Web検索＋長尺narrationで時間がかかる。0以下は全バックエンド共通で無制限。
 SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
-# 執筆(opencode/qwen 等)専用の全体上限。長文を許容しつつ無期限ハングを防ぐため15分を既定にする。
-# 0は明示的な無制限モード（OpenCode Goの無音は下記idle上限で切る）。
+# 執筆(opencode/qwen 等)各試行の上限。0は各試行を明示的に無制限にするモード
+# （OpenCode Goの無音は下記idle上限で切る）。下書き全体の上限は別設定で持つ。
 WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 900)
 # 全体上限を無効にしても、無音の接続を無限に保持しないためのソケット待機上限。
 WRITE_LLM_IDLE_TIMEOUT = get_int("WRITE_LLM_IDLE_TIMEOUT", 300)
