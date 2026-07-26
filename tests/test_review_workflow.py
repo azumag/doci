@@ -23,6 +23,11 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
         self.assertIn("steps.claude.outputs.structured_output", self.workflow)
         self.assertIn("needs.review.outputs.review_json", self.workflow)
         self.assertIn("--body-file /tmp/claude-review.md", self.workflow)
+        self.assertIn(
+            "prompt_file: /tmp/doci-claude-review-prompt.md",
+            self.workflow,
+        )
+        self.assertIn("head -c 200000 /tmp/doci-pr.diff", self.workflow)
         self.assertIn("--model claude-opus-5", self.workflow)
         self.assertIn("unsafe review output", self.workflow)
 
@@ -35,7 +40,7 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
         )
         self.assertIn("fetch-depth: 0", self.workflow)
         self.assertIn(
-            "anthropics/claude-code-action@44423bdec74b97d67543eb16c110546762c110b2",
+            "anthropics/claude-code-action/base-action@44423bdec74b97d67543eb16c110546762c110b2",
             self.workflow,
         )
 
