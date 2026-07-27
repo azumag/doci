@@ -216,9 +216,8 @@ class ResearchPromptTest(unittest.TestCase):
         ):
             research._search_reference_materials("YouTube Studio", search_timeout=0.001)
 
-        # The shared deadline can stop the second network stage instead of granting
-        # Wikipedia, DDG, and page fetches independent full timeouts.
-        self.assertLessEqual(wiki_mock.call_args.kwargs["timeout"], 0.001)
+        # 一次資料だけを扱うため、Wikipedia に別のネットワーク予算を渡さない。
+        wiki_mock.assert_not_called()
         self.assertTrue(open_mock.call_args_list)
         self.assertTrue(
             all(call.kwargs["timeout"] <= 0.001 for call in open_mock.call_args_list)
@@ -269,7 +268,7 @@ class ResearchPromptTest(unittest.TestCase):
         query_urls = [unquote(call.args[0].full_url) for call in open_mock.call_args_list]
         self.assertTrue(all('-"五カ年計画"' not in query_url for query_url in query_urls))
 
-    def test_reference_search_falls_back_to_wikipedia_when_ddg_has_no_results(self) -> None:
+    def test_reference_search_does_not_fetch_wikipedia_when_ddg_has_no_results(self) -> None:
         with (
             mock.patch.object(research, "_safe_urlopen") as open_mock,
             mock.patch.object(
@@ -277,7 +276,7 @@ class ResearchPromptTest(unittest.TestCase):
                 "_wikipedia_search_results",
                 return_value=[{"url": "https://ja.wikipedia.org/wiki/題材", "title": "題材"}],
             ) as wikipedia_mock,
-            mock.patch.object(research, "_page_excerpt", return_value="本文"),
+            mock.patch.object(research, "_page_excerpt") as excerpt_mock,
         ):
             ddg_response = mock.MagicMock()
             ddg_response.__enter__.return_value = ddg_response
@@ -285,12 +284,11 @@ class ResearchPromptTest(unittest.TestCase):
             open_mock.return_value = ddg_response
             materials = research._search_reference_materials("歴史")
 
-        wikipedia_mock.assert_called_once()
-        self.assertNotIn("公式", wikipedia_mock.call_args.args[0])
-        self.assertNotIn("一次資料", wikipedia_mock.call_args.args[0])
-        self.assertEqual(materials[0]["url"], "https://ja.wikipedia.org/wiki/題材")
+        wikipedia_mock.assert_not_called()
+        excerpt_mock.assert_not_called()
+        self.assertEqual(materials, [])
 
-    def test_reference_search_falls_back_to_wikipedia_when_ddg_fetch_fails(self) -> None:
+    def test_reference_search_does_not_fetch_wikipedia_when_ddg_fetch_fails(self) -> None:
         with (
             mock.patch.object(
                 research,
@@ -302,12 +300,13 @@ class ResearchPromptTest(unittest.TestCase):
                 "_wikipedia_search_results",
                 return_value=[{"url": "https://ja.wikipedia.org/wiki/題材", "title": "題材"}],
             ) as wikipedia_mock,
-            mock.patch.object(research, "_page_excerpt", return_value="本文"),
+            mock.patch.object(research, "_page_excerpt") as excerpt_mock,
         ):
             materials = research._search_reference_materials("歴史")
 
-        wikipedia_mock.assert_called_once()
-        self.assertEqual(materials[0]["title"], "題材")
+        wikipedia_mock.assert_not_called()
+        excerpt_mock.assert_not_called()
+        self.assertEqual(materials, [])
 
     def test_untrusted_source_host_is_rejected(self) -> None:
         self.assertFalse(research._is_trusted_source_host("example.com"))
@@ -707,6 +706,50 @@ class ResearchPromptTest(unittest.TestCase):
         run_mock.assert_not_called()
         claude_mock.assert_not_called()
         self.assertIsNone(result)
+
+    def test_opencode_go_returns_facts_for_retrieved_primary_material(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            persona = root / "persona.md"
+            corner_prompt = root / "corner.md"
+            persona.write_text("歴史解説者", encoding="utf-8")
+            corner_prompt.write_text("一次史料を優先", encoding="utf-8")
+            corner = CornerSpec(
+                key="history",
+                label="歴史",
+                persona_path=persona,
+                corner_path=corner_prompt,
+                voice_key="narrator",
+            )
+            source_url = "https://support.google.com/youtube/answer/12345"
+            raw = json.dumps(
+                {
+                    "topic": "題材",
+                    "facts": [{"claim": "確認済み", "source_url": source_url}],
+                },
+                ensure_ascii=False,
+            )
+            with (
+                mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+                mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+                mock.patch.object(
+                    research,
+                    "_search_reference_materials",
+                    return_value=[
+                        {
+                            "url": source_url,
+                            "title": "YouTube ヘルプ",
+                            "excerpt": "確認済みの公式情報",
+                        }
+                    ],
+                ),
+                mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
+            ):
+                result = research.web_research(corner, [], require_youtube_examples=False)
+
+        run_mock.assert_called_once()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["facts"], [{"claim": "確認済み", "source_url": source_url}])
 
     def test_wikipedia_background_only_is_not_used_as_primary_fact_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

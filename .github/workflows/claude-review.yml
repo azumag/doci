@@ -101,7 +101,7 @@ jobs:
             exit 1
           fi
 
-  comment:
+  submit-review:
     needs: review
     if: >-
       needs.review.outputs.oauth_configured == 'true' &&
@@ -139,10 +139,18 @@ jobs:
           pathlib.Path("/tmp/claude-review.md").write_text(text + "\n", encoding="utf-8")
           '
 
-      - name: Post one controlled PR comment
+      - name: Submit one controlled PR review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: >-
-          gh pr comment "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}"
-          --edit-last --create-if-none --body-file /tmp/claude-review.md
+        run: |
+          python -c '
+          import json, pathlib
+          body = pathlib.Path("/tmp/claude-review.md").read_text(encoding="utf-8")
+          pathlib.Path("/tmp/claude-review-request.json").write_text(
+              json.dumps({"body": body, "event": "COMMENT"}), encoding="utf-8"
+          )
+          '
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            --input /tmp/claude-review-request.json

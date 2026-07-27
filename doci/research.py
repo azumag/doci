@@ -784,7 +784,6 @@ def _search_reference_materials(
     context.extend(("公式", "一次資料"))
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
-    fallback_terms = [label, *_query_terms(search_hint, 2)]
     deadline = (
         time.monotonic() + search_timeout
         if search_timeout is not None and search_timeout > 0
@@ -796,27 +795,9 @@ def _search_reference_materials(
             return default
         return max(0.0, min(default, deadline - time.monotonic()))
 
-    wikipedia_query = " ".join(dict.fromkeys(term for term in fallback_terms if term))
-    if search_timeout is None:
-        wikipedia_rows = _wikipedia_search_results(wikipedia_query)
-    else:
-        wikipedia_rows = _wikipedia_search_results(
-            wikipedia_query,
-            timeout=remaining(8),
-        )
-    # Wikipediaは一般背景の補助資料として最大2件に抑え、公式ヘルプ等の
-    # 検索結果が常に残るようにする。
-    for row in wikipedia_rows[:2]:
-        url = str(row.get("url", ""))
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        rows.append({"url": url, "title": str(row.get("title", ""))})
-    if rows:
-        _log("OpenCode Go資料検索: Wikipedia APIを主経路として採用")
-
-    # WikipediaだけではYouTube運用や公式ヘルプの一次資料を拾えないため、
-    # 不足分を検索結果で補う。検索HTMLが制限されても主経路のAPI結果は残る。
+    # OpenCode系のfactsは実取得済みの一次資料だけを根拠にする。Wikipedia等の
+    # 背景資料をここへ混ぜると、後段で一次資料から除外されるだけで本文取得枠を
+    # 消費するため、検索・取得候補には入れない。
     parser = _SearchResultParser()
     search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
     try:
@@ -829,7 +810,7 @@ def _search_reference_materials(
             trusted_only=True,
         ) as response:
             search_html = _decode_response_body(response, response.read(180000))
-    except Exception as exc:  # noqa: BLE001 - API主経路を残して検索は補助扱い
+    except Exception as exc:  # noqa: BLE001 - 検索不能時は一次資料なしとして安全側に止める
         _log(f"OpenCode Go補助検索をスキップ: {type(exc).__name__}")
         search_html = ""
     parser.feed(search_html)
@@ -846,8 +827,8 @@ def _search_reference_materials(
         rows.append({"url": url, "title": row["title"]})
         if len(rows) >= 8:
             break
-    if not parser.results and not wikipedia_rows:
-        _log("OpenCode Go資料検索: API/補助検索の結果を解析できませんでした")
+    if not parser.results:
+        _log("OpenCode Go資料検索: 一次資料の検索結果を解析できませんでした")
     materials: list[dict[str, str]] = []
     # 取得は同期パイプライン上で行うが、最大8件を4件ずつ並列化する。
     # 候補が2波に分かれる場合も後半を待てるよう、待機期限を波数から算出する。

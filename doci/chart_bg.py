@@ -78,7 +78,10 @@ def select(spec: dict, theme: str) -> list[dict]:
 
         txt = ai_text._run_opencode(
             prompt,
-            ai_text._opencode_cli_model(config.TEXT_MODEL),
+            ai_text._opencode_cli_aux_model(
+                config.OPENCODE_MODEL or config.OPENCODE_GO_DEFAULT_MODEL,
+                explicit=bool(config.OPENCODE_MODEL),
+            ),
             config.OPENCODE_AGENT,
             timeout=120,
         )

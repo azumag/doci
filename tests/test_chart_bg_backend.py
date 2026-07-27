@@ -140,7 +140,10 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
             result = chart_bg.select(spec, "テストテーマ")
 
         run_mock.assert_called_once()
-        self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_MODEL or config.TEXT_MODEL)
+        self.assertEqual(
+            run_mock.call_args.args[1],
+            config.OPENCODE_MODEL or config.OPENCODE_GO_DEFAULT_MODEL,
+        )
         self.assertEqual(run_mock.call_args.kwargs["timeout"], 120)
         claude_mock.assert_not_called()
         self.assertEqual(result, [{"query": "old library shelves", "media": "image"}])
@@ -203,6 +206,19 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
             mock.patch.object(config, "TEXT_MODEL", "claude-opus-4-8"),
             mock.patch.object(config, "OPENCODE_MODEL", ""),
             mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_GO_DEFAULT_MODEL)
+
+    def test_opencode_cli_ignores_legacy_text_model_for_chart_backgrounds(self) -> None:
+        config.CHART_BG_BACKEND = "opencode"
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "TEXT_MODEL", "claude-opus-4-8"),
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
+            mock.patch.object(config, "OPENCODE_AGENT", ""),
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
         ):
             chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
 
