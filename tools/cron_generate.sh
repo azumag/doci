@@ -10,7 +10,7 @@ PROJ="${0:A:h:h}"
 #  - ffmpeg/ffprobe: tools/ffbin(静的・内蔵) を最優先
 #  - node: nvm(内蔵) を homebrew より前に
 #  - python: 下記 .venv-cron(uv管理standalone・内蔵)
-#  - claude/opencode/orb/Chrome は元から内蔵
+#  - opencode/codex/orb/Chrome は元から内蔵
 # /opt/homebrew(外付け) は最後＝フォールバックのみ（基本使わせない）。
 export PATH="$PROJ/tools/ffbin:/Users/azumag/.nvm/versions/node/v23.10.0/bin:/Users/azumag/.local/bin:/Users/azumag/.opencode/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 

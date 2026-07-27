@@ -57,12 +57,43 @@ def get_bool(key: str, default: bool = False) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+def legacy_claude_model(model: str) -> str:
+    """明示されたClaude旧経路にだけClaude互換モデル名を渡す。"""
+    if model.startswith(("claude-", "anthropic/")):
+        return model
+    return LEGACY_CLAUDE_MODEL
+
+
+def legacy_claude_research_model(model: str) -> str:
+    """明示されたClaudeリサーチ段に、従来の互換モデル名を渡す。"""
+    if model.startswith(("claude-", "anthropic/")):
+        return model
+    return LEGACY_CLAUDE_RESEARCH_MODEL
+
+
+def legacy_claude_factcheck_model(model: str) -> str:
+    """明示されたClaudeファクトチェック段に、従来の互換モデル名を渡す。"""
+    if model.startswith(("claude-", "anthropic/")):
+        return model
+    return LEGACY_CLAUDE_FACTCHECK_MODEL
+
+
 # --- text ---
-TEXT_BACKEND = get("TEXT_BACKEND", "claude_cli")
-TEXT_MODEL = get("TEXT_MODEL", "claude-opus-4-8")
-# 執筆主バックエンド(opencode/qwen)が規定回数で揃わなかった時の claude_cli フォールバック専用モデル。
-# TEXT_MODEL(opus、chart_bg等の他用途と共有)とは別に、フォールバックは軽量な sonnet を使う。
-FALLBACK_TEXT_MODEL = get("FALLBACK_TEXT_MODEL", "claude-sonnet-5")
+OPENCODE_GO_DEFAULT_MODEL = "opencode-go/qwen3.7-plus"
+# Claudeは明示された旧経路だけで使う。TEXT_MODEL等の既定値がOpenCode Goモデルでも、
+# 旧経路を明示した利用者がモデル名を設定し忘れた場合に不正なモデル名を渡さない。
+LEGACY_CLAUDE_MODEL = get("CLAUDE_MODEL", "claude-opus-4-8")
+# 旧Claudeの補助段は段ごとの従来既定を維持し、既定OpenCode Goモデルを
+# 本文用モデルへ暗黙に丸めて品質やコストを変えない。
+LEGACY_CLAUDE_RESEARCH_MODEL = get("CLAUDE_RESEARCH_MODEL", "claude-sonnet-4-6")
+LEGACY_CLAUDE_FACTCHECK_MODEL = get(
+    "CLAUDE_FACTCHECK_MODEL", LEGACY_CLAUDE_MODEL
+)
+# 運用の既定経路はOpenCode Go直API。Claudeは明示的に選んだ旧経路以外では呼ばない。
+TEXT_BACKEND = get("TEXT_BACKEND", "opencode_go")
+TEXT_MODEL = get("TEXT_MODEL", OPENCODE_GO_DEFAULT_MODEL)
+# 旧設定との互換性のため値は残すが、本文生成の自動フォールバックには使わない。
+FALLBACK_TEXT_MODEL = get("FALLBACK_TEXT_MODEL", "")
 OPENCODE_AGENT = get("OPENCODE_AGENT", "")
 # provider/model 形式（例: opencode-go/minimax-m3）。指定時は --agent より優先。
 OPENCODE_MODEL = get("OPENCODE_MODEL", "")
@@ -76,32 +107,143 @@ OPENCODE_GO_BASE_URL = get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v
 OPENCODE_GO_MAX_TOKENS = get_int("OPENCODE_GO_MAX_TOKENS", 65536)
 
 # --- 台本品質: 前段リサーチ＋後段ファクトチェック (issue #6) ---
-# SCRIPT_RESEARCH: 下書き前に claude CLI(Webツール)で題材を選び実ソースで裏取りした
+# SCRIPT_RESEARCH: 下書き前に OpenCode Goで題材を選び参考資料を整理した
 #   「参考事実」を作り、下書きに具体を織り込ませる。SCRIPT_FACTCHECK: 下書き後に
-#   別モデル(opus)で事実主張を検証し narration を自動修正する。いずれも既定OFF。
+#   同じ経路で事実主張を検証し narration を自動修正する。いずれも既定OFF。
 SCRIPT_RESEARCH = get_bool("SCRIPT_RESEARCH", False)
 SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
-RESEARCH_MODEL = get("RESEARCH_MODEL", "claude-sonnet-4-6")
-FACTCHECK_MODEL = get("FACTCHECK_MODEL", "claude-opus-4-8")
-# バックエンドを claude CLI から codex exec(+MiniMax-M3)へ切替可能にする。値は claude | codex。
-RESEARCH_BACKEND = get("RESEARCH_BACKEND", "claude")
-FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", "claude")
-CHART_BG_BACKEND = get("CHART_BG_BACKEND", "claude")
+# FACTCHECK単独でも従来どおり検証資料を取得するが、明示的に無効化できる。
+SCRIPT_FACTCHECK_RESEARCH = get_bool("SCRIPT_FACTCHECK_RESEARCH", True)
+# 資料0件のファクトチェックを実行失敗として扱う場合だけ明示的に有効化する。
+SCRIPT_FACTCHECK_REQUIRE_SOURCES = get_bool("SCRIPT_FACTCHECK_REQUIRE_SOURCES", False)
+RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_DEFAULT_MODEL)
+FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_DEFAULT_MODEL)
+_RESEARCH_MODEL_EXPLICIT = bool(get("RESEARCH_MODEL"))
+_FACTCHECK_MODEL_EXPLICIT = bool(get("FACTCHECK_MODEL"))
+# リサーチ・検証・図表背景はOpenCode Goを既定にする。codex は明示時の選択肢、
+# claude は既存設定を明示した場合だけ使える後方互換経路。補助段の設定を省略した
+# 既存ユーザーが TEXT_BACKEND=anthropic/claude_cli を明示している場合だけ、その
+# 互換経路へ追随させ、それ以外はClaudeへ暗黙に戻らない。
+def _default_aux_backend() -> str:
+    if TEXT_BACKEND in {"anthropic", "claude_cli"}:
+        return "claude"
+    if TEXT_BACKEND == "codex":
+        return "codex"
+    if TEXT_BACKEND == "opencode":
+        return "opencode"
+    return "opencode_go"
+
+
+_AUX_BACKEND_DEFAULT = _default_aux_backend()
+RESEARCH_BACKEND = get("RESEARCH_BACKEND", _AUX_BACKEND_DEFAULT)
+FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", _AUX_BACKEND_DEFAULT)
+CHART_BG_BACKEND = get("CHART_BG_BACKEND", _AUX_BACKEND_DEFAULT)
+_RESEARCH_BACKEND_EXPLICIT = bool(get("RESEARCH_BACKEND"))
+_FACTCHECK_BACKEND_EXPLICIT = bool(get("FACTCHECK_BACKEND"))
+
+_SUPPORTED_PIPELINE_BACKENDS = frozenset({"codex", "opencode", "opencode_go", "claude"})
+
+
+def validate_pipeline_backends() -> None:
+    """日次処理の途中でなく設定読込時にバックエンド値を検証する。"""
+    invalid = {
+        name: value
+        for name, value in {
+            "RESEARCH_BACKEND": RESEARCH_BACKEND,
+            "FACTCHECK_BACKEND": FACTCHECK_BACKEND,
+            "CHART_BG_BACKEND": CHART_BG_BACKEND,
+        }.items()
+        if value not in _SUPPORTED_PIPELINE_BACKENDS
+    }
+    if invalid:
+        details = ", ".join(f"{name}={value}" for name, value in invalid.items())
+        raise ValueError(f"未対応のバックエンド設定です: {details}")
+
+
+validate_pipeline_backends()
+
+
+def _migrate_implicit_opencode_model(
+    model: str, backend: str, backend_explicit: bool
+) -> str:
+    """旧Claudeモデルを、暗黙のOpenCode補助経路だけ安全に移行する。
+
+    明示的に選ばれたバックエンドの不整合は ``ai_text`` 側で fail-closed にする。
+    一方、旧 .env に残った Claude 補助モデルを、バックエンド未指定の新既定値で
+    恒久的に無効化しないため、暗黙の補助段だけQwen既定へ移行する。
+    """
+    if (
+        backend in {"opencode_go", "opencode"}
+        and not backend_explicit
+        and model.startswith(("claude-", "anthropic/"))
+    ):
+        return OPENCODE_GO_DEFAULT_MODEL
+    return model
+
+
+# 既存 .env に残る Claude の本文モデルは、OPENCODE_MODEL が空なら新しい
+# 既定経路へ移行する。provider-qualified な別モデルなど明示的な不整合は
+# _opencode_go_model() で停止し、意図しないモデル実行を防ぐ。
+if (
+    TEXT_BACKEND in {"opencode_go", "opencode"}
+    and not OPENCODE_MODEL
+    and not OPENCODE_AGENT
+):
+    TEXT_MODEL = _migrate_implicit_opencode_model(
+        TEXT_MODEL, TEXT_BACKEND, False
+    )
+if RESEARCH_BACKEND in {"opencode_go", "opencode"}:
+    RESEARCH_MODEL = _migrate_implicit_opencode_model(
+        RESEARCH_MODEL, RESEARCH_BACKEND, _RESEARCH_BACKEND_EXPLICIT
+    )
+if FACTCHECK_BACKEND in {"opencode_go", "opencode"}:
+    FACTCHECK_MODEL = _migrate_implicit_opencode_model(
+        FACTCHECK_MODEL, FACTCHECK_BACKEND, _FACTCHECK_BACKEND_EXPLICIT
+    )
 # 構成プラン(plan.make_plan)のバックエンド。値は opencode | codex。直契約MiniMaxを
 # opencode-goゲートウェイ経由でなく codex exec 経由で使えるようにする。
 PLAN_BACKEND = get("PLAN_BACKEND", "opencode")
 CODEX_BIN = get("CODEX_BIN", "codex")
 CODEX_MODEL = get("CODEX_MODEL", "MiniMax-M3")
 CODEX_MINIMAX_BASE_URL = get("CODEX_MINIMAX_BASE_URL", "https://api.minimax.io/v1")
-# リサーチ/チェックは Web検索＋長尺narrationで時間がかかるため長めの上限（長尺で300sは不足）。
+# リサーチ/チェックは Web検索＋長尺narrationで時間がかかる。0以下は全バックエンド共通で無制限。
 SCRIPT_LLM_TIMEOUT = get_int("SCRIPT_LLM_TIMEOUT", 600)
-# 執筆(opencode/qwen 等)専用の上限。0以下ならタイムアウトなし。長文生成を必ず待つ運用では
-# WRITE_LLM_TIMEOUT=0 を指定する。正数の場合だけ、その秒数で打ち切ってリトライへ進む。
-WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 240)
+# 執筆(opencode/qwen 等)各試行の上限。0は各試行を明示的に無制限にするモード
+# （OpenCode Goの無音は下記idle上限で切る）。下書き全体の上限は別設定で持つ。
+WRITE_LLM_TIMEOUT = get_int("WRITE_LLM_TIMEOUT", 900)
+# 全体上限を無効にしても、無音の接続を無限に保持しないためのソケット待機上限。
+WRITE_LLM_IDLE_TIMEOUT = get_int("WRITE_LLM_IDLE_TIMEOUT", 300)
+
+
+def script_llm_timeout() -> int | None:
+    """リサーチ/ファクトチェック用の subprocess/API 待機上限を返す。"""
+    return SCRIPT_LLM_TIMEOUT if SCRIPT_LLM_TIMEOUT > 0 else None
+
+
+def script_research_timeout() -> int | None:
+    """資料取得とリサーチ再試行を合わせた総待機上限を返す。"""
+    if SCRIPT_RESEARCH_TOTAL_TIMEOUT > 0:
+        return SCRIPT_RESEARCH_TOTAL_TIMEOUT
+    # 総枠を明示しない場合は、従来どおり各試行にSCRIPT_LLM_TIMEOUTを
+    # 確保する。再試行を含む総枠はその回数分だけ必要になる。
+    per_attempt = script_llm_timeout()
+    if per_attempt is None:
+        return None
+    return per_attempt * max(1, SCRIPT_RESEARCH_RETRIES)
+
+
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
-# リサーチの再試行回数。claude+Web が稀に不正JSONを返すため。高価なので控えめ。
+# 下書き再試行を含む執筆段全体の予算。個別試行の残り時間をこの上限で絞り、
+# Claudeフォールバックなしでも複数コーナーを長時間占有し続けないようにする。
+SCRIPT_DRAFT_TOTAL_TIMEOUT = get_int(
+    "SCRIPT_DRAFT_TOTAL_TIMEOUT", 2700
+)
+# リサーチの再試行回数。外部Web取得が稀に不正JSONを返すため。高価なので控えめ。
 SCRIPT_RESEARCH_RETRIES = get_int("SCRIPT_RESEARCH_RETRIES", 2)
+# リサーチ（資料取得＋全試行）をまとめて制限する総予算。0は各試行の
+# SCRIPT_LLM_TIMEOUTを再試行回数分確保する（旧来の1回ごとの上限を維持）。
+SCRIPT_RESEARCH_TOTAL_TIMEOUT = get_int("SCRIPT_RESEARCH_TOTAL_TIMEOUT", 0)
 # 公開済み/キュー済み題材の再利用を避ける既定期間。channel.toml の
 # pipeline.topic_cooldown_days でチャンネル単位に上書きでき、0で無効化する。
 TOPIC_COOLDOWN_DAYS = get_int("TOPIC_COOLDOWN_DAYS", 30)

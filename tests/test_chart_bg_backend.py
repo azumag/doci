@@ -7,7 +7,9 @@ theme でパディングされることを確認する。
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from doci import chart_bg, config
@@ -61,6 +63,188 @@ class SelectCodexBackendTest(unittest.TestCase):
         self.assertEqual(result[0], {"query": "old clock tower", "media": "image"})
         self.assertEqual(result[1], {"query": "テストテーマ", "media": "image"})
         self.assertEqual(result[2], {"query": "テストテーマ", "media": "image"})
+
+
+class AuxiliaryBackendDefaultTest(unittest.TestCase):
+    def test_unspecified_research_total_keeps_per_attempt_timeout(self) -> None:
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_TOTAL_TIMEOUT", 0),
+            mock.patch.object(config, "SCRIPT_LLM_TIMEOUT", 600),
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 2),
+        ):
+            self.assertEqual(config.script_research_timeout(), 1200)
+
+    def test_pipeline_backend_values_fail_fast(self) -> None:
+        with mock.patch.object(config, "CHART_BG_BACKEND", "opencode-go"):
+            with self.assertRaisesRegex(ValueError, "CHART_BG_BACKEND=opencode-go"):
+                config.validate_pipeline_backends()
+
+    def test_implicit_opencode_cli_migrates_legacy_aux_model(self) -> None:
+        self.assertEqual(
+            config._migrate_implicit_opencode_model(
+                "claude-sonnet-4-6", "opencode", False
+            ),
+            config.OPENCODE_GO_DEFAULT_MODEL,
+        )
+        self.assertEqual(
+            config._migrate_implicit_opencode_model(
+                "claude-sonnet-4-6", "opencode", True
+            ),
+            "claude-sonnet-4-6",
+        )
+
+    def test_explicit_legacy_text_backend_keeps_auxiliary_compatibility(self) -> None:
+        with mock.patch.object(config, "TEXT_BACKEND", "anthropic"):
+            self.assertEqual(config._default_aux_backend(), "claude")
+        with mock.patch.object(config, "TEXT_BACKEND", "claude_cli"):
+            self.assertEqual(config._default_aux_backend(), "claude")
+
+    def test_nonlegacy_text_backend_does_not_implicitly_select_claude(self) -> None:
+        with mock.patch.object(config, "TEXT_BACKEND", "opencode_go"):
+            self.assertEqual(config._default_aux_backend(), "opencode_go")
+        with mock.patch.object(config, "TEXT_BACKEND", "opencode"):
+            self.assertEqual(config._default_aux_backend(), "opencode")
+
+
+class SelectOpenCodeBackendTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._orig_backend = config.CHART_BG_BACKEND
+        config.CHART_BG_BACKEND = "opencode_go"
+
+    def tearDown(self) -> None:
+        config.CHART_BG_BACKEND = self._orig_backend
+
+    def test_uses_opencode_go_without_calling_claude(self) -> None:
+        raw = json.dumps({"backgrounds": [{"query": "old library shelves", "media": "image"}]})
+        spec = {"type": "stat", "value": "42", "caption": "テスト値"}
+        with (
+            mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
+            mock.patch.object(chart_bg.llm, "run_claude") as claude_mock,
+        ):
+            result = chart_bg.select(spec, "テストテーマ")
+
+        run_mock.assert_called_once()
+        self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_GO_DEFAULT_MODEL)
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 120)
+        claude_mock.assert_not_called()
+        self.assertEqual(result, [{"query": "old library shelves", "media": "image"}])
+
+    def test_uses_opencode_cli_without_calling_claude(self) -> None:
+        config.CHART_BG_BACKEND = "opencode"
+        raw = json.dumps({"backgrounds": [{"query": "old library shelves", "media": "image"}]})
+        spec = {"type": "stat", "value": "42", "caption": "テスト値"}
+        with (
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+            mock.patch.object(chart_bg.llm, "run_claude") as claude_mock,
+        ):
+            result = chart_bg.select(spec, "テストテーマ")
+
+        run_mock.assert_called_once()
+        self.assertEqual(
+            run_mock.call_args.args[1],
+            config.OPENCODE_MODEL or config.OPENCODE_GO_DEFAULT_MODEL,
+        )
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 120)
+        claude_mock.assert_not_called()
+        self.assertEqual(result, [{"query": "old library shelves", "media": "image"}])
+
+    def test_agent_only_opencode_cli_does_not_inject_model(self) -> None:
+        config.CHART_BG_BACKEND = "opencode"
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
+            mock.patch.object(config, "OPENCODE_AGENT", "custom-agent"),
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], "")
+
+    def test_unknown_backend_fails_closed_without_claude(self) -> None:
+        config.CHART_BG_BACKEND = "opencode-go"
+        with mock.patch.object(chart_bg.llm, "run_claude") as claude_mock:
+            with self.assertRaisesRegex(ValueError, "未対応のCHART_BG_BACKEND"):
+                chart_bg.select({"type": "stat", "value": "42", "caption": "テスト値"}, "テーマ")
+        claude_mock.assert_not_called()
+
+    def test_ensure_rejects_unknown_backend_before_fetch(self) -> None:
+        config.CHART_BG_BACKEND = "opencode-go"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            chart_bg, "_fetch_one", return_value={"query": "テーマ", "media": "image", "path": None}
+        ) as fetch_mock:
+            with self.assertRaisesRegex(ValueError, "未対応のCHART_BG_BACKEND"):
+                chart_bg.ensure(
+                    {"type": "stat", "value": "42", "caption": "値"},
+                    "テーマ",
+                    Path(tmp),
+                    0,
+                )
+
+        fetch_mock.assert_not_called()
+
+    def test_ensure_rejects_unknown_backend_for_timeline_before_fetch(self) -> None:
+        config.CHART_BG_BACKEND = "opencode-go"
+        spec = {
+            "type": "timeline",
+            "events": [
+                {"year": "1990", "label": "A"},
+                {"year": "2000", "label": "B"},
+                {"year": "2010", "label": "C"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            chart_bg, "_fetch_one", side_effect=lambda item, _out: {**item, "path": None}
+        ) as fetch_mock:
+            with self.assertRaisesRegex(ValueError, "未対応のCHART_BG_BACKEND"):
+                chart_bg.ensure(spec, "テーマ", Path(tmp), 0)
+
+        fetch_mock.assert_not_called()
+
+    def test_opencode_go_ignores_legacy_text_model_for_chart_backgrounds(self) -> None:
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "TEXT_MODEL", "claude-opus-4-8"),
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_GO_DEFAULT_MODEL)
+
+    def test_opencode_cli_ignores_legacy_text_model_for_chart_backgrounds(self) -> None:
+        config.CHART_BG_BACKEND = "opencode"
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "TEXT_MODEL", "claude-opus-4-8"),
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
+            mock.patch.object(config, "OPENCODE_AGENT", ""),
+            mock.patch("doci.ai_text._run_opencode", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], config.OPENCODE_GO_DEFAULT_MODEL)
+
+    def test_opencode_go_prefers_explicit_opencode_model(self) -> None:
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "OPENCODE_MODEL", "opencode-go/custom"),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], "opencode-go/custom")
+
+    def test_explicit_claude_backend_uses_legacy_model_when_text_default_is_qwen(self) -> None:
+        config.CHART_BG_BACKEND = "claude"
+        raw = json.dumps({"backgrounds": [{"query": "shelves", "media": "image"}]})
+        with (
+            mock.patch.object(config, "TEXT_MODEL", config.OPENCODE_GO_DEFAULT_MODEL),
+            mock.patch.object(config, "LEGACY_CLAUDE_MODEL", "claude-opus-4-8"),
+            mock.patch.object(chart_bg.llm, "run_claude", return_value=raw) as run_mock,
+        ):
+            chart_bg.select({"type": "stat", "value": "42", "caption": "値"}, "テーマ")
+
+        self.assertEqual(run_mock.call_args.args[1], "claude-opus-4-8")
 
 
 if __name__ == "__main__":

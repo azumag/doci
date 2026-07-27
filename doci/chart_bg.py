@@ -1,6 +1,6 @@
 """図表シーンの背景素材を「テーマ＋図表内容」に合わせて都度選定・取得する。
 
-LLM(CHART_BG_BACKEND設定。既定 claude、または codex exec+MiniMax-M3)が各項目の
+LLM(CHART_BG_BACKEND設定。既定 OpenCode Go、codex/Claudeは旧設定を明示した場合のみ)が各項目の
 英語検索クエリと media(image/video)を返し、Pexels から取得。
 結果は workdir に scene_NN_chart_bg.json としてキャッシュし、再レンダで使い回す。
 timeline は各出来事ごとに1背景（順次切替用）、それ以外は1背景。
@@ -11,6 +11,14 @@ import json
 from pathlib import Path
 
 from . import assets, config, llm
+
+
+class UnsupportedChartBackendError(ValueError):
+    """CHART_BG_BACKEND の設定値が未対応であることを示す。"""
+
+
+def _log(message: str) -> None:
+    print(f"[doci] {message}", flush=True)
 
 
 def _items_desc(spec: dict) -> tuple[str, int]:
@@ -53,10 +61,38 @@ def select(spec: dict, theme: str) -> list[dict]:
     )
     if config.CHART_BG_BACKEND == "codex":
         # Web取得は不要なタスクなので fetch ガードは無効化(min_web_fetches=0)。
-        # timeout はサンドボックス起動オーバーヘッド分だけ claude より長めに取る。
+        # timeout はサンドボックス起動オーバーヘッドを見込む。
         txt = llm.run_codex(prompt, config.CODEX_MODEL, timeout=180, min_web_fetches=0)
+    elif config.CHART_BG_BACKEND == "opencode_go":
+        from . import ai_text
+
+        txt = ai_text._run_opencode_go(
+            prompt,
+            ai_text._opencode_go_model(
+                config.OPENCODE_MODEL or config.OPENCODE_GO_DEFAULT_MODEL
+            ),
+            timeout=120,
+        )
+    elif config.CHART_BG_BACKEND == "opencode":
+        from . import ai_text
+
+        txt = ai_text._run_opencode(
+            prompt,
+            ai_text._opencode_cli_aux_model(
+                config.OPENCODE_MODEL or config.OPENCODE_GO_DEFAULT_MODEL,
+                explicit=bool(config.OPENCODE_MODEL),
+            ),
+            config.OPENCODE_AGENT,
+            timeout=120,
+        )
+    elif config.CHART_BG_BACKEND == "claude":
+        txt = llm.run_claude(
+            prompt, config.legacy_claude_model(config.TEXT_MODEL), timeout=120
+        )
     else:
-        txt = llm.run_claude(prompt, config.TEXT_MODEL, timeout=120)
+        raise UnsupportedChartBackendError(
+            f"未対応のCHART_BG_BACKENDです: {config.CHART_BG_BACKEND}"
+        )
     data = llm.extract_json(txt)
     raw = data.get("backgrounds") or []
     out: list[dict] = []
@@ -105,7 +141,14 @@ def ensure(spec: dict, theme: str, workdir: Path, idx: int) -> dict:
     if cache.exists():
         meta = json.loads(cache.read_text(encoding="utf-8"))
     else:
-        sel = select(spec, theme)
+        try:
+            sel = select(spec, theme)
+        except UnsupportedChartBackendError:
+            _log(
+                "エラー: 未対応のCHART_BG_BACKEND="
+                f"{config.CHART_BG_BACKEND}。設定を修正して再実行してください"
+            )
+            raise
         # 単一背景(stat/compare/bar)は Chrome に背景画像として埋め込むため image 固定。
         # 動画背景は timeline(順次フロー=ffmpeg合成)でのみ使う。
         if not is_timeline:

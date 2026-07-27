@@ -279,6 +279,213 @@ factcheck = false
             dispatch_mock.call_args.args[0],
         )
 
+    def test_generate_does_not_fallback_to_claude_after_primary_failure(self) -> None:
+        spec = self._make_spec(
+            "alpha",
+            pipeline="""\
+[pipeline]
+research = false
+plan = false
+factcheck = false
+""",
+        )
+        with (
+            patch.object(config, "TEXT_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_DRAFT_RETRIES", 1),
+            patch.object(config, "WRITE_LLM_TIMEOUT", 900),
+            patch.object(config, "SCRIPT_DRAFT_TOTAL_TIMEOUT", 2700),
+            patch.object(
+                ai_text, "_dispatch", side_effect=RuntimeError("backend unavailable")
+            ) as dispatch_mock,
+            patch.object(ai_text, "_run_claude_cli") as claude_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "執筆が規定回数で揃いませんでした"):
+                ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        claude_mock.assert_not_called()
+        self.assertLessEqual(dispatch_mock.call_args.kwargs["timeout"], 900)
+
+    def test_generate_stops_retrying_after_draft_total_budget(self) -> None:
+        spec = self._make_spec(
+            "draft-budget",
+            pipeline="""\
+[pipeline]
+research = false
+plan = false
+factcheck = false
+""",
+        )
+
+        def fail_after_budget(_prompt, timeout=None):
+            raise RuntimeError("backend unavailable")
+
+        clock = [100.0]
+
+        def monotonic() -> float:
+            current = clock[0]
+            clock[0] += 0.5
+            return current
+
+        with (
+            patch.object(config, "TEXT_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_DRAFT_RETRIES", 3),
+            patch.object(config, "WRITE_LLM_TIMEOUT", 900),
+            patch.object(config, "SCRIPT_DRAFT_TOTAL_TIMEOUT", 1),
+            patch.object(
+                ai_text,
+                "_monotonic",
+                side_effect=monotonic,
+            ),
+            patch.object(ai_text, "_dispatch", side_effect=fail_after_budget) as dispatch_mock,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, r"執筆段全体の時間上限.*backend unavailable"
+            ):
+                ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        self.assertEqual(dispatch_mock.call_count, 1)
+
+    def test_factcheck_only_opencode_go_fetches_research_materials(self) -> None:
+        spec = self._make_spec(
+            "factcheck-only",
+            pipeline="""\
+[pipeline]
+research = false
+plan = false
+factcheck = true
+""",
+        )
+        raw = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        research_data = {
+            "topic": "確認用の題材",
+            "facts": [{"claim": "確認済み", "source_url": "https://support.google.com/youtube/help"}],
+        }
+        corrected = {
+            "narration": "確認済みのナレーションです。",
+            "changed": True,
+            "issues": [],
+        }
+        with (
+            patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_FACTCHECK", False),
+            patch("doci.research.web_research", return_value=research_data) as research_mock,
+            patch("doci.factcheck.verify_and_correct", return_value=corrected) as factcheck_mock,
+            patch.object(ai_text, "_dispatch", return_value=raw),
+        ):
+            script = ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        research_mock.assert_called_once()
+        self.assertFalse(research_mock.call_args.kwargs["require_youtube_examples"])
+        factcheck_mock.assert_called_once_with("本題から始まるナレーションです。", research_data)
+        self.assertEqual(script["narration"], "確認済みのナレーションです。")
+
+    def test_failed_research_is_not_repeated_for_factcheck(self) -> None:
+        spec = self._make_spec(
+            "research-failed-factcheck",
+            pipeline="""\
+[pipeline]
+research = true
+plan = false
+factcheck = true
+""",
+        )
+        raw = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        with (
+            patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            patch("doci.research.web_research", return_value=None) as research_mock,
+            patch("doci.factcheck.verify_and_correct", return_value=None),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+        ):
+            ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        research_mock.assert_called_once()
+
+    def test_factcheck_required_sources_does_not_reraise_transient_error(self) -> None:
+        spec = self._make_spec(
+            "factcheck-transient-error",
+            pipeline="""\
+[pipeline]
+research = false
+plan = false
+factcheck = true
+""",
+        )
+        raw = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        with (
+            patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_FACTCHECK_RESEARCH", False),
+            patch.object(config, "SCRIPT_FACTCHECK_REQUIRE_SOURCES", True),
+            patch(
+                "doci.factcheck.verify_and_correct",
+                side_effect=ValueError("一時的なJSON不良"),
+            ),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+        ):
+            script = ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        self.assertEqual(script["narration"], "本題から始まるナレーションです。")
+
+    def test_factcheck_research_can_be_disabled_independently(self) -> None:
+        spec = self._make_spec(
+            "factcheck-no-research",
+            pipeline="""\
+[pipeline]
+research = false
+plan = false
+factcheck = true
+""",
+        )
+        raw = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        corrected = {
+            "narration": "原文を確認しました。",
+            "changed": False,
+            "issues": [],
+        }
+        with (
+            patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_FACTCHECK", False),
+            patch.object(config, "SCRIPT_FACTCHECK_RESEARCH", False),
+            patch("doci.research.web_research") as research_mock,
+            patch("doci.factcheck.verify_and_correct", return_value=corrected),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+        ):
+            ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        research_mock.assert_not_called()
+
     def test_generate_guards_researched_topic_before_drafting(self) -> None:
         spec = self._make_spec(
             "alpha",

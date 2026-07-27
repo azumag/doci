@@ -1,8 +1,8 @@
-"""台本生成（opus 4.8）。
+"""台本生成（OpenCode Go / qwen3.7-plus）。
 
 Minimax は文章生成に使わない（方針）。
 バックエンド:
-  - claude_cli (既定/ローカル): 認証済みの `claude` CLI を print モードで呼ぶ
+  - claude_cli (旧・明示時のみ): 認証済みの `claude` CLI を print モードで呼ぶ
   - anthropic        (クラウド): Anthropic API (ANTHROPIC_API_KEY) を直叩き
   - opencode         (代替):     `opencode run --agent ...`
 """
@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import re
+import socket
 import subprocess
+import threading
 from collections.abc import Callable
 import sys
 import time
@@ -24,27 +27,183 @@ from . import channel, config, corners, llm
 from .channel import ChannelSpec, CornerSpec
 
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
+_DEFAULT_WRITE_TIMEOUT = object()
+_RESPONSE_END = object()
+
+
+def _shutdown_response(response) -> None:  # type: ignore[no-untyped-def]
+    """読み取り待ちのソケットを、可能ならshutdownしてワーカーを解放する。"""
+    for candidate in (
+        getattr(response, "fp", None),
+        getattr(getattr(response, "fp", None), "raw", None),
+        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+    ):
+        shutdown = getattr(candidate, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+            except (OSError, TypeError):
+                pass
+
+
+class _ResponseReadWorker:
+    """settimeout非対応の応答を、接続ごとに1本の読み取りワーカーで消費する。"""
+
+    def __init__(
+        self,
+        reader: Callable[[], object],
+        response,  # type: ignore[no-untyped-def]
+        *,
+        empty_is_end: bool = False,
+    ) -> None:
+        self._reader = reader
+        self._response = response
+        self._empty_is_end = empty_is_end
+        self._events: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+        self._cancelled = threading.Event()
+        self._worker = threading.Thread(
+            target=self._run, daemon=True, name="doci-response-reader"
+        )
+        self._worker.start()
+
+    def _publish(self, event: tuple[bool, object]) -> bool:
+        while not self._cancelled.is_set():
+            try:
+                self._events.put(event, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self) -> None:
+        while not self._cancelled.is_set():
+            try:
+                value = self._reader()
+            except StopIteration:
+                self._publish((False, _RESPONSE_END))
+                return
+            except BaseException as exc:  # noqa: BLE001 - propagate reader errors
+                self._publish((False, exc))
+                return
+            if not self._publish((True, value)):
+                return
+            if self._empty_is_end and not value:
+                return
+
+    def next(self, timeout_seconds: float) -> object:
+        try:
+            succeeded, value = self._events.get(timeout=max(0.001, timeout_seconds))
+        except queue.Empty as exc:
+            self.cancel()
+            raise socket.timeout("stream read timeout") from exc
+        if succeeded:
+            return value
+        if value is _RESPONSE_END:
+            raise StopIteration
+        raise value  # type: ignore[misc]
+
+    def cancel(self) -> None:
+        if self._cancelled.is_set():
+            return
+        self._cancelled.set()
+        _shutdown_response(self._response)
+        close = getattr(self._response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except OSError:
+                pass
+        self._worker.join(timeout=0.2)
+
+
+def _read_response_until_deadline(response, deadline: float) -> bytes:  # type: ignore[no-untyped-def]
+    """settimeout非対応のHTTP応答を、接続単位のworkerで期限まで読む。"""
+    chunks: list[bytes] = []
+    response_timeout_supported = False
+    fallback_reader: _ResponseReadWorker | None = None
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Anthropic API が時間上限に達しました")
+            for candidate in (
+                getattr(response, "fp", None),
+                getattr(getattr(response, "fp", None), "raw", None),
+                getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+            ):
+                setter = getattr(candidate, "settimeout", None)
+                if callable(setter):
+                    try:
+                        setter(remaining)
+                    except OSError:
+                        pass
+                    else:
+                        response_timeout_supported = True
+            try:
+                if fallback_reader is not None:
+                    chunk = fallback_reader.next(remaining)
+                elif response_timeout_supported:
+                    chunk = response.read(4096)
+                else:
+                    fallback_reader = _ResponseReadWorker(
+                        lambda: response.read(4096), response, empty_is_end=True
+                    )
+                    chunk = fallback_reader.next(remaining)
+            except socket.timeout as exc:
+                raise TimeoutError("Anthropic API が時間上限に達しました") from exc
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)  # type: ignore[arg-type]
+    finally:
+        if fallback_reader is not None:
+            fallback_reader.cancel()
+
+
+def _monotonic() -> float:
+    """差し替え可能な時計。全体予算のテストが標準timeを汚染しないようにする。"""
+    return time.monotonic()
 
 # 互換用エイリアス（JSON抽出/CLI実行は共通モジュール llm に集約）
 _extract_json = llm.extract_json
 
 
-def _write_timeout() -> int | None:
-    """台本執筆の待機上限。0以下は長文生成を途中で切らない無制限モード。"""
+def _write_timeout(
+    override: int | float | None | object = _DEFAULT_WRITE_TIMEOUT,
+) -> int | float | None:
+    """CLI/APIの全体待機上限。0は明示的な長文待機モード。"""
+    if override is _DEFAULT_WRITE_TIMEOUT:
+        return _whole_write_timeout()
+    if override is None:
+        return None
+    return override if override > 0 else None
+
+
+def _whole_write_timeout() -> int | None:
+    """ストリーム全体の上限。0は長文を最後まで待つ。"""
     return config.WRITE_LLM_TIMEOUT if config.WRITE_LLM_TIMEOUT > 0 else None
 
 
-def _run_claude_cli(prompt: str, model: str) -> str:
-    return llm.run_claude(prompt, model, timeout=_write_timeout())
+def _run_claude_cli(
+    prompt: str,
+    model: str,
+    timeout: int | float | None | object = _DEFAULT_WRITE_TIMEOUT,
+) -> str:
+    return llm.run_claude(
+        prompt, config.legacy_claude_model(model), timeout=_write_timeout(timeout)
+    )
 
 
-def _run_anthropic(prompt: str, model: str) -> str:
+def _run_anthropic(
+    prompt: str,
+    model: str,
+    timeout: int | float | None | object = _DEFAULT_WRITE_TIMEOUT,
+) -> str:
     key = config.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY が未設定です (TEXT_BACKEND=anthropic)")
     body = json.dumps(
         {
-            "model": model,
+            "model": config.legacy_claude_model(model),
             "max_tokens": 2000,
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -58,8 +217,16 @@ def _run_anthropic(prompt: str, model: str) -> str:
             "content-type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=_write_timeout()) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    request_timeout = _write_timeout(timeout)
+    deadline = (
+        time.monotonic() + request_timeout if request_timeout is not None else None
+    )
+    open_timeout = request_timeout
+    if deadline is not None:
+        open_timeout = max(0.001, deadline - time.monotonic())
+    with urllib.request.urlopen(req, timeout=open_timeout) as resp:
+        payload = resp.read() if deadline is None else _read_response_until_deadline(resp, deadline)
+        data = json.loads(payload.decode("utf-8"))
     return "".join(b.get("text", "") for b in data.get("content", []))
 
 
@@ -81,16 +248,44 @@ def _opencode_go_key() -> str:
     return key
 
 
-def _run_opencode_go(prompt: str, model: str) -> str:
-    """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
+def _opencode_go_model(model: str) -> str:
+    """OpenCode Go APIへ渡せるモデル名だけを許可する。
+
+    bare model はゲートウェイの既定プロバイダとして後方互換に受け入れるが、
+    provider-qualified な別プロバイダ名をそのまま送ると、Go APIではなく別の
+    認証経路を暗黙に要求するため、既定のQwenへ安全に戻す。
+    """
     if not model:
-        raise RuntimeError("OPENCODE_MODEL が未設定です (TEXT_BACKEND=opencode_go)")
-    provider, sep, model_id = model.partition("/")
-    if sep and provider != "opencode-go":
+        raise RuntimeError(
+            "TEXT_BACKEND=opencode_go ではモデルを指定してください "
+            f"（例: {config.OPENCODE_GO_DEFAULT_MODEL}）"
+        )
+    provider, separator, _ = model.partition("/")
+    if separator and provider != "opencode-go":
         raise RuntimeError(
             "TEXT_BACKEND=opencode_go では OPENCODE_MODEL を "
             "opencode-go/<model> 形式で指定してください"
         )
+    model_id = model.split("/", 1)[1] if separator else model
+    if model_id.startswith(("claude-", "anthropic/")):
+        raise RuntimeError(
+            "TEXT_BACKEND=opencode_go ではClaudeモデルを使えません。 "
+            f"{config.OPENCODE_GO_DEFAULT_MODEL} を指定してください"
+        )
+    return model
+
+
+_DEFAULT_OPENCODE_GO_TIMEOUT = object()
+
+
+def _run_opencode_go(
+    prompt: str,
+    model: str,
+    timeout: int | None | object = _DEFAULT_OPENCODE_GO_TIMEOUT,
+) -> str:
+    """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
+    model = _opencode_go_model(model)
+    _, sep, model_id = model.partition("/")
     if not sep:
         model_id = model
     body = json.dumps(
@@ -117,37 +312,202 @@ def _run_opencode_go(prompt: str, model: str) -> str:
     text_parts: list[str] = []
     text_chars = 0
     stop_reason = ""
-    try:
-        with urllib.request.urlopen(req, timeout=_write_timeout()) as resp:
-            for raw in resp:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].lstrip()
-                if not payload or payload == "[DONE]":
-                    continue
+    if timeout is _DEFAULT_OPENCODE_GO_TIMEOUT:
+        deadline_timeout = _whole_write_timeout()
+    else:
+        deadline_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
+    # 全体上限とidle上限を同時に0にすると、Claudeフォールバックなしの既定経路が
+    # 無音SSEで復帰不能になるため、明示的な全体無制限時にもidleだけは残す。
+    idle_timeout = (
+        config.WRITE_LLM_IDLE_TIMEOUT
+        if config.WRITE_LLM_IDLE_TIMEOUT > 0
+        else (300 if deadline_timeout is None else None)
+    )
+    request_limits = [value for value in (deadline_timeout, idle_timeout) if value is not None]
+    request_timeout = min(request_limits) if request_limits else None
+    deadline_expired = threading.Event()
+    received_terminal = False
+
+    def set_stream_timeout(response, timeout_seconds: float | None) -> bool:  # type: ignore[no-untyped-def]
+        """各行の読み取り前にソケットへ残り時間を設定し、全体上限をreadlineにも適用する。"""
+        if timeout_seconds is None:
+            return True
+        candidates = (
+            getattr(getattr(response, "fp", None), "raw", None),
+            getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+        )
+        for candidate in candidates:
+            setter = getattr(candidate, "settimeout", None)
+            if callable(setter):
                 try:
-                    event = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                event_type = event.get("type")
-                if event_type == "error":
-                    raise RuntimeError(f"OpenCode Go API error: {event.get('error', event)}")
-                delta = event.get("delta") or {}
-                if delta.get("type") == "text_delta":
-                    part = delta.get("text", "")
-                    text_parts.append(part)
-                    text_chars += len(part)
-                if event_type == "message_delta":
-                    stop_reason = delta.get("stop_reason") or stop_reason
-                elapsed = time.monotonic() - started
-                if elapsed >= next_progress:
-                    _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
-                    next_progress += 60.0
+                    setter(timeout_seconds)
+                except OSError:
+                    pass
+                else:
+                    return True
+        return False
+
+    try:
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+            fallback_reader: _ResponseReadWorker | None = None
+            try:
+                stream = iter(resp)
+                stream_timeout_warning_logged = False
+                response_read = getattr(resp, "read1", None) or getattr(resp, "read", None)
+                byte_mode = callable(response_read)
+                line_buffer = bytearray()
+                last_socket_timeout: float | None = None
+                while True:
+                    remaining = (
+                        deadline_timeout - (time.monotonic() - started)
+                        if deadline_timeout is not None
+                        else None
+                    )
+                    if remaining is not None and remaining <= 0:
+                        deadline_expired.set()
+                        raise RuntimeError("OpenCode Go API が時間上限に達しました")
+                    if remaining is not None:
+                        remaining = max(0.001, remaining)
+                    read_timeout = remaining
+                    if idle_timeout is not None:
+                        read_timeout = (
+                            min(read_timeout, idle_timeout)
+                            if read_timeout is not None
+                            else idle_timeout
+                        )
+                    update_socket_timeout = (
+                        read_timeout is not None
+                        and (
+                            last_socket_timeout is None
+                            or abs(read_timeout - last_socket_timeout) >= 0.1
+                        )
+                    )
+                    if read_timeout is None:
+                        stream_timeout_applied = True
+                    elif update_socket_timeout:
+                        stream_timeout_applied = set_stream_timeout(resp, read_timeout)
+                    else:
+                        stream_timeout_applied = last_socket_timeout is not None
+                    if update_socket_timeout and stream_timeout_applied:
+                        last_socket_timeout = read_timeout
+                    if not stream_timeout_applied:
+                        if not stream_timeout_warning_logged:
+                            _log("警告: OpenCode Goストリームのソケット期限を設定できません")
+                            stream_timeout_warning_logged = True
+                    try:
+                        if b"\n" in line_buffer:
+                            raw_line, _, remainder = line_buffer.partition(b"\n")
+                            line_buffer = bytearray(remainder)
+                            raw = raw_line + b"\n"
+                        elif byte_mode:
+                            if fallback_reader is not None:
+                                chunk = fallback_reader.next(read_timeout)
+                            elif stream_timeout_applied:
+                                chunk = response_read(4096)
+                            else:
+                                fallback_reader = _ResponseReadWorker(
+                                    lambda: response_read(4096), resp
+                                )
+                                chunk = fallback_reader.next(read_timeout)
+                            if not chunk:
+                                if line_buffer:
+                                    raw = bytes(line_buffer)
+                                    line_buffer.clear()
+                                else:
+                                    raise StopIteration
+                            else:
+                                line_buffer.extend(chunk)
+                                continue
+                        elif fallback_reader is not None:
+                            raw = fallback_reader.next(read_timeout)
+                        elif stream_timeout_applied:
+                            raw = next(stream)
+                        else:
+                            fallback_reader = _ResponseReadWorker(
+                                lambda: next(stream), resp
+                            )
+                            raw = fallback_reader.next(read_timeout)
+                    except socket.timeout as exc:
+                        if (
+                            deadline_timeout is not None
+                            and time.monotonic() - started >= deadline_timeout
+                        ):
+                            deadline_expired.set()
+                            raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
+                        raise RuntimeError("OpenCode Go API の無通信タイムアウト") from exc
+                    except StopIteration:
+                        if line_buffer:
+                            raw = bytes(line_buffer)
+                            line_buffer.clear()
+                        else:
+                            if (
+                                deadline_expired.is_set()
+                                or (
+                                    deadline_timeout is not None
+                                    and time.monotonic() - started >= deadline_timeout
+                                )
+                            ):
+                                deadline_expired.set()
+                                raise RuntimeError(
+                                    "OpenCode Go API が時間上限に達しました"
+                                )
+                            # [DONE]/stop_reasonを省略するゲートウェイでも、ストリームの
+                            # 自然終了は完全な本文の終端として受け入れる。
+                            received_terminal = True
+                            break
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].lstrip()
+                    if not payload:
+                        continue
+                    if payload == "[DONE]":
+                        received_terminal = True
+                        break
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    event_type = event.get("type")
+                    if event_type == "error":
+                        raise RuntimeError(f"OpenCode Go API error: {event.get('error', event)}")
+                    delta = event.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        part = delta.get("text", "")
+                        text_parts.append(part)
+                        text_chars += len(part)
+                    if event_type == "message_delta":
+                        stop_reason = delta.get("stop_reason") or stop_reason
+                        if stop_reason:
+                            received_terminal = True
+                            break
+                    if (
+                        not received_terminal
+                        and (
+                            deadline_expired.is_set()
+                            or (
+                                deadline_timeout is not None
+                                and time.monotonic() - started >= deadline_timeout
+                            )
+                        )
+                    ):
+                        raise RuntimeError("OpenCode Go API が時間上限に達しました")
+                    elapsed = time.monotonic() - started
+                    if elapsed >= next_progress:
+                        _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
+                        next_progress += 60.0
+            finally:
+                if fallback_reader is not None:
+                    fallback_reader.cancel()
+            if deadline_expired.is_set() and not received_terminal:
+                raise RuntimeError("OpenCode Go API が時間上限に達しました")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"OpenCode Go API failed (HTTP {exc.code}): {detail}") from exc
-
+    except (TimeoutError, OSError, ValueError) as exc:
+        if deadline_expired.is_set() and not received_terminal:
+            raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
+        raise
     text = "".join(text_parts)
     if stop_reason == "max_tokens":
         raise RuntimeError(
@@ -159,7 +519,12 @@ def _run_opencode_go(prompt: str, model: str) -> str:
     return text
 
 
-def _run_opencode(prompt: str, model: str, agent: str) -> str:
+def _run_opencode(
+    prompt: str,
+    model: str,
+    agent: str,
+    timeout: int | float | None | object = _DEFAULT_WRITE_TIMEOUT,
+) -> str:
     if not model and not agent:
         raise RuntimeError(
             "OPENCODE_MODEL か OPENCODE_AGENT のどちらかを設定してください (TEXT_BACKEND=opencode)"
@@ -204,23 +569,59 @@ def _run_opencode(prompt: str, model: str, agent: str) -> str:
         encoding="utf-8",
     )
     cmd += ["--print-logs", "--log-level", "ERROR", "--dir", str(scratch), prompt]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_write_timeout())
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_write_timeout(timeout))
     if proc.returncode != 0:
         raise RuntimeError(f"opencode failed (rc={proc.returncode}): {proc.stderr[:500]}")
     return proc.stdout
 
 
-def _dispatch(prompt: str) -> str:
+def _opencode_cli_model(model: str) -> str:
+    """OpenCode CLIのagent-only設定を補助段でも維持する。"""
+    candidate = config.OPENCODE_MODEL or ("" if config.OPENCODE_AGENT else model)
+    return _validate_opencode_cli_model(candidate)
+
+
+def _validate_opencode_cli_model(model: str) -> str:
+    """OpenCode CLIへClaudeプロバイダを暗黙に渡さない。"""
+    if model.startswith(("claude-", "anthropic/", "opencode-go/claude-")):
+        raise RuntimeError(
+            "TEXT_BACKEND=opencode ではClaudeモデルを使えません。"
+            " OPENCODE_MODELまたは段別モデルをOpenCode対応値へ変更してください"
+        )
+    return model
+
+
+def _opencode_cli_aux_model(model: str, *, explicit: bool) -> str:
+    """補助段は段別モデルを優先し、未指定時だけ既存CLI設定を使う。"""
+    if explicit:
+        return _validate_opencode_cli_model(model)
+    return _opencode_cli_model(model)
+
+
+def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
     backend = config.TEXT_BACKEND
     model = config.TEXT_MODEL
     if backend == "claude_cli":
-        return _run_claude_cli(prompt, model)
+        if timeout is None:
+            return _run_claude_cli(prompt, model)
+        return _run_claude_cli(prompt, model, timeout=timeout)
     if backend == "anthropic":
-        return _run_anthropic(prompt, model)
+        if timeout is None:
+            return _run_anthropic(prompt, model)
+        return _run_anthropic(prompt, model, timeout=timeout)
     if backend == "opencode_go":
-        return _run_opencode_go(prompt, config.OPENCODE_MODEL)
+        if timeout is None:
+            return _run_opencode_go(prompt, config.OPENCODE_MODEL or model)
+        return _run_opencode_go(prompt, config.OPENCODE_MODEL or model, timeout=timeout)
     if backend == "opencode":
-        return _run_opencode(prompt, config.OPENCODE_MODEL, config.OPENCODE_AGENT)
+        # agent-only の既存設定では TEXT_MODEL の既定値を混ぜず、
+        # _run_opencode 側に空モデルを渡して --agent を有効にする。
+        opencode_model = _opencode_cli_model(model)
+        if timeout is None:
+            return _run_opencode(prompt, opencode_model, config.OPENCODE_AGENT)
+        return _run_opencode(
+            prompt, opencode_model, config.OPENCODE_AGENT, timeout=timeout
+        )
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")
 
 
@@ -321,7 +722,9 @@ def generate(
     )
     # 1) 前段リサーチ（issue #6）: 題材選定＋Web裏取り。失敗してもリサーチ無しで続行。
     research = None
-    if spec.pipeline_get("research", config.SCRIPT_RESEARCH):
+    research_enabled = spec.pipeline_get("research", config.SCRIPT_RESEARCH)
+    factcheck_enabled = spec.pipeline_get("factcheck", config.SCRIPT_FACTCHECK)
+    if research_enabled:
         from . import research as research_mod
 
         _log(f"前段リサーチ ({config.RESEARCH_BACKEND}+Web)…")
@@ -369,11 +772,37 @@ def generate(
     )
     script = None
     last_err: Exception | None = None
+    draft_started = _monotonic()
+    draft_total_timeout = (
+        config.SCRIPT_DRAFT_TOTAL_TIMEOUT
+        if config.SCRIPT_DRAFT_TOTAL_TIMEOUT > 0
+        else None
+    )
     for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
+        attempt_timeout = None
+        if draft_total_timeout is not None:
+            remaining_budget = draft_total_timeout - (_monotonic() - draft_started)
+            if remaining_budget <= 0:
+                detail = ""
+                if last_err is not None:
+                    detail = (
+                        f" (直前の失敗: {type(last_err).__name__}: "
+                        f"{str(last_err)[:160]})"
+                    )
+                last_err = TimeoutError(
+                    f"執筆段全体の時間上限に達しました{detail}"
+                )
+                break
+            per_attempt_timeout = _whole_write_timeout()
+            attempt_timeout = (
+                min(per_attempt_timeout, remaining_budget)
+                if per_attempt_timeout is not None
+                else remaining_budget
+            )
         try:
-            script = _validate(_extract_json(_dispatch(prompt)))
+            script = _validate(_extract_json(_dispatch(prompt, timeout=attempt_timeout)))
             break
-        except (ValueError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+        except (ValueError, TimeoutError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
             # JSON不良/必須キー不足（ValueError）だけでなく、執筆バックエンドのタイムアウト
             # (TimeoutExpired)・異常終了(RuntimeError)・ネットワーク失敗(OSError)も一過性とみなし
             # 再試行する（qwen 等が稀に固まり、1回の失敗で通し全体が即死するのを防ぐ）。
@@ -383,22 +812,6 @@ def generate(
                 f"執筆失敗(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: "
                 f"{type(e).__name__}: {str(e)[:160]}"
             )
-    # フォールバック: 主バックエンド(例 opencode/qwen)が規定回数で揃わなかった場合、
-    # 稼働実績のある claude_cli で執筆をやり直す。qwen のハング/不調で通し全体が
-    # 「執筆失敗」で終わるのを防ぐ安全網（qwen はあくまで主のまま）。
-    if script is None and config.TEXT_BACKEND != "claude_cli":
-        _log(f"執筆({config.TEXT_BACKEND})が揃わず→claude_cli にフォールバック")
-        for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
-            try:
-                script = _validate(_extract_json(_run_claude_cli(prompt, config.FALLBACK_TEXT_MODEL)))
-                break
-            except (ValueError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
-                last_err = e
-                _log(
-                    f"claudeフォールバック失敗(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再試行: "
-                    f"{type(e).__name__}: {str(e)[:160]}"
-                )
-
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
     if not research and topic_guard:
@@ -428,19 +841,53 @@ def generate(
         if used:
             _log(f"図表を {used} シーンに配置")
 
-    # 3) 後段ファクトチェック（issue #6）: 別モデル(opus)＋Web検証で narration を自動修正。
-    if spec.pipeline_get("factcheck", config.SCRIPT_FACTCHECK):
+    # 2.9) OpenCode系ファクトチェックだけを有効にした場合は、下書き後に
+    # 資料取得だけを行う。research=false の題材選定・cooldown意味は変えない。
+    factcheck_research = research
+    if (
+        factcheck_enabled
+        and config.SCRIPT_FACTCHECK_RESEARCH
+        and config.FACTCHECK_BACKEND in {"opencode", "opencode_go"}
+        and not research_enabled
+    ):
+        from . import research as research_mod
+
+        _log(f"ファクトチェック用リサーチ ({config.FACTCHECK_BACKEND}+Web)…")
+        try:
+            factcheck_research = research_mod.web_research(
+                corner,
+                past_topics,
+                spec,
+                performance_guidance=performance_guidance,
+                backend_override=config.FACTCHECK_BACKEND,
+                model_override=config.FACTCHECK_MODEL,
+                model_explicit_override=config._FACTCHECK_MODEL_EXPLICIT,
+                focus_text=(
+                    f"{script.get('title', '')}\n{script.get('narration', '')}"
+                ),
+                require_youtube_examples=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            _log(f"ファクトチェック用リサーチ失敗→原文維持: {e}")
+            factcheck_research = None
+
+    # 3) 後段ファクトチェック（issue #6）: 別モデル＋Web検証で narration を自動修正。
+    if factcheck_enabled:
         from . import factcheck
 
         _log(f"後段ファクトチェック ({config.FACTCHECK_BACKEND}+Web)…")
         try:
-            fc = factcheck.verify_and_correct(script["narration"], research)
+            fc = factcheck.verify_and_correct(script["narration"], factcheck_research)
             if fc and fc.get("narration", "").strip():
                 issues = fc.get("issues") or []
                 if fc.get("changed") and issues:
                     _log(f"ファクトチェック: {len(issues)}件修正")
                 script["narration"] = _strip_chart_markers(fc["narration"])
                 script["_factcheck"] = issues
+        except factcheck.FactcheckSourcesUnavailableError:
+            _log("ファクトチェック資料がないため失敗として扱います")
+            if config.SCRIPT_FACTCHECK_REQUIRE_SOURCES:
+                raise
         except Exception as e:  # noqa: BLE001
             _log(f"ファクトチェック失敗→修正なしで続行: {e}")
 
@@ -456,7 +903,7 @@ def generate(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="台本生成 (opus 4.8)")
+    ap = argparse.ArgumentParser(description="台本生成 (OpenCode Go / qwen3.7-plus)")
     ap.add_argument("--channel", help="チャンネルID（未指定時は既定チャンネル）")
     ap.add_argument("--corner", help="コーナーID")
     ap.add_argument("--date", default=_date.today().isoformat())

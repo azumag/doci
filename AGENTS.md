@@ -6,6 +6,8 @@
 - Start from the actual Git checkout and reconcile local state with the live GitHub issue before editing.
 - Validate external-platform behavior with local mocks or fixtures first. Do not create production GitHub issues or labels, upload videos, or change YouTube privacy as an implementation test without explicit user approval.
 - Never save or print tokens, OAuth credentials, API keys, or other secrets.
+- Runtime generation must use the OpenCode Go defaults; Claude CLI/API is not a runtime dependency.
+  The repository-side Claude Action is review-only and must not be introduced into the production path.
 
 ## Required validation
 

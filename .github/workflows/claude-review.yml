@@ -18,7 +18,8 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Opus 5のsubscription reviewは大きめの差分で15分を超えることがある。
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: read
@@ -75,9 +76,9 @@ jobs:
       - name: Run isolated Claude review
         id: claude
         if: env.CLAUDE_CODE_OAUTH_TOKEN_CONFIGURED == 'true'
-        # This exact revision completed a subscription-OAuth review in
-        # azumag/twica Actions run 30044397021.
-        uses: anthropics/claude-code-action/base-action@44423bdec74b97d67543eb16c110546762c110b2 # v1
+        # Pinned v1 revision: Claude Code 2.1.220 / Agent SDK 0.3.220.
+        # Keep this fixed rather than tracking a mutable action tag.
+        uses: anthropics/claude-code-action/base-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt_file: /tmp/doci-claude-review-prompt.md
@@ -100,7 +101,7 @@ jobs:
             exit 1
           fi
 
-  comment:
+  submit-review:
     needs: review
     if: >-
       needs.review.outputs.oauth_configured == 'true' &&
@@ -138,10 +139,23 @@ jobs:
           pathlib.Path("/tmp/claude-review.md").write_text(text + "\n", encoding="utf-8")
           '
 
-      - name: Post one controlled PR comment
+      - name: Submit one controlled PR review for this head
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: >-
-          gh pr comment "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}"
-          --edit-last --create-if-none --body-file /tmp/claude-review.md
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python -c '
+          import json, os, pathlib
+          body = pathlib.Path("/tmp/claude-review.md").read_text(encoding="utf-8")
+          pathlib.Path("/tmp/claude-review-request.json").write_text(
+              json.dumps({
+                  "body": body,
+                  "event": "COMMENT",
+                  "commit_id": os.environ["PR_HEAD_SHA"],
+              }), encoding="utf-8"
+          )
+          '
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            --input /tmp/claude-review-request.json
