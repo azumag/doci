@@ -76,9 +76,9 @@ jobs:
       - name: Run isolated Claude review
         id: claude
         if: env.CLAUDE_CODE_OAUTH_TOKEN_CONFIGURED == 'true'
-        # This exact revision completed a subscription-OAuth review in
-        # azumag/twica Actions run 30044397021.
-        uses: anthropics/claude-code-action/base-action@44423bdec74b97d67543eb16c110546762c110b2 # v1
+        # Pinned v1 revision: Claude Code 2.1.220 / Agent SDK 0.3.220.
+        # Keep this fixed rather than tracking a mutable action tag.
+        uses: anthropics/claude-code-action/base-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt_file: /tmp/doci-claude-review-prompt.md
