@@ -132,7 +132,13 @@ class _SearchResultParser(HTMLParser):
             return
         values = dict(attrs)
         classes = (values.get("class") or "").split()
-        if ({"result__a", "result-link"} & set(classes)) and values.get("href"):
+        # DuckDuckGo HTML版の result__a/result-link に加え、Lite版が付ける
+        # nofollow リンクを受ける。取得前に厳格なホスト許可判定を行うため、
+        # 検索結果HTML側の広めの抽出は本文入力を広げない。
+        if (
+            ({"result__a", "result-link"} & set(classes))
+            or values.get("rel") == "nofollow"
+        ) and values.get("href"):
             self._href = values["href"] or ""
             self._text = []
 
@@ -703,48 +709,6 @@ def _decode_response_body(response, body: bytes) -> str:  # type: ignore[no-unty
         return body.decode("utf-8", errors="replace")
 
 
-def _wikipedia_search_results(query: str, timeout: float = 8) -> list[dict[str, str]]:
-    """DDGが利用できない場合の軽量な検索フォールバック。"""
-    params = urlencode(
-        {
-            "action": "query",
-            "list": "search",
-            "srsearch": query,
-            "srlimit": 4,
-            "format": "json",
-            "utf8": 1,
-        }
-    )
-    url = f"https://ja.wikipedia.org/w/api.php?{params}"
-    if timeout <= 0:
-        return []
-    try:
-        with _safe_urlopen(
-            Request(url, headers={"User-Agent": "doci/1.0"}),
-            timeout=timeout,
-            trusted_only=True,
-        ) as response:
-            body = _decode_response_body(response, response.read(120000))
-            if not body:
-                return []
-            data = json.loads(body)
-    except Exception as exc:  # noqa: BLE001 - fallback is best effort
-        _log(f"Wikipedia資料検索をスキップ: {type(exc).__name__}")
-        return []
-    rows: list[dict[str, str]] = []
-    for item in (data.get("query", {}).get("search", []) if isinstance(data, dict) else []):
-        if not isinstance(item, dict) or not item.get("title"):
-            continue
-        title = str(item["title"])
-        rows.append(
-            {
-                "url": "https://ja.wikipedia.org/wiki/" + quote(title.replace(" ", "_"), safe=""),
-                "title": title,
-            }
-        )
-    return rows
-
-
 def _query_terms(text: str, limit: int) -> list[str]:
     """散文を検索エンジン向けの短い語へ縮める（プロンプト本文は送らない）。"""
     cleaned = re.sub(r"[、。！？/（）()：:・,\.\n]+", " ", text)
@@ -798,22 +762,33 @@ def _search_reference_materials(
     # OpenCode系のfactsは実取得済みの一次資料だけを根拠にする。Wikipedia等の
     # 背景資料をここへ混ぜると、後段で一次資料から除外されるだけで本文取得枠を
     # 消費するため、検索・取得候補には入れない。
+    query = quote_plus(" ".join(context))
     parser = _SearchResultParser()
-    search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(" ".join(context))
-    try:
-        ddg_timeout = remaining(12)
-        if ddg_timeout <= 0:
-            raise TimeoutError("資料検索の時間予算を使い切りました")
-        with _safe_urlopen(
-            Request(search_url, headers={"User-Agent": "doci/1.0"}),
-            timeout=ddg_timeout,
-            trusted_only=True,
-        ) as response:
-            search_html = _decode_response_body(response, response.read(180000))
-    except Exception as exc:  # noqa: BLE001 - 検索不能時は一次資料なしとして安全側に止める
-        _log(f"OpenCode Go補助検索をスキップ: {type(exc).__name__}")
-        search_html = ""
-    parser.feed(search_html)
+    search_url = ""
+    # HTML版が拒否・空応答・マークアップ変更になった場合も、同じ共有予算内で
+    # Lite版を試す。どちらも検索候補にすぎず、後段の許可ホスト・一次資料判定と
+    # 本文取得を通らなければ facts に使わない。
+    for endpoint in (
+        "https://html.duckduckgo.com/html/?q=",
+        "https://lite.duckduckgo.com/lite/?q=",
+    ):
+        search_url = endpoint + query
+        try:
+            ddg_timeout = remaining(12)
+            if ddg_timeout <= 0:
+                raise TimeoutError("資料検索の時間予算を使い切りました")
+            with _safe_urlopen(
+                Request(search_url, headers={"User-Agent": "doci/1.0"}),
+                timeout=ddg_timeout,
+                trusted_only=True,
+            ) as response:
+                search_html = _decode_response_body(response, response.read(180000))
+        except Exception as exc:  # noqa: BLE001 - 次の検索エンドポイントを試す
+            _log(f"OpenCode Go補助検索をスキップ: {type(exc).__name__}")
+            continue
+        parser.feed(search_html)
+        if parser.results:
+            break
     # 先頭候補が広告・アクセス拒否・空本文でも後続候補を試せるよう、
     # 本文取得の候補を4件より多く保持する。ただし投入量は bounded のまま。
     for row in parser.results:

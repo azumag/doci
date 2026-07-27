@@ -22,7 +22,7 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
     def test_uses_structured_output_and_fixed_pr_review_step(self) -> None:
         self.assertIn("steps.claude.outputs.structured_output", self.workflow)
         self.assertIn("needs.review.outputs.review_json", self.workflow)
-        self.assertIn("Submit one controlled PR review", self.workflow)
+        self.assertIn("Submit one controlled PR review for this head", self.workflow)
         self.assertIn('"event": "COMMENT"', self.workflow)
         self.assertIn('"repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews"', self.workflow)
         self.assertNotIn("gh pr comment", self.workflow)

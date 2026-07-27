@@ -139,7 +139,7 @@ jobs:
           pathlib.Path("/tmp/claude-review.md").write_text(text + "\n", encoding="utf-8")
           '
 
-      - name: Submit one controlled PR review
+      - name: Submit one controlled PR review for this head
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

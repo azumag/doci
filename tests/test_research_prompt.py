@@ -26,6 +26,17 @@ class ResearchPromptTest(unittest.TestCase):
             ],
         )
 
+    def test_search_parser_accepts_duckduckgo_lite_result_links(self) -> None:
+        parser = research._SearchResultParser()
+        parser.feed(
+            '<a rel="nofollow" href="https://support.google.com/youtube/help">公式ヘルプ</a>'
+        )
+
+        self.assertEqual(
+            parser.results,
+            [{"url": "https://support.google.com/youtube/help", "title": "公式ヘルプ"}],
+        )
+
     def test_visible_parser_prefers_article_body_over_navigation(self) -> None:
         parser = research._VisibleTextParser()
         parser.feed(
@@ -187,12 +198,11 @@ class ResearchPromptTest(unittest.TestCase):
         response.__enter__.return_value = response
         response.read.return_value = links
         with (
-            mock.patch.object(research, "_wikipedia_search_results", return_value=[]),
             mock.patch.object(research, "_safe_urlopen", return_value=response),
             mock.patch.object(
                 research,
                 "_page_excerpt",
-                side_effect=["", "", "", "", "5ページ目の本文"],
+                side_effect=lambda url: "5ページ目の本文" if url.endswith("-5") else "",
             ) as excerpt_mock,
         ):
             materials = research._search_reference_materials("YouTube Studio")
@@ -202,7 +212,6 @@ class ResearchPromptTest(unittest.TestCase):
 
     def test_reference_materials_respects_single_search_budget(self) -> None:
         with (
-            mock.patch.object(research, "_wikipedia_search_results", return_value=[]) as wiki_mock,
             mock.patch.object(research, "_safe_urlopen") as open_mock,
             mock.patch.object(
                 research.time,
@@ -216,8 +225,6 @@ class ResearchPromptTest(unittest.TestCase):
         ):
             research._search_reference_materials("YouTube Studio", search_timeout=0.001)
 
-        # 一次資料だけを扱うため、Wikipedia に別のネットワーク予算を渡さない。
-        wiki_mock.assert_not_called()
         self.assertTrue(open_mock.call_args_list)
         self.assertTrue(
             all(call.kwargs["timeout"] <= 0.001 for call in open_mock.call_args_list)
@@ -271,11 +278,6 @@ class ResearchPromptTest(unittest.TestCase):
     def test_reference_search_does_not_fetch_wikipedia_when_ddg_has_no_results(self) -> None:
         with (
             mock.patch.object(research, "_safe_urlopen") as open_mock,
-            mock.patch.object(
-                research,
-                "_wikipedia_search_results",
-                return_value=[{"url": "https://ja.wikipedia.org/wiki/題材", "title": "題材"}],
-            ) as wikipedia_mock,
             mock.patch.object(research, "_page_excerpt") as excerpt_mock,
         ):
             ddg_response = mock.MagicMock()
@@ -284,7 +286,6 @@ class ResearchPromptTest(unittest.TestCase):
             open_mock.return_value = ddg_response
             materials = research._search_reference_materials("歴史")
 
-        wikipedia_mock.assert_not_called()
         excerpt_mock.assert_not_called()
         self.assertEqual(materials, [])
 
@@ -295,18 +296,32 @@ class ResearchPromptTest(unittest.TestCase):
                 "_safe_urlopen",
                 side_effect=ValueError("DDG blocked"),
             ),
-            mock.patch.object(
-                research,
-                "_wikipedia_search_results",
-                return_value=[{"url": "https://ja.wikipedia.org/wiki/題材", "title": "題材"}],
-            ) as wikipedia_mock,
             mock.patch.object(research, "_page_excerpt") as excerpt_mock,
         ):
             materials = research._search_reference_materials("歴史")
 
-        wikipedia_mock.assert_not_called()
         excerpt_mock.assert_not_called()
         self.assertEqual(materials, [])
+
+    def test_reference_search_uses_lite_endpoint_after_html_failure(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = (
+            '<a rel="nofollow" href="https://support.google.com/youtube/help">公式ヘルプ</a>'
+        ).encode()
+        with (
+            mock.patch.object(
+                research,
+                "_safe_urlopen",
+                side_effect=[ValueError("HTML blocked"), response],
+            ) as open_mock,
+            mock.patch.object(research, "_page_excerpt", return_value="公式の一次情報"),
+        ):
+            materials = research._search_reference_materials("YouTube Studio")
+
+        self.assertEqual(materials[0]["url"], "https://support.google.com/youtube/help")
+        self.assertIn("html.duckduckgo.com", open_mock.call_args_list[0].args[0].full_url)
+        self.assertIn("lite.duckduckgo.com", open_mock.call_args_list[1].args[0].full_url)
 
     def test_reference_search_skips_wikipedia_results_before_primary_fetch(self) -> None:
         wikipedia_links = "".join(
@@ -829,6 +844,58 @@ class ResearchPromptTest(unittest.TestCase):
             )
 
         self.assertEqual(result["facts"][0]["source_url"], "https://www.youtube.com/watch?v=abc&t=3")
+
+    def test_opencode_go_rejects_unretrieved_fact_urls(self) -> None:
+        allowed_url = "https://support.google.com/youtube/help"
+        raw = json.dumps(
+            {
+                "topic": "題材",
+                "facts": [
+                    {"claim": "取得済み", "source_url": allowed_url},
+                    {"claim": "未取得", "source_url": "https://support.google.com/youtube/other"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=raw),
+        ):
+            result = research._attempt(
+                "prompt",
+                allowed_source_urls={research._normalized_source_url(allowed_url)},
+            )
+
+        self.assertEqual(result["facts"], [{"claim": "取得済み", "source_url": allowed_url}])
+
+    def test_opencode_go_rejects_when_all_fact_urls_are_unretrieved(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "題材",
+                "facts": [
+                    {
+                        "claim": "未取得",
+                        "source_url": "https://support.google.com/youtube/other",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=raw),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "許可済みURLに紐づく出典付きの事実がありませんでした"
+            ):
+                research._attempt(
+                    "prompt",
+                    allowed_source_urls={
+                        research._normalized_source_url(
+                            "https://support.google.com/youtube/help"
+                        )
+                    },
+                )
 
     def test_opencode_cli_backend_does_not_call_claude(self) -> None:
         raw = json.dumps(
