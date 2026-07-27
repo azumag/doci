@@ -57,9 +57,10 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
     def test_opencode_go_backend_does_not_call_claude(self) -> None:
         audit_raw = (
             '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
-            '"verified_fact":"確認済み","reason":"一次資料","source_url":"https://example.org/source"}]}'
+            '"verified_fact":"確認済み","reason":"一次資料","source_url":"https://example.org/source",'
+            '"replacement":"確認済み"}]}'
         )
-        rewrite_raw = '{"narration":"確認後の全文です。"}'
+        rewrite_raw = '{"narration":"確認済みの全文です。"}'
         with (
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
             mock.patch(
@@ -79,7 +80,7 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
             run_mock.call_args_list[1].args[1], config.FACTCHECK_REWRITE_MODEL
         )
         claude_mock.assert_not_called()
-        self.assertEqual(result["narration"], "確認後の全文です。")
+        self.assertEqual(result["narration"], "確認済みの全文です。")
 
     def test_opencode_go_can_require_retrieved_sources(self) -> None:
         with (
@@ -154,7 +155,8 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
     def test_inconsistent_audit_is_rejected(self) -> None:
         audit_raw = (
             '{"changed":false,"issues":[{"before":"誤り","decision":"correct",'
-            '"verified_fact":"訂正","reason":"不一致","source_url":"https://example.org"}]}'
+            '"verified_fact":"訂正","reason":"不一致","source_url":"https://example.org",'
+            '"replacement":"訂正"}]}'
         )
         with (
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
@@ -177,7 +179,8 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
     def test_audit_rejects_unretrieved_source_url(self) -> None:
         audit_raw = (
             '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
-            '"verified_fact":"訂正","reason":"不一致","source_url":"https://evil.example"}]}'
+            '"verified_fact":"訂正","reason":"不一致","source_url":"https://evil.example",'
+            '"replacement":"訂正"}]}'
         )
         with (
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
@@ -201,7 +204,8 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         source_url = "https://example.org/data?x=1&not=2&copy=3"
         audit_raw = (
             '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
-            f'"verified_fact":"訂正","reason":"一次資料","source_url":"{source_url}"'
+            f'"verified_fact":"訂正","reason":"一次資料","source_url":"{source_url}",'
+            '"replacement":"訂正"'
             "}]} "
         )
         with (
@@ -222,7 +226,8 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
     def test_audit_matches_canonical_whitespace_used_in_prompt(self) -> None:
         audit_raw = (
             '{"changed":true,"issues":[{"before":"誤り です","decision":"correct",'
-            '"verified_fact":"訂正です","reason":"一次資料","source_url":"https://example.org"}]}'
+            '"verified_fact":"訂正です","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"訂正です"}]}'
         )
         with (
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
@@ -245,26 +250,28 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
 
         self.assertEqual(result["narration"], "訂正です")
 
-    def test_long_narration_fails_closed_before_audit(self) -> None:
+    def test_long_narration_keeps_original_before_audit(self) -> None:
         narration = "前" * 12000 + "末尾を保持"
         with (
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
             mock.patch("doci.ai_text._run_opencode_go") as run_mock,
+            mock.patch.object(factcheck, "_log") as log_mock,
         ):
-            with self.assertRaisesRegex(ValueError, "安全上限"):
-                factcheck.verify_and_correct(
-                    narration,
-                    research={
-                        "facts": [
-                            {
-                                "claim": "確認済み",
-                                "source_url": "https://example.org",
-                            }
-                        ]
-                    },
-                )
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": "確認済み",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
 
+        self.assertIsNone(result)
         run_mock.assert_not_called()
+        log_mock.assert_called_once()
 
     def test_audit_rejects_before_not_present_in_original(self) -> None:
         audit_raw = (
@@ -315,14 +322,14 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
                     },
                 )
 
-    def test_rewrite_rejects_remaining_corrected_target(self) -> None:
+    def test_rewrite_accepts_contrast_that_contains_corrected_target(self) -> None:
         audit_raw = (
             '{"changed":true,"issues":[{"before":"十パーセント","decision":"correct",'
-            '"verified_fact":"二十パーセント","reason":"一次資料","source_url":"https://example.org"}]}'
+            '"verified_fact":"二十パーセント","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"十パーセントではなく二十パーセント"}]}'
         )
         with (
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
-            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
             mock.patch(
                 "doci.ai_text._run_opencode_go",
                 side_effect=[
@@ -331,7 +338,68 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
                 ],
             ),
         ):
-            with self.assertRaisesRegex(ValueError, "訂正・削除対象"):
+            result = factcheck.verify_and_correct(
+                "値は十パーセントです",
+                research={
+                    "facts": [
+                        {
+                            "claim": "値は二十パーセント",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(
+            result["narration"],
+            "十パーセントではなく二十パーセントです",
+        )
+
+    def test_remove_accepts_reduced_occurrence_count(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"誤り","decision":"remove",'
+            '"verified_fact":"","reason":"重複","source_url":""}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[audit_raw, '{"narration":"誤りは一つです"}'],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                "誤りと誤りがあります",
+                research={
+                    "facts": [
+                        {
+                            "claim": "確認済み",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], "誤りは一つです")
+
+    def test_rewrite_rejects_missing_verified_fact_without_reauditing(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"十パーセント","decision":"correct",'
+            '"verified_fact":"二十パーセント","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"二十パーセント"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 2),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    '{"narration":"値は少し違います"}',
+                    '{"narration":"値はかなり違います"}',
+                ],
+            ) as run_mock,
+        ):
+            with self.assertRaisesRegex(ValueError, "置換形"):
                 factcheck.verify_and_correct(
                     "値は十パーセントです",
                     research={
@@ -343,6 +411,249 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
                         ]
                     },
                 )
+
+        self.assertEqual(run_mock.call_count, 3)
+        self.assertIn("構造化された判定", run_mock.call_args_list[0].args[0])
+        self.assertNotIn(
+            "構造化された判定", run_mock.call_args_list[1].args[0]
+        )
+        self.assertNotIn(
+            "構造化された判定", run_mock.call_args_list[2].args[0]
+        )
+
+    def test_correct_rejects_verified_fact_only_present_elsewhere(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"十パーセント","decision":"correct",'
+            '"verified_fact":"二十パーセント","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"十パーセントではなく二十パーセント"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    '{"narration":"誤りは十パーセントです。正しい値は二十パーセントです。補足します。"}',
+                ],
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "置換形"):
+                factcheck.verify_and_correct(
+                    "誤りは十パーセントです。正しい値は二十パーセントです。",
+                    research={
+                        "facts": [
+                            {
+                                "claim": "値は二十パーセント",
+                                "source_url": "https://example.org",
+                            }
+                        ]
+                    },
+                )
+
+    def test_each_correct_requires_its_own_replacement(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":['
+            '{"before":"十パーセント","decision":"correct","verified_fact":"二十パーセント",'
+            '"reason":"一次資料","source_url":"https://example.org","replacement":"率は二十パーセント"},'
+            '{"before":"十件","decision":"correct","verified_fact":"二十パーセント",'
+            '"reason":"一次資料","source_url":"https://example.org","replacement":"割合は二十パーセント"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    '{"narration":"率は二十パーセントですが、件数は十件です"}',
+                ],
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "置換形"):
+                factcheck.verify_and_correct(
+                    "率は十パーセントで、件数は十件です",
+                    research={
+                        "facts": [
+                            {
+                                "claim": "正しい値は二十パーセント",
+                                "source_url": "https://example.org",
+                            }
+                        ]
+                    },
+                )
+
+    def test_correct_rejects_appended_substring_replacement(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"十パーセント","decision":"correct",'
+            '"verified_fact":"二十パーセント","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"二十パーセント"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    '{"narration":"値は十パーセントです。参考値は二十パーセントです。"}',
+                ],
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "訂正対象"):
+                factcheck.verify_and_correct(
+                    "値は十パーセントです。",
+                    research={
+                        "facts": [
+                            {
+                                "claim": "値は二十パーセント",
+                                "source_url": "https://example.org",
+                            }
+                        ]
+                    },
+                )
+
+    def test_correct_accepts_shorter_replacement(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"約二十パーセント","decision":"correct",'
+            '"verified_fact":"二十パーセント","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"二十パーセント"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    '{"narration":"値は二十パーセントです。"}',
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                "値は約二十パーセントです。",
+                research={
+                    "facts": [
+                        {
+                            "claim": "値は二十パーセント",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], "値は二十パーセントです。")
+
+    def test_correct_rejects_appended_shorter_replacement(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"約二十パーセント","decision":"correct",'
+            '"verified_fact":"二十パーセント","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"二十パーセント"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    '{"narration":"値は約二十パーセントです。参考値は二十パーセントです。"}',
+                ],
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "訂正対象"):
+                factcheck.verify_and_correct(
+                    "値は約二十パーセントです。",
+                    research={
+                        "facts": [
+                            {
+                                "claim": "値は二十パーセント",
+                                "source_url": "https://example.org",
+                            }
+                        ]
+                    },
+                )
+
+    def test_duplicate_correct_target_is_rejected(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":['
+            '{"before":"十パーセント","decision":"correct","verified_fact":"二十パーセント",'
+            '"reason":"一次資料","source_url":"https://example.org","replacement":"二十パーセント"},'
+            '{"before":"十パーセント","decision":"correct","verified_fact":"三十パーセント",'
+            '"reason":"一次資料","source_url":"https://example.org","replacement":"三十パーセント"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go", return_value=audit_raw
+            ) as run_mock,
+        ):
+            with self.assertRaisesRegex(ValueError, "重複"):
+                factcheck.verify_and_correct(
+                    "値は十パーセントです",
+                    research={
+                        "facts": [
+                            {
+                                "claim": "確認済み",
+                                "source_url": "https://example.org",
+                            }
+                        ]
+                    },
+                )
+
+        run_mock.assert_called_once()
+
+    def test_reference_block_is_bounded(self) -> None:
+        block = factcheck._reference_block(
+            {
+                "facts": [
+                    {
+                        "claim": str(index) + "事実" * 2000,
+                        "source_url": f"https://example.org/{index}",
+                    }
+                    for index in range(20)
+                ]
+            }
+        )
+
+        self.assertLessEqual(
+            len(block), factcheck._MAX_REFERENCE_PROMPT_CHARS
+        )
+        self.assertNotIn("7事実", block)
+
+    def test_reference_allowlist_contains_only_presented_facts(self) -> None:
+        block, allowed_urls = factcheck._reference_materials(
+            {
+                "facts": [
+                    {
+                        "claim": f"事実{index}",
+                        "source_url": f"https://example.org/{index}",
+                    }
+                    for index in range(8)
+                ]
+            }
+        )
+
+        self.assertIn("https://example.org/6", block)
+        self.assertNotIn("https://example.org/7", block)
+        self.assertIn("https://example.org/6", allowed_urls)
+        self.assertNotIn("https://example.org/7", allowed_urls)
+
+    def test_reference_allowlist_excludes_fact_past_size_limit(self) -> None:
+        _, allowed_urls = factcheck._reference_materials(
+            {
+                "facts": [
+                    {
+                        "claim": "長い事実" * 600,
+                        "source_url": f"https://example.org/{index}",
+                    }
+                    for index in range(7)
+                ]
+            }
+        )
+
+        self.assertIn("https://example.org/5", allowed_urls)
+        self.assertNotIn("https://example.org/6", allowed_urls)
 
     def test_rewrite_prompt_treats_audit_as_data(self) -> None:
         audit_raw = (
