@@ -80,6 +80,7 @@ def legacy_claude_factcheck_model(model: str) -> str:
 
 # --- text ---
 OPENCODE_GO_DEFAULT_MODEL = "opencode-go/qwen3.7-plus"
+OPENCODE_GO_REASONING_MODEL = "opencode-go/minimax-m3"
 # Claudeは明示された旧経路だけで使う。TEXT_MODEL等の既定値がOpenCode Goモデルでも、
 # 旧経路を明示した利用者がモデル名を設定し忘れた場合に不正なモデル名を渡さない。
 LEGACY_CLAUDE_MODEL = get("CLAUDE_MODEL", "claude-opus-4-8")
@@ -116,10 +117,14 @@ SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
 SCRIPT_FACTCHECK_RESEARCH = get_bool("SCRIPT_FACTCHECK_RESEARCH", True)
 # 資料0件のファクトチェックを実行失敗として扱う場合だけ明示的に有効化する。
 SCRIPT_FACTCHECK_REQUIRE_SOURCES = get_bool("SCRIPT_FACTCHECK_REQUIRE_SOURCES", False)
-RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_DEFAULT_MODEL)
-FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_DEFAULT_MODEL)
+RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_REASONING_MODEL)
+FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_REASONING_MODEL)
+FACTCHECK_REWRITE_MODEL = get(
+    "FACTCHECK_REWRITE_MODEL", OPENCODE_GO_DEFAULT_MODEL
+)
 _RESEARCH_MODEL_EXPLICIT = bool(get("RESEARCH_MODEL"))
 _FACTCHECK_MODEL_EXPLICIT = bool(get("FACTCHECK_MODEL"))
+_FACTCHECK_REWRITE_MODEL_EXPLICIT = bool(get("FACTCHECK_REWRITE_MODEL"))
 # リサーチ・検証・図表背景はOpenCode Goを既定にする。codex は明示時の選択肢、
 # claude は既存設定を明示した場合だけ使える後方互換経路。補助段の設定を省略した
 # 既存ユーザーが TEXT_BACKEND=anthropic/claude_cli を明示している場合だけ、その
@@ -199,6 +204,11 @@ if RESEARCH_BACKEND in {"opencode_go", "opencode"}:
 if FACTCHECK_BACKEND in {"opencode_go", "opencode"}:
     FACTCHECK_MODEL = _migrate_implicit_opencode_model(
         FACTCHECK_MODEL, FACTCHECK_BACKEND, _FACTCHECK_BACKEND_EXPLICIT
+    )
+    FACTCHECK_REWRITE_MODEL = _migrate_implicit_opencode_model(
+        FACTCHECK_REWRITE_MODEL,
+        FACTCHECK_BACKEND,
+        _FACTCHECK_BACKEND_EXPLICIT or _FACTCHECK_REWRITE_MODEL_EXPLICIT,
     )
 # 構成プラン(plan.make_plan)のバックエンド。値は opencode | codex。直契約MiniMaxを
 # opencode-goゲートウェイ経由でなく codex exec 経由で使えるようにする。

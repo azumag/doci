@@ -494,7 +494,10 @@ def _run_opencode_go(
                         raise RuntimeError("OpenCode Go API が時間上限に達しました")
                     elapsed = time.monotonic() - started
                     if elapsed >= next_progress:
-                        _log(f"Qwen直接API生成中 ({elapsed:.0f}s / 本文{text_chars}字)")
+                        _log(
+                            f"OpenCode Go ({model_id}) 生成中 "
+                            f"({elapsed:.0f}s / 本文{text_chars}字)"
+                        )
                         next_progress += 60.0
             finally:
                 if fallback_reader is not None:
@@ -515,7 +518,10 @@ def _run_opencode_go(
         )
     if not text.strip():
         raise RuntimeError(f"OpenCode Go API が空の本文を返しました (stop_reason={stop_reason or 'unknown'})")
-    _log(f"Qwen直接API完了 ({time.monotonic() - started:.1f}s / 本文{len(text)}字)")
+    _log(
+        f"OpenCode Go ({model_id}) 完了 "
+        f"({time.monotonic() - started:.1f}s / 本文{len(text)}字)"
+    )
     return text
 
 

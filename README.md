@@ -3,7 +3,8 @@
 設定駆動の複数チャンネルについて、台本・音声・映像・投稿までを日次実行するワークフローアプリ。
 短尺は縦9:16、180秒超は横16:9へ自動ルーティングする。
 
-- 台本生成・リサーチ・ファクトチェック・図表背景 = **OpenCode Go / qwen3.7-plus**（Claude CLI不要）。
+- 台本生成・ファクトチェック後の文章修正・図表背景 = **OpenCode Go / qwen3.7-plus**。
+- リサーチ・構成プラン・ファクトチェック監査 = **OpenCode Go / minimax-m3**。
 - 映像生成 = **Minimax**（画像 `image-01` ＋ 一部 Hailuo 動画）。
 - 音声 = **VOICEVOX**（コーナー別の声）。
 - BGM = インターナショナル ピアノ（PD/CC0版を `channels/ideology/bgm/` に同梱）。
@@ -13,9 +14,10 @@
 Pull Request の品質確認を行うリポジトリ側 GitHub Actions（`claude-review.yml`）でのみ使います。
 既存の `TEXT_BACKEND=claude_cli` や `*_BACKEND=claude` は旧設定との互換性のために残していますが、
 自動フォールバックでは呼び出しません。
-OpenCode Goのリサーチは実取得済みの候補・一次資料URLだけを根拠として受け入れ、資料がない場合は出典を作らず
+OpenCode GoのMiniMaxリサーチは実取得済みの候補・一次資料URLだけを根拠として受け入れ、資料がない場合は出典を作らず
 リサーチなしで生成を続けます。
-ファクトチェックも取得済みの `facts` がある場合だけ実行し、資料がない場合は原文を維持します。
+ファクトチェックも取得済みの `facts` がある場合だけ実行し、MiniMaxが構造化監査、
+Qwenが監査結果だけに基づく文章修正を担当します。資料がない場合は原文を維持します。
 資料欠落を実行失敗にしたい運用だけ `SCRIPT_FACTCHECK_REQUIRE_SOURCES=1` を明示します。
 
 同梱の `ideology` チャンネルには次の2コーナーがある。
@@ -269,10 +271,14 @@ launchd エージェント（`com.azumag.doci.generate`）を現在のプロジ�
 
 ## クラウド移行
 ローカル依存は **VOICEVOX のみ**。`.github/workflows/daily.yml` が雛形:
-VOICEVOX を service container（2話者内蔵・常時稼働不要）で起動し、台本・リサーチ・検証は OpenCode Go、映像は Minimax REST、cron で日次実行。Secrets は GitHub Secrets に格納する。
+VOICEVOX を service container（2話者内蔵・常時稼働不要）で起動し、台本・文章修正は
+OpenCode Go / Qwen、リサーチ・監査は OpenCode Go / MiniMax、映像は Minimax REST、
+cron で日次実行。Secrets は GitHub Secrets に格納する。
 
 ## 構成
-- `doci/ai_text.py` 台本（OpenCode Go / qwen3.7-plus、JSON出力）
+- `doci/ai_text.py` 台本・文章修正（OpenCode Go / qwen3.7-plus、JSON出力）
+- `doci/research.py` リサーチ（OpenCode Go / minimax-m3、取得済み資料内で整理）
+- `doci/factcheck.py` MiniMax構造化監査 → Qwen文章修正
 - `doci/voicevox.py` 音声合成（文ごとの再生長＝字幕タイミング付き）
 - `doci/minimax.py` 画像/動画（非同期ポーリング）
 - `doci/compose.py` ffmpeg 合成（9:16・字幕焼込み）
