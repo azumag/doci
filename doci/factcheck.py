@@ -5,6 +5,9 @@ codexは明示時、Claudeは旧設定を明示した場合のみ従来の単一
 """
 from __future__ import annotations
 
+import subprocess
+import unicodedata
+
 from . import config, llm
 
 
@@ -14,6 +17,14 @@ class UnsupportedFactcheckBackendError(ValueError):
 
 class FactcheckSourcesUnavailableError(RuntimeError):
     """OpenCode系ファクトチェックに検証済み資料がないことを示す。"""
+
+
+_RETRYABLE_ERRORS = (
+    ValueError,
+    RuntimeError,
+    OSError,
+    subprocess.TimeoutExpired,
+)
 
 
 # バックエンドごとの「必要なら裏取りする」手順の言い回し。OpenCode Goは提示された参考資料を
@@ -131,7 +142,35 @@ def _prompt_data(value: str) -> str:
     """モデル由来データから制御文字・境界タグ・既知の命令句を除く。"""
     from . import research
 
-    return research._sanitize_text(value)
+    without_format_chars = "".join(
+        char for char in value if unicodedata.category(char) != "Cf"
+    )
+    return research._sanitize_text(without_format_chars)
+
+
+def _semantic_text(value: str) -> str:
+    """不可視format文字を除き、意味のある単語間空白は維持する。"""
+    return _prompt_data(value)
+
+
+def _target_comparison_text(value: str) -> str:
+    """対象照合では日本語内の空白・不可視文字による回避を許さない。"""
+    semantic = _semantic_text(value)
+    compared: list[str] = []
+    for index, char in enumerate(semantic):
+        if not char.isspace():
+            compared.append(char)
+            continue
+        previous = semantic[index - 1] if index else ""
+        following = semantic[index + 1] if index + 1 < len(semantic) else ""
+        if (
+            previous.isascii()
+            and previous.isalnum()
+            and following.isascii()
+            and following.isalnum()
+        ):
+            compared.append(" ")
+    return "".join(compared)
 
 
 def _log(msg: str) -> None:
@@ -239,16 +278,16 @@ def _attempt_audit(
     if data["changed"] != bool(actionable):
         raise ValueError("changed と修正判定が一致しません")
     from . import research as research_mod
-    canonical_narration = _prompt_data(narration)
-    seen_actionable_targets: set[tuple[str, str]] = set()
+    canonical_narration = _target_comparison_text(narration)
+    seen_actionable_targets: set[str] = set()
     for issue in actionable:
         before = _prompt_data(issue["before"]).strip()
-        if not before or before not in canonical_narration:
+        comparable_before = _target_comparison_text(before)
+        if not comparable_before or comparable_before not in canonical_narration:
             raise ValueError("監査対象が原文内に存在しません")
-        target_key = (issue["decision"], before)
-        if target_key in seen_actionable_targets:
-            raise ValueError("同じ監査対象と判定が重複しています")
-        seen_actionable_targets.add(target_key)
+        if comparable_before in seen_actionable_targets:
+            raise ValueError("同じ監査対象への判定が重複しています")
+        seen_actionable_targets.add(comparable_before)
         source_url = issue["source_url"].strip()
         normalized_source_url = research_mod._normalized_source_url(source_url)
         if source_url and normalized_source_url not in allowed_urls:
@@ -260,8 +299,9 @@ def _attempt_audit(
                 not verified_fact
                 or not source_url
                 or not replacement
-                or replacement == before
-                or verified_fact not in replacement
+                or _target_comparison_text(replacement) == comparable_before
+                or _semantic_text(verified_fact)
+                not in _semantic_text(replacement)
             ):
                 raise ValueError(
                     "correct 判定に検証済み事実・出典・置換形がありません"
@@ -301,7 +341,10 @@ def _attempt_rewrite(narration: str, audit: dict, backend: str) -> str:
     elif backend == "opencode":
         raw = ai_text._run_opencode(
             prompt,
-            ai_text._validate_opencode_cli_model(config.FACTCHECK_REWRITE_MODEL),
+            ai_text._opencode_cli_aux_model(
+                config.FACTCHECK_REWRITE_MODEL,
+                explicit=config._FACTCHECK_REWRITE_MODEL_EXPLICIT,
+            ),
             config.OPENCODE_AGENT,
             timeout=config.script_llm_timeout(),
         )
@@ -311,42 +354,44 @@ def _attempt_rewrite(narration: str, audit: dict, backend: str) -> str:
     rewritten = str(data.get("narration") or "").strip()
     if not rewritten:
         raise ValueError("Qwen修正結果に narration がありません")
-    if _prompt_data(rewritten) == _prompt_data(narration):
+    if _target_comparison_text(rewritten) == _target_comparison_text(narration):
         raise ValueError("Qwen修正結果が原文から変更されていません")
     canonical_rewritten = _prompt_data(rewritten)
-    canonical_original = _prompt_data(narration)
+    comparable_rewritten = _target_comparison_text(canonical_rewritten)
+    comparable_original = _target_comparison_text(narration)
     for issue in audit["issues"]:
-        before = _prompt_data(issue["before"])
+        before = _target_comparison_text(issue["before"])
         if issue["decision"] == "correct":
-            replacement = _prompt_data(issue["replacement"]).strip()
-            if replacement not in canonical_rewritten:
+            replacement = _target_comparison_text(issue["replacement"])
+            if replacement not in comparable_rewritten:
                 raise ValueError("Qwen修正結果に指定の置換形が反映されていません")
             if before in replacement:
-                original_for_count = canonical_original.replace(
+                original_for_count = comparable_original.replace(
                     replacement, ""
                 )
-                rewritten_for_count = canonical_rewritten.replace(
+                rewritten_for_count = comparable_rewritten.replace(
                     replacement, ""
                 )
             else:
-                original_for_count = canonical_original
-                rewritten_for_count = canonical_rewritten
+                original_for_count = comparable_original
+                rewritten_for_count = comparable_rewritten
             if rewritten_for_count.count(before) >= original_for_count.count(
                 before
             ):
                 raise ValueError("Qwen修正結果で訂正対象が修正されていません")
-        elif issue["decision"] == "remove" and canonical_rewritten.count(
+        elif issue["decision"] == "remove" and comparable_rewritten.count(
             before
-        ) >= canonical_original.count(before):
+        ) >= comparable_original.count(before):
             raise ValueError("Qwen修正結果で削除対象が減っていません")
-    return rewritten
+    return canonical_rewritten
 
 
 def verify_and_correct(narration: str, research: dict | None = None) -> dict | None:
     """narration を検証・自動修正。失敗時は None（呼び出し側は元のまま続行）。
 
     バックエンド(特に MiniMax-M3)が長い日本語文字列のJSONエスケープを崩し不正JSONを
-    返すことがあるため、SCRIPT_FACTCHECK_RETRIES 回まで再試行する（尽きたら最後の例外をraise）。
+    返すことがあるため、SCRIPT_FACTCHECK_RETRIES 回まで再試行する。
+    OpenCode系の文章修正だけが尽きた場合は、安全側に原文を維持する。
     """
     if not narration.strip():
         return None
@@ -388,7 +433,7 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
                     audit_prompt, backend, allowed_urls, narration
                 )
                 break
-            except (ValueError, RuntimeError) as e:
+            except _RETRYABLE_ERRORS as e:
                 last_err = e
                 if attempt < config.SCRIPT_FACTCHECK_RETRIES:
                     _log(
@@ -413,20 +458,24 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
                     "changed": True,
                     "issues": audit["issues"],
                 }
-            except (ValueError, RuntimeError) as e:
+            except _RETRYABLE_ERRORS as e:
                 last_err = e
                 if attempt < config.SCRIPT_FACTCHECK_RETRIES:
                     _log(
                         f"ファクトチェック文章修正不良(試行{attempt}/"
                         f"{config.SCRIPT_FACTCHECK_RETRIES})→再試行: {str(e)[:120]}"
                     )
-        raise last_err or ValueError("ファクトチェック文章修正に失敗しました")
+        _log(
+            "ファクトチェック文章修正に失敗したため原文を維持します: "
+            f"{str(last_err)[:120] if last_err else '不明なエラー'}"
+        )
+        return None
 
     last_err: Exception | None = None
     for attempt in range(1, config.SCRIPT_FACTCHECK_RETRIES + 1):
         try:
             return _attempt(prompt, backend)
-        except (ValueError, RuntimeError) as e:  # JSON不正/不十分/CLI失敗を再試行
+        except _RETRYABLE_ERRORS as e:  # JSON不正/不十分/CLI失敗を再試行
             last_err = e
             if attempt < config.SCRIPT_FACTCHECK_RETRIES:
                 _log(f"ファクトチェック不良(試行{attempt}/{config.SCRIPT_FACTCHECK_RETRIES})→再試行: {str(e)[:120]}")
