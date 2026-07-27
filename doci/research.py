@@ -821,7 +821,7 @@ def _search_reference_materials(
         if not url or url in seen:
             continue
         hostname = (urlparse(url).hostname or "").lower()
-        if not _is_trusted_source_host(hostname):
+        if not _is_trusted_source_host(hostname) or not _is_primary_fact_source(url):
             continue
         seen.add(url)
         rows.append({"url": url, "title": row["title"]})

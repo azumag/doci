@@ -308,6 +308,27 @@ class ResearchPromptTest(unittest.TestCase):
         excerpt_mock.assert_not_called()
         self.assertEqual(materials, [])
 
+    def test_reference_search_skips_wikipedia_results_before_primary_fetch(self) -> None:
+        wikipedia_links = "".join(
+            f'<a class="result__a" href="https://ja.wikipedia.org/wiki/題材{i}">背景{i}</a>'
+            for i in range(8)
+        )
+        primary_url = "https://support.google.com/youtube/answer/12345"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = (
+            wikipedia_links
+            + f'<a class="result__a" href="{primary_url}">YouTube ヘルプ</a>'
+        ).encode()
+        with (
+            mock.patch.object(research, "_safe_urlopen", return_value=response),
+            mock.patch.object(research, "_page_excerpt", return_value="公式の一次情報") as excerpt_mock,
+        ):
+            materials = research._search_reference_materials("YouTube Studio")
+
+        excerpt_mock.assert_called_once_with(primary_url)
+        self.assertEqual(materials[0]["url"], primary_url)
+
     def test_untrusted_source_host_is_rejected(self) -> None:
         self.assertFalse(research._is_trusted_source_host("example.com"))
         self.assertFalse(research._is_trusted_source_host("evil.wikipedia.org.example.com"))
