@@ -74,7 +74,9 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
             mock.patch.object(config, "SCRIPT_FACTCHECK_REQUIRE_SOURCES", True),
         ):
-            with self.assertRaisesRegex(RuntimeError, "検証済み資料がない"):
+            with self.assertRaisesRegex(
+                factcheck.FactcheckSourcesUnavailableError, "検証済み資料がない"
+            ):
                 factcheck.verify_and_correct("検証対象のナレーション原文")
 
     def test_opencode_cli_backend_does_not_call_claude(self) -> None:

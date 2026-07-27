@@ -1202,17 +1202,24 @@ def web_research(
             past_topics=past_topics,
             search_timeout=search_timeout,
         )
+        # Wikipedia/Wikimedia/Wikidata は題材発見の背景資料には使えるが、
+        # 一次資料として facts の根拠にしてはならない。一次資料でない
+        # 資料はプロンプトにも渡さず、実態どおり一次資料0件として安全側に止める。
+        reference_materials = [
+            row
+            for row in reference_materials
+            if row.get("url") and _is_primary_fact_source(str(row.get("url")))
+        ]
     allowed_source_urls.update(
         normalized
         for row in reference_materials
         if row.get("url")
-        and _is_primary_fact_source(str(row.get("url")))
         for normalized in [_normalized_source_url(str(row.get("url")))]
         if normalized
     )
     if backend in {"opencode", "opencode_go"} and not allowed_source_urls:
         _log(
-            "エラー: OpenCodeリサーチを実取得済み資料0件のため安全側にスキップ"
+            "エラー: OpenCodeリサーチを実取得済み一次資料0件のため安全側にスキップ"
             "（ファクトチェックも原文維持。許可ホスト・外部資料取得を確認してください）"
         )
         return None

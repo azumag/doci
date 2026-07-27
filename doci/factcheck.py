@@ -13,6 +13,11 @@ from . import config, llm
 class UnsupportedFactcheckBackendError(ValueError):
     """FACTCHECK_BACKEND の設定値が未対応であることを示す。"""
 
+
+class FactcheckSourcesUnavailableError(RuntimeError):
+    """OpenCode系ファクトチェックに検証済み資料がないことを示す。"""
+
+
 # バックエンドごとの「必要なら裏取りする」手順の言い回し。OpenCode Goは提示された参考資料を
 # 参照し、codex はシェルの curl 等での取得を明示的に指示する。
 _WEB_HOWTO = {
@@ -127,7 +132,7 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
             "（検証済み資料を取得できませんでした）"
         )
         if config.SCRIPT_FACTCHECK_REQUIRE_SOURCES:
-            raise RuntimeError(message)
+            raise FactcheckSourcesUnavailableError(message)
         _log(message)
         return None
     prompt = _PROMPT.format(

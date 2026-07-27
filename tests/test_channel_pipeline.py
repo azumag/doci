@@ -417,6 +417,39 @@ factcheck = true
 
         research_mock.assert_called_once()
 
+    def test_factcheck_required_sources_does_not_reraise_transient_error(self) -> None:
+        spec = self._make_spec(
+            "factcheck-transient-error",
+            pipeline="""\
+[pipeline]
+research = false
+plan = false
+factcheck = true
+""",
+        )
+        raw = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        with (
+            patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_FACTCHECK_RESEARCH", False),
+            patch.object(config, "SCRIPT_FACTCHECK_REQUIRE_SOURCES", True),
+            patch(
+                "doci.factcheck.verify_and_correct",
+                side_effect=ValueError("一時的なJSON不良"),
+            ),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+        ):
+            script = ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        self.assertEqual(script["narration"], "本題から始まるナレーションです。")
+
     def test_factcheck_research_can_be_disabled_independently(self) -> None:
         spec = self._make_spec(
             "factcheck-no-research",

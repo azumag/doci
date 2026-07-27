@@ -16,6 +16,7 @@ Pull Request の品質確認を行うリポジトリ側 GitHub Actions（`claude
 OpenCode Goのリサーチは実取得済みの候補・一次資料URLだけを根拠として受け入れ、資料がない場合は出典を作らず
 リサーチなしで生成を続けます。
 ファクトチェックも取得済みの `facts` がある場合だけ実行し、資料がない場合は原文を維持します。
+資料欠落を実行失敗にしたい運用だけ `SCRIPT_FACTCHECK_REQUIRE_SOURCES=1` を明示します。
 
 同梱の `ideology` チャンネルには次の2コーナーがある。
 

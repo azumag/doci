@@ -66,6 +66,14 @@ class SelectCodexBackendTest(unittest.TestCase):
 
 
 class AuxiliaryBackendDefaultTest(unittest.TestCase):
+    def test_unspecified_research_total_keeps_per_attempt_timeout(self) -> None:
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_TOTAL_TIMEOUT", 0),
+            mock.patch.object(config, "SCRIPT_LLM_TIMEOUT", 600),
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 2),
+        ):
+            self.assertEqual(config.script_research_timeout(), 1200)
+
     def test_pipeline_backend_values_fail_fast(self) -> None:
         with mock.patch.object(config, "CHART_BG_BACKEND", "opencode-go"):
             with self.assertRaisesRegex(ValueError, "CHART_BG_BACKEND=opencode-go"):

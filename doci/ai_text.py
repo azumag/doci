@@ -884,10 +884,12 @@ def generate(
                     _log(f"ファクトチェック: {len(issues)}件修正")
                 script["narration"] = _strip_chart_markers(fc["narration"])
                 script["_factcheck"] = issues
-        except Exception as e:  # noqa: BLE001
-            _log(f"ファクトチェック失敗→修正なしで続行: {e}")
+        except factcheck.FactcheckSourcesUnavailableError:
+            _log("ファクトチェック資料がないため失敗として扱います")
             if config.SCRIPT_FACTCHECK_REQUIRE_SOURCES:
                 raise
+        except Exception as e:  # noqa: BLE001
+            _log(f"ファクトチェック失敗→修正なしで続行: {e}")
 
     script["_corner"] = corner.key
     script["_speaker"] = spec.voice_for(corner).speaker

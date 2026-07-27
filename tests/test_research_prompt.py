@@ -708,6 +708,40 @@ class ResearchPromptTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertIsNone(result)
 
+    def test_wikipedia_background_only_is_not_used_as_primary_fact_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            persona = root / "persona.md"
+            corner_prompt = root / "corner.md"
+            persona.write_text("歴史解説者", encoding="utf-8")
+            corner_prompt.write_text("一次史料を優先", encoding="utf-8")
+            corner = CornerSpec(
+                key="history",
+                label="歴史",
+                persona_path=persona,
+                corner_path=corner_prompt,
+                voice_key="narrator",
+            )
+            with (
+                mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+                mock.patch.object(
+                    research,
+                    "_search_reference_materials",
+                    return_value=[
+                        {
+                            "url": "https://ja.wikipedia.org/wiki/題材",
+                            "title": "背景資料",
+                            "excerpt": "編集可能な背景資料",
+                        }
+                    ],
+                ),
+                mock.patch("doci.ai_text._run_opencode_go") as run_mock,
+            ):
+                result = research.web_research(corner, [])
+
+        run_mock.assert_not_called()
+        self.assertIsNone(result)
+
     def test_opencode_go_normalizes_allowed_youtube_source_urls(self) -> None:
         raw = json.dumps(
             {
