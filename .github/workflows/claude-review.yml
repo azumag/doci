@@ -143,12 +143,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python -c '
-          import json, pathlib
+          import json, os, pathlib
           body = pathlib.Path("/tmp/claude-review.md").read_text(encoding="utf-8")
           pathlib.Path("/tmp/claude-review-request.json").write_text(
-              json.dumps({"body": body, "event": "COMMENT"}), encoding="utf-8"
+              json.dumps({
+                  "body": body,
+                  "event": "COMMENT",
+                  "commit_id": os.environ["PR_HEAD_SHA"],
+              }), encoding="utf-8"
           )
           '
           gh api --method POST \

@@ -593,7 +593,8 @@ def _sanitize_external(value):  # type: ignore[no-untyped-def]
     if isinstance(value, dict):
         sanitized = {}
         for key, item in value.items():
-            key_text = str(key)
+            # API由来の辞書を将来そのまま渡しても、キーでプロンプト境界を閉じられない。
+            key_text = _sanitize_text(str(key))
             if key_text.casefold() in {"url", "source_url"} and isinstance(item, str):
                 # URLは許可ソース照合に再利用するため、html.unescapeで query の & を壊さない。
                 sanitized[key_text] = _sanitize_url(item)

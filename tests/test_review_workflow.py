@@ -24,6 +24,8 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
         self.assertIn("needs.review.outputs.review_json", self.workflow)
         self.assertIn("Submit one controlled PR review for this head", self.workflow)
         self.assertIn('"event": "COMMENT"', self.workflow)
+        self.assertIn('"commit_id": os.environ["PR_HEAD_SHA"]', self.workflow)
+        self.assertIn("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}", self.workflow)
         self.assertIn('"repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews"', self.workflow)
         self.assertNotIn("gh pr comment", self.workflow)
         self.assertIn(
