@@ -114,6 +114,8 @@ SCRIPT_RESEARCH = get_bool("SCRIPT_RESEARCH", False)
 SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
 # FACTCHECK単独でも従来どおり検証資料を取得するが、明示的に無効化できる。
 SCRIPT_FACTCHECK_RESEARCH = get_bool("SCRIPT_FACTCHECK_RESEARCH", True)
+# 資料0件のファクトチェックを実行失敗として扱う場合だけ明示的に有効化する。
+SCRIPT_FACTCHECK_REQUIRE_SOURCES = get_bool("SCRIPT_FACTCHECK_REQUIRE_SOURCES", False)
 RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_DEFAULT_MODEL)
 FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_DEFAULT_MODEL)
 _RESEARCH_MODEL_EXPLICIT = bool(get("RESEARCH_MODEL"))
@@ -138,6 +140,27 @@ FACTCHECK_BACKEND = get("FACTCHECK_BACKEND", _AUX_BACKEND_DEFAULT)
 CHART_BG_BACKEND = get("CHART_BG_BACKEND", _AUX_BACKEND_DEFAULT)
 _RESEARCH_BACKEND_EXPLICIT = bool(get("RESEARCH_BACKEND"))
 _FACTCHECK_BACKEND_EXPLICIT = bool(get("FACTCHECK_BACKEND"))
+
+_SUPPORTED_PIPELINE_BACKENDS = frozenset({"codex", "opencode", "opencode_go", "claude"})
+
+
+def validate_pipeline_backends() -> None:
+    """日次処理の途中でなく設定読込時にバックエンド値を検証する。"""
+    invalid = {
+        name: value
+        for name, value in {
+            "RESEARCH_BACKEND": RESEARCH_BACKEND,
+            "FACTCHECK_BACKEND": FACTCHECK_BACKEND,
+            "CHART_BG_BACKEND": CHART_BG_BACKEND,
+        }.items()
+        if value not in _SUPPORTED_PIPELINE_BACKENDS
+    }
+    if invalid:
+        details = ", ".join(f"{name}={value}" for name, value in invalid.items())
+        raise ValueError(f"未対応のバックエンド設定です: {details}")
+
+
+validate_pipeline_backends()
 
 
 def _migrate_implicit_opencode_model(

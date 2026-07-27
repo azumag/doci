@@ -66,6 +66,11 @@ class SelectCodexBackendTest(unittest.TestCase):
 
 
 class AuxiliaryBackendDefaultTest(unittest.TestCase):
+    def test_pipeline_backend_values_fail_fast(self) -> None:
+        with mock.patch.object(config, "CHART_BG_BACKEND", "opencode-go"):
+            with self.assertRaisesRegex(ValueError, "CHART_BG_BACKEND=opencode-go"):
+                config.validate_pipeline_backends()
+
     def test_implicit_opencode_cli_migrates_legacy_aux_model(self) -> None:
         self.assertEqual(
             config._migrate_implicit_opencode_model(

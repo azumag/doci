@@ -69,6 +69,14 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         claude_mock.assert_not_called()
         self.assertEqual(result["narration"], "確認後の全文です。")
 
+    def test_opencode_go_can_require_retrieved_sources(self) -> None:
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_REQUIRE_SOURCES", True),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "検証済み資料がない"):
+                factcheck.verify_and_correct("検証対象のナレーション原文")
+
     def test_opencode_cli_backend_does_not_call_claude(self) -> None:
         raw = '{"narration": "確認後の全文です。", "changed": false, "issues": []}'
         with (

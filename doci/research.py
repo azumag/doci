@@ -316,6 +316,7 @@ _TRUSTED_SOURCE_HOSTS = (
     "nih.gov",
     "ncbi.nlm.nih.gov",
 )
+_NON_PRIMARY_FACT_HOSTS = ("wikipedia.org", "wikimedia.org", "wikidata.org")
 
 
 def _is_trusted_source_host(hostname: str) -> bool:
@@ -323,6 +324,11 @@ def _is_trusted_source_host(hostname: str) -> bool:
     if any(host == trusted or host.endswith("." + trusted) for trusted in _TRUSTED_SOURCE_HOSTS):
         return True
     return False
+
+
+def _is_primary_fact_source(url: str) -> bool:
+    host = (urlparse(url).hostname or "").rstrip(".").lower()
+    return not any(host == blocked or host.endswith("." + blocked) for blocked in _NON_PRIMARY_FACT_HOSTS)
 
 
 def _resolve_addresses(
@@ -1200,6 +1206,7 @@ def web_research(
         normalized
         for row in reference_materials
         if row.get("url")
+        and _is_primary_fact_source(str(row.get("url")))
         for normalized in [_normalized_source_url(str(row.get("url")))]
         if normalized
     )

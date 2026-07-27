@@ -387,6 +387,36 @@ factcheck = true
         factcheck_mock.assert_called_once_with("本題から始まるナレーションです。", research_data)
         self.assertEqual(script["narration"], "確認済みのナレーションです。")
 
+    def test_failed_research_is_not_repeated_for_factcheck(self) -> None:
+        spec = self._make_spec(
+            "research-failed-factcheck",
+            pipeline="""\
+[pipeline]
+research = true
+plan = false
+factcheck = true
+""",
+        )
+        raw = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        with (
+            patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            patch("doci.research.web_research", return_value=None) as research_mock,
+            patch("doci.factcheck.verify_and_correct", return_value=None),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+        ):
+            ai_text.generate(spec, spec.corners["a"], "2026-07-26", [])
+
+        research_mock.assert_called_once()
+
     def test_factcheck_research_can_be_disabled_independently(self) -> None:
         spec = self._make_spec(
             "factcheck-no-research",

@@ -122,10 +122,13 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
     if backend not in {"codex", "opencode", "opencode_go", "claude"}:
         raise UnsupportedFactcheckBackendError(f"未対応のFACTCHECK_BACKENDです: {backend}")
     if backend in {"opencode", "opencode_go"} and not (research and research.get("facts")):
-        _log(
+        message = (
             "OpenCodeファクトチェック: 検証済み資料がないため原文を維持"
             "（検証済み資料を取得できませんでした）"
         )
+        if config.SCRIPT_FACTCHECK_REQUIRE_SOURCES:
+            raise RuntimeError(message)
+        _log(message)
         return None
     prompt = _PROMPT.format(
         reference=_reference_block(research),

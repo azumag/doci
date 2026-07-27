@@ -317,6 +317,12 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertTrue(research._is_trusted_source_host("loc.gov"))
         self.assertTrue(research._is_trusted_source_host("www.stat.go.jp"))
         self.assertTrue(research._is_trusted_source_host("arxiv.org"))
+        self.assertFalse(
+            research._is_primary_fact_source("https://ja.wikipedia.org/wiki/題材")
+        )
+        self.assertTrue(
+            research._is_primary_fact_source("https://support.google.com/youtube/help")
+        )
 
     def test_redirect_target_is_revalidated(self) -> None:
         class FakeResponse:

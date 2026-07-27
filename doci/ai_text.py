@@ -848,7 +848,7 @@ def generate(
         factcheck_enabled
         and config.SCRIPT_FACTCHECK_RESEARCH
         and config.FACTCHECK_BACKEND in {"opencode", "opencode_go"}
-        and not research
+        and not research_enabled
     ):
         from . import research as research_mod
 
@@ -886,6 +886,8 @@ def generate(
                 script["_factcheck"] = issues
         except Exception as e:  # noqa: BLE001
             _log(f"ファクトチェック失敗→修正なしで続行: {e}")
+            if config.SCRIPT_FACTCHECK_REQUIRE_SOURCES:
+                raise
 
     script["_corner"] = corner.key
     script["_speaker"] = spec.voice_for(corner).speaker
