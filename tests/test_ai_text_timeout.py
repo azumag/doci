@@ -124,6 +124,45 @@ class WriteTimeoutTest(unittest.TestCase):
                 "ok",
             )
 
+    def test_opencode_go_stream_reassembles_split_sse_chunks(self) -> None:
+        class ChunkedResponse:
+            def __init__(self):
+                self.chunks = [
+                    b'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"o',
+                    b'k"}}\ndata:{"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+                ]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+            def __iter__(self):
+                return iter(())
+
+            def read1(self, _amount=4096):
+                if not self.chunks:
+                    raise StopIteration
+                return self.chunks.pop(0)
+
+            def close(self):
+                return None
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=ChunkedResponse()
+            ),
+        ):
+            self.assertEqual(
+                ai_text._run_opencode_go(
+                    "prompt", "opencode-go/qwen3.7-plus", timeout=17
+                ),
+                "ok",
+            )
+
     def test_opencode_go_stream_has_a_whole_response_deadline(self) -> None:
         class SlowResponse:
             def __enter__(self):

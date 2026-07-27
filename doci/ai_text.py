@@ -349,10 +349,10 @@ def _run_opencode_go(
 
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+            fallback_reader: _ResponseReadWorker | None = None
             try:
                 stream = iter(resp)
                 stream_timeout_warning_logged = False
-                fallback_reader: _ResponseReadWorker | None = None
                 response_read = getattr(resp, "read1", None) or getattr(resp, "read", None)
                 byte_mode = callable(response_read)
                 line_buffer = bytearray()
@@ -436,21 +436,25 @@ def _run_opencode_go(
                             raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
                         raise RuntimeError("OpenCode Go API の無通信タイムアウト") from exc
                     except StopIteration:
-                        if (
-                            deadline_expired.is_set()
-                            or (
-                                deadline_timeout is not None
-                                and time.monotonic() - started >= deadline_timeout
-                            )
-                        ):
-                            deadline_expired.set()
-                            raise RuntimeError(
-                                "OpenCode Go API が時間上限に達しました"
-                            )
-                        # [DONE]/stop_reasonを省略するゲートウェイでも、ストリームの
-                        # 自然終了は完全な本文の終端として受け入れる。
-                        received_terminal = True
-                        break
+                        if line_buffer:
+                            raw = bytes(line_buffer)
+                            line_buffer.clear()
+                        else:
+                            if (
+                                deadline_expired.is_set()
+                                or (
+                                    deadline_timeout is not None
+                                    and time.monotonic() - started >= deadline_timeout
+                                )
+                            ):
+                                deadline_expired.set()
+                                raise RuntimeError(
+                                    "OpenCode Go API が時間上限に達しました"
+                                )
+                            # [DONE]/stop_reasonを省略するゲートウェイでも、ストリームの
+                            # 自然終了は完全な本文の終端として受け入れる。
+                            received_terminal = True
+                            break
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
