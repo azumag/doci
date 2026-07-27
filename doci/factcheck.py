@@ -5,7 +5,10 @@ codexは明示時、Claudeは旧設定を明示した場合のみ従来の単一
 """
 from __future__ import annotations
 
+import difflib
+import re
 import subprocess
+import time
 import unicodedata
 
 from . import config, llm
@@ -24,6 +27,47 @@ _RETRYABLE_ERRORS = (
     RuntimeError,
     OSError,
     subprocess.TimeoutExpired,
+)
+
+_SOFTEN_PATTERNS = (
+    re.compile(r"可能性(?:が|も)?あります"),
+    re.compile(r"個人差(?:が)?あります"),
+    re.compile(r"傾向(?:が)?あります"),
+    re.compile(r"一概に(?:は)?言え(?:ない|ません)"),
+    re.compile(r"必ずしも.{0,30}(?:ない|ません)"),
+    re.compile(r"とは限(?:らない|りません)"),
+    re.compile(r"保証され(?:ない|ません)"),
+    re.compile(r"断定でき(?:ない|ません)"),
+    re.compile(r"考えられます"),
+    re.compile(r"かもしれ(?:ない|ません)"),
+    re.compile(r"ことがあり(?:ます)?"),
+)
+_SOFTEN_ALLOWED_STRONG_SCOPE = re.compile(
+    r"(?:必ず(?!しも)|確実|絶対|間違いなく|"
+    r"(?:百|１００|100)(?:パーセント|[%％]))"
+    r"(?:(?!ますが|ですが|だが|(?:る|た|ない)が|ものの|けれど|けど|しかし)"
+    r"[^。！？、,，])"
+    r"{0,30}とは限(?:らない|りません)"
+)
+_SOFTEN_DISALLOWED_PATTERNS = (
+    re.compile(r"必ず(?!しも)"),
+    re.compile(r"確実"),
+    re.compile(r"絶対"),
+    re.compile(r"間違いなく"),
+    re.compile(
+        r"(?:百|１００|100)(?:パーセント|[%％])"
+    ),
+    re.compile(r"保証されます"),
+    re.compile(
+        r"(?:購入|登録|クリック)(?:を|へ|に|して|し)?"
+        r"(?:してください|下さい|お願いします|しましょう)"
+    ),
+    re.compile(
+        r"申し込(?:んで|みを|むことを)?"
+        r"(?:ください|下さい|お願いします|しましょう)"
+    ),
+    re.compile(r"今すぐ"),
+    re.compile(r"しましょう"),
 )
 
 
@@ -87,7 +131,7 @@ JSONのみ:
 {{"changed":true/false,"issues":[{{"before":"対象箇所","decision":"keep|correct|soften|remove",
 "verified_fact":"根拠から確認できる事実。無ければ空文字","reason":"判定理由",
 "source_url":"提示資料内の根拠URL。無ければ空文字",
-"replacement":"correct時に置換後へ含める対象箇所の完成形。それ以外は空文字"}}]}}
+"replacement":"correct/soften時に置換後へ含める対象箇所の完成形。それ以外は空文字"}}]}}
 """
 
 _REWRITE_PROMPT = """\
@@ -157,12 +201,18 @@ def _target_comparison_text(value: str) -> str:
     """対象照合では日本語内の空白・不可視文字による回避を許さない。"""
     semantic = _semantic_text(value)
     compared: list[str] = []
-    for index, char in enumerate(semantic):
+    index = 0
+    while index < len(semantic):
+        char = semantic[index]
         if not char.isspace():
             compared.append(char)
+            index += 1
             continue
+        run_end = index + 1
+        while run_end < len(semantic) and semantic[run_end].isspace():
+            run_end += 1
         previous = semantic[index - 1] if index else ""
-        following = semantic[index + 1] if index + 1 < len(semantic) else ""
+        following = semantic[run_end] if run_end < len(semantic) else ""
         if (
             previous.isascii()
             and previous.isalnum()
@@ -170,6 +220,7 @@ def _target_comparison_text(value: str) -> str:
             and following.isalnum()
         ):
             compared.append(" ")
+        index = run_end
     return "".join(compared)
 
 
@@ -224,6 +275,7 @@ def _attempt_audit(
     backend: str,
     allowed_urls: set[str],
     narration: str,
+    timeout: int | float | None = None,
 ) -> dict:
     """OpenCode系モデルへ文章生成させず、構造化監査だけを要求する。"""
     from . import ai_text
@@ -232,7 +284,7 @@ def _attempt_audit(
         raw = ai_text._run_opencode_go(
             prompt,
             ai_text._opencode_go_model(config.FACTCHECK_MODEL),
-            timeout=config.script_llm_timeout(),
+            timeout=timeout,
         )
     elif backend == "opencode":
         raw = ai_text._run_opencode(
@@ -241,7 +293,7 @@ def _attempt_audit(
                 config.FACTCHECK_MODEL, explicit=config._FACTCHECK_MODEL_EXPLICIT
             ),
             config.OPENCODE_AGENT,
-            timeout=config.script_llm_timeout(),
+            timeout=timeout,
         )
     else:
         raise UnsupportedFactcheckBackendError(f"監査分離に未対応です: {backend}")
@@ -292,25 +344,52 @@ def _attempt_audit(
         normalized_source_url = research_mod._normalized_source_url(source_url)
         if source_url and normalized_source_url not in allowed_urls:
             raise ValueError("監査結果に未取得の出典URLが含まれています")
-        if issue["decision"] == "correct":
+        if issue["decision"] in {"correct", "soften"}:
             verified_fact = _prompt_data(issue["verified_fact"]).strip()
             replacement = _prompt_data(issue.get("replacement", "")).strip()
-            if (
+            if not replacement or (
+                _target_comparison_text(replacement) == comparable_before
+            ):
+                raise ValueError(
+                    "correct/soften 判定に有効な置換形がありません"
+                )
+            if issue["decision"] == "correct" and (
                 not verified_fact
                 or not source_url
-                or not replacement
-                or _target_comparison_text(replacement) == comparable_before
                 or _semantic_text(verified_fact)
                 not in _semantic_text(replacement)
             ):
                 raise ValueError(
                     "correct 判定に検証済み事実・出典・置換形がありません"
                 )
+            if issue["decision"] == "soften":
+                strong_or_cta_scan = _SOFTEN_ALLOWED_STRONG_SCOPE.sub(
+                    "", replacement
+                )
+                if (
+                    not any(
+                        pattern.search(replacement)
+                        for pattern in _SOFTEN_PATTERNS
+                    )
+                    or any(
+                        pattern.search(strong_or_cta_scan)
+                        for pattern in _SOFTEN_DISALLOWED_PATTERNS
+                    )
+                    or len(replacement) > max(80, len(before) * 3)
+                ):
+                    raise ValueError(
+                        "soften 判定の置換形が断定を弱める形ではありません"
+                    )
     data["issues"] = actionable
     return data
 
 
-def _attempt_rewrite(narration: str, audit: dict, backend: str) -> str:
+def _attempt_rewrite(
+    narration: str,
+    audit: dict,
+    backend: str,
+    timeout: int | float | None = None,
+) -> str:
     """MiniMaxの監査結果を、文章生成担当のQwenで台本へ反映する。"""
     import json
 
@@ -322,7 +401,11 @@ def _attempt_rewrite(narration: str, audit: dict, backend: str) -> str:
             {
                 "before": _prompt_data(issue["before"]),
                 "decision": issue["decision"],
-                "verified_fact": _prompt_data(issue["verified_fact"]),
+                "verified_fact": (
+                    _prompt_data(issue["verified_fact"])
+                    if issue["decision"] == "correct"
+                    else ""
+                ),
                 "replacement": _prompt_data(issue.get("replacement", "")),
             }
             for issue in audit["issues"]
@@ -336,7 +419,7 @@ def _attempt_rewrite(narration: str, audit: dict, backend: str) -> str:
         raw = ai_text._run_opencode_go(
             prompt,
             ai_text._opencode_go_model(config.FACTCHECK_REWRITE_MODEL),
-            timeout=config.script_llm_timeout(),
+            timeout=timeout,
         )
     elif backend == "opencode":
         raw = ai_text._run_opencode(
@@ -346,7 +429,7 @@ def _attempt_rewrite(narration: str, audit: dict, backend: str) -> str:
                 explicit=config._FACTCHECK_REWRITE_MODEL_EXPLICIT,
             ),
             config.OPENCODE_AGENT,
-            timeout=config.script_llm_timeout(),
+            timeout=timeout,
         )
     else:
         raise UnsupportedFactcheckBackendError(f"文章修正分離に未対応です: {backend}")
@@ -359,12 +442,43 @@ def _attempt_rewrite(narration: str, audit: dict, backend: str) -> str:
     canonical_rewritten = _prompt_data(rewritten)
     comparable_rewritten = _target_comparison_text(canonical_rewritten)
     comparable_original = _target_comparison_text(narration)
+    if not comparable_rewritten:
+        raise ValueError("Qwen修正結果が実質的に空です")
+    similarity = difflib.SequenceMatcher(
+        None, comparable_original, comparable_rewritten
+    ).ratio()
+    length_ratio = len(comparable_rewritten) / max(1, len(comparable_original))
+    if not 0.25 <= length_ratio <= 3.0:
+        raise ValueError("Qwen修正結果の長さが原文から大きく逸脱しています")
+    if len(comparable_original) >= 40 and (
+        similarity < 0.45 or not 0.5 <= length_ratio <= 1.5
+    ):
+        raise ValueError("Qwen修正結果が原文から大きく逸脱しています")
+    expected_rewrite = comparable_original
     for issue in audit["issues"]:
         before = _target_comparison_text(issue["before"])
-        if issue["decision"] == "correct":
+        if issue["decision"] in {"correct", "soften"}:
             replacement = _target_comparison_text(issue["replacement"])
+            expected_rewrite = expected_rewrite.replace(
+                before, replacement, 1
+            )
             if replacement not in comparable_rewritten:
                 raise ValueError("Qwen修正結果に指定の置換形が反映されていません")
+            if replacement in before:
+                original_replacement_count = comparable_original.replace(
+                    before, ""
+                ).count(replacement)
+            else:
+                original_replacement_count = comparable_original.count(
+                    replacement
+                )
+            if (
+                comparable_rewritten.count(replacement)
+                <= original_replacement_count
+            ):
+                raise ValueError(
+                    "Qwen修正結果で置換形が対象箇所へ追加されていません"
+                )
             if before in replacement:
                 original_for_count = comparable_original.replace(
                     replacement, ""
@@ -378,12 +492,25 @@ def _attempt_rewrite(narration: str, audit: dict, backend: str) -> str:
             if rewritten_for_count.count(before) >= original_for_count.count(
                 before
             ):
-                raise ValueError("Qwen修正結果で訂正対象が修正されていません")
+                raise ValueError("Qwen修正結果で対象箇所が修正されていません")
         elif issue["decision"] == "remove" and comparable_rewritten.count(
             before
         ) >= comparable_original.count(before):
             raise ValueError("Qwen修正結果で削除対象が減っていません")
-    return canonical_rewritten
+        elif issue["decision"] == "remove":
+            expected_rewrite = expected_rewrite.replace(before, "", 1)
+    expected_matcher = difflib.SequenceMatcher(
+        None, expected_rewrite, comparable_rewritten
+    )
+    outside_change_chars = sum(
+        (i2 - i1) + (j2 - j1)
+        for tag, i1, i2, j1, j2 in expected_matcher.get_opcodes()
+        if tag != "equal"
+    )
+    outside_change_budget = max(8, int(len(expected_rewrite) * 0.2))
+    if outside_change_chars > outside_change_budget:
+        raise ValueError("Qwen修正結果が監査対象外まで変更しています")
+    return rewritten
 
 
 def verify_and_correct(narration: str, research: dict | None = None) -> dict | None:
@@ -420,6 +547,26 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
                 "原文を維持します"
             )
             return None
+        factcheck_timeout = config.script_factcheck_timeout()
+        factcheck_deadline = (
+            time.monotonic() + factcheck_timeout
+            if factcheck_timeout is not None
+            else None
+        )
+
+        def require_factcheck_budget() -> float | None:
+            per_attempt = config.script_llm_timeout()
+            if factcheck_deadline is None:
+                return per_attempt
+            remaining = factcheck_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "ファクトチェック全体の時間上限に達しました"
+                )
+            if per_attempt is None:
+                return remaining
+            return min(float(per_attempt), remaining)
+
         reference, allowed_urls = _reference_materials(research)
         audit_prompt = _AUDIT_PROMPT.format(
             reference=reference,
@@ -430,7 +577,11 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
         for attempt in range(1, config.SCRIPT_FACTCHECK_RETRIES + 1):
             try:
                 audit = _attempt_audit(
-                    audit_prompt, backend, allowed_urls, narration
+                    audit_prompt,
+                    backend,
+                    allowed_urls,
+                    narration,
+                    timeout=require_factcheck_budget(),
                 )
                 break
             except _RETRYABLE_ERRORS as e:
@@ -441,7 +592,11 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
                         f"{config.SCRIPT_FACTCHECK_RETRIES})→再試行: {str(e)[:120]}"
                     )
         if audit is None:
-            raise last_err or ValueError("ファクトチェック監査に失敗しました")
+            _log(
+                "ファクトチェック監査に失敗したため原文を維持します: "
+                f"{str(last_err)[:120] if last_err else '不明なエラー'}"
+            )
+            return None
         if not audit["changed"]:
             return {
                 "narration": narration,
@@ -452,7 +607,12 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
         last_err = None
         for attempt in range(1, config.SCRIPT_FACTCHECK_RETRIES + 1):
             try:
-                rewritten = _attempt_rewrite(narration, audit, backend)
+                rewritten = _attempt_rewrite(
+                    narration,
+                    audit,
+                    backend,
+                    timeout=require_factcheck_budget(),
+                )
                 return {
                     "narration": rewritten,
                     "changed": True,

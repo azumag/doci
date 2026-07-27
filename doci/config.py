@@ -242,6 +242,15 @@ def script_research_timeout() -> int | None:
     return per_attempt * max(1, SCRIPT_RESEARCH_RETRIES)
 
 
+def script_factcheck_timeout() -> int | None:
+    """監査と文章修正を合わせた総待機上限を返す。"""
+    return (
+        SCRIPT_FACTCHECK_TOTAL_TIMEOUT
+        if SCRIPT_FACTCHECK_TOTAL_TIMEOUT > 0
+        else None
+    )
+
+
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # 下書き再試行を含む執筆段全体の予算。個別試行の残り時間をこの上限で絞り、
@@ -259,6 +268,10 @@ SCRIPT_RESEARCH_TOTAL_TIMEOUT = get_int("SCRIPT_RESEARCH_TOTAL_TIMEOUT", 0)
 TOPIC_COOLDOWN_DAYS = get_int("TOPIC_COOLDOWN_DAYS", 30)
 # ファクトチェックの再試行回数。MiniMax等が長い日本語JSONのエスケープを崩すことがあるため再試行する。
 SCRIPT_FACTCHECK_RETRIES = get_int("SCRIPT_FACTCHECK_RETRIES", 2)
+# MiniMax監査とQwen文章修正の全試行を合わせた総時間上限。0は無制限。
+SCRIPT_FACTCHECK_TOTAL_TIMEOUT = get_int(
+    "SCRIPT_FACTCHECK_TOTAL_TIMEOUT", 900
+)
 # --- 構成プラン: 起承転結＋図表策定（issue #2）。minimax が設計し qwen が執筆 ---
 SCRIPT_PLAN = get_bool("SCRIPT_PLAN", True)
 PLAN_MODEL = get("PLAN_MODEL", "opencode-go/minimax-m3")
