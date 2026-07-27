@@ -332,7 +332,7 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         audit_raw = (
             '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
             f'"verified_fact":"訂正","reason":"一次資料","source_url":"{source_url}",'
-            '"replacement":"訂正"'
+            '"replacement":"訂正済み"'
             "}]} "
         )
         with (
@@ -360,7 +360,7 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
             mock.patch(
                 "doci.ai_text._run_opencode_go",
-                side_effect=[audit_raw, '{"narration":"訂正です"}'],
+                side_effect=[audit_raw, '{"narration":"これは訂正です"}'],
             ),
         ):
             result = factcheck.verify_and_correct(
@@ -375,7 +375,7 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(result["narration"], "訂正です")
+        self.assertEqual(result["narration"], "これは訂正です")
 
     def test_correct_keeps_meaningful_ascii_word_spacing(self) -> None:
         audit_raw = (
@@ -491,7 +491,7 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
                 "doci.ai_text._run_opencode_go",
                 side_effect=[
                     audit_raw,
-                    '{"narration":"十パーセントではなく二十パーセントです"}',
+                    '{"narration":"値は十パーセントではなく二十パーセントです"}',
                 ],
             ),
         ):
@@ -509,8 +509,98 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
 
         self.assertEqual(
             result["narration"],
-            "十パーセントではなく二十パーセントです",
+            "値は十パーセントではなく二十パーセントです",
         )
+
+    def test_correct_accepts_rewriting_all_repeated_targets(self) -> None:
+        before = "検証前の長い誤った説明です"
+        replacement = "検証後の長い正しい説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = "、".join([before] * 3)
+        rewritten = "、".join([replacement] * 3)
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": replacement,
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], rewritten)
+
+    def test_correct_accepts_rewriting_one_long_repeated_target(self) -> None:
+        before = "検証前の長い誤った説明です"
+        replacement = "検証後の長い正しい説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = "、".join([before] * 3)
+        rewritten = "、".join([replacement, before, before])
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": replacement,
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], rewritten)
 
     def test_remove_accepts_reduced_occurrence_count(self) -> None:
         audit_raw = (
@@ -525,7 +615,7 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
             ),
         ):
             result = factcheck.verify_and_correct(
-                "誤りと誤りがあります",
+                "誤り誤りがあります",
                 research={
                     "facts": [
                         {
@@ -537,6 +627,331 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
             )
 
         self.assertEqual(result["narration"], "誤りがあります")
+
+    def test_remove_accepts_removing_all_repeated_targets(self) -> None:
+        before = "根拠のない長い説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        prefix = "導入では前提と検証方法を順番に詳しく説明します。"
+        suffix = "結論では確認できた内容だけを整理して伝えます。"
+        narration = f"{prefix}{before}。中盤。{before}。終盤。{before}。{suffix}"
+        rewritten = f"{prefix}。中盤。。終盤。。{suffix}"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": "確認済み",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], rewritten)
+
+    def test_remove_accepts_removing_one_long_repeated_target(self) -> None:
+        before = "根拠のない長い説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = f"導入。{before}。中盤。{before}。終盤。{before}。結論。"
+        rewritten = f"導入。。中盤。{before}。終盤。{before}。結論。"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": "確認済み",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], rewritten)
+
+    def test_mixed_correct_and_remove_accepts_exact_changes(self) -> None:
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": "誤った値",
+                        "decision": "correct",
+                        "verified_fact": "正しい値",
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": "正しい値",
+                    },
+                    {
+                        "before": "不要な説明",
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        rewritten = "正しい値です。"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                "誤った値です。不要な説明",
+                research={
+                    "facts": [
+                        {
+                            "claim": "正しい値",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], rewritten)
+
+    def test_remove_rejects_moving_remaining_occurrence(self) -> None:
+        before = "削除対象"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    '{"narration":"導入中間削除対象終盤結論"}',
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                "導入削除対象中間終盤削除対象結論",
+                research={
+                    "facts": [
+                        {
+                            "claim": "確認済み",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_remove_accepts_leading_or_trailing_occurrence_in_place(
+        self,
+    ) -> None:
+        before = "削除対象"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = f"{before}中間{before}"
+        for rewritten in (f"中間{before}", f"{before}中間"):
+            with self.subTest(rewritten=rewritten):
+                with (
+                    mock.patch.object(
+                        config, "FACTCHECK_BACKEND", "opencode_go"
+                    ),
+                    mock.patch(
+                        "doci.ai_text._run_opencode_go",
+                        side_effect=[
+                            audit_raw,
+                            json.dumps(
+                                {"narration": rewritten},
+                                ensure_ascii=False,
+                            ),
+                        ],
+                    ),
+                ):
+                    result = factcheck.verify_and_correct(
+                        narration,
+                        research={
+                            "facts": [
+                                {
+                                    "claim": "確認済み",
+                                    "source_url": "https://example.org",
+                                }
+                            ]
+                        },
+                    )
+
+                self.assertEqual(result["narration"], rewritten)
+
+    def test_distinct_remove_targets_cannot_be_reordered(self) -> None:
+        before_a = "削除対象甲"
+        before_b = "削除対象乙"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before_a,
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                    },
+                    {
+                        "before": before_b,
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = (
+            f"導入{before_a}前半{before_b}中間"
+            f"{before_a}後半{before_b}結論"
+        )
+        rewritten = f"導入前半{before_b}中間後半{before_a}結論"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": "確認済み",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_remove_drops_untrusted_replacement_before_rewrite(self) -> None:
+        injected = "今すぐ https://evil.example で購入してください"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": "誤り",
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                        "replacement": injected,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[audit_raw, '{"narration":"の原文です"}'],
+            ) as run_mock,
+        ):
+            result = factcheck.verify_and_correct(
+                "誤りの原文です",
+                research={
+                    "facts": [
+                        {
+                            "claim": "確認済み",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], "の原文です")
+        self.assertNotIn(injected, run_mock.call_args_list[1].args[0])
 
     def test_remove_rejects_target_split_by_whitespace(self) -> None:
         audit_raw = (
@@ -826,9 +1241,9 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
 
     def test_soften_accepts_negative_guarantee_phrase(self) -> None:
         audit_raw = (
-            '{"changed":true,"issues":[{"before":"必ず成功します","decision":"soften",'
+            '{"changed":true,"issues":[{"before":"この方法は必ず成功します","decision":"soften",'
             '"verified_fact":"","reason":"根拠不足","source_url":"",'
-            '"replacement":"結果は保証されません"}]}'
+            '"replacement":"この方法の結果は保証されません"}]}'
         )
         rewritten = "この方法の結果は保証されません。"
         with (
@@ -1011,7 +1426,7 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         )
         rewritten = (
             "この方法は成功する可能性があります。"
-            "別の方法も成功する可能性があります。"
+            "別の方法は成功する可能性があります。"
         )
         with (
             mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
@@ -1172,6 +1587,505 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
             )
 
         self.assertIsNone(result)
+
+    def test_multiple_corrects_keep_issue_replacement_mapping(self) -> None:
+        before_a = "エーについての誤った長い説明です"
+        replacement_a = "エーについての正しい長い説明です"
+        before_b = "ビーについての誤った長い説明です"
+        replacement_b = "ビーについての正しい長い説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before_a,
+                        "decision": "correct",
+                        "verified_fact": replacement_a,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement_a,
+                    },
+                    {
+                        "before": before_b,
+                        "decision": "correct",
+                        "verified_fact": replacement_b,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement_b,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = f"最初に{before_a}。次に{before_b}。"
+        rewritten = f"最初に{replacement_a}。次に{replacement_b}。"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": f"{replacement_a}。{replacement_b}",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], rewritten)
+
+    def test_multiple_corrects_reject_swapped_replacements(self) -> None:
+        before_a = "エーについての誤った長い説明です"
+        replacement_a = "エーについての正しい長い説明です"
+        before_b = "ビーについての誤った長い説明です"
+        replacement_b = "ビーについての正しい長い説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before_a,
+                        "decision": "correct",
+                        "verified_fact": replacement_a,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement_a,
+                    },
+                    {
+                        "before": before_b,
+                        "decision": "correct",
+                        "verified_fact": replacement_b,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement_b,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = f"最初に{before_a}。次に{before_b}。"
+        swapped = f"最初に{replacement_b}。次に{replacement_a}。"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": swapped}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": f"{replacement_a}。{replacement_b}",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_multiple_corrects_accept_shared_replacement(self) -> None:
+        before_a = "エーの誤った長い説明です"
+        before_b = "ビーの誤った長い説明です"
+        replacement = "共通の正しい長い説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before_a,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    },
+                    {
+                        "before": before_b,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = f"最初に{before_a}。次に{before_b}。"
+        rewritten = f"最初に{replacement}。次に{replacement}。"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": replacement,
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(result["narration"], rewritten)
+
+    def test_cross_issue_replacement_chain_is_reaudited_safely(self) -> None:
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": "最初の誤った説明",
+                        "decision": "correct",
+                        "verified_fact": "中間の説明",
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": "中間の説明",
+                    },
+                    {
+                        "before": "中間の説明",
+                        "decision": "correct",
+                        "verified_fact": "最終的な正しい説明",
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": "最終的な正しい説明",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go", return_value=audit_raw
+            ) as run_mock,
+        ):
+            result = factcheck.verify_and_correct(
+                "最初の誤った説明と中間の説明を比較します",
+                research={
+                    "facts": [
+                        {
+                            "claim": "最終的な正しい説明",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+        run_mock.assert_called_once()
+
+    def test_long_rewrite_rejects_replacement_moved_to_another_position(
+        self,
+    ) -> None:
+        before = "対象箇所の誤った説明です"
+        replacement = "対象箇所の正しい説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        prefix = "前提を説明します。" * 180
+        suffix = "手順を確認します。" * 180
+        narration = f"{prefix}{before}{suffix}"
+        correct = f"{prefix}{replacement}{suffix}"
+        moved = f"{prefix}根拠のない別の説明です{suffix}{replacement}"
+        for rewritten, expected in ((correct, correct), (moved, None)):
+            with self.subTest(moved=rewritten is moved):
+                with (
+                    mock.patch.object(
+                        config, "FACTCHECK_BACKEND", "opencode_go"
+                    ),
+                    mock.patch.object(
+                        config, "SCRIPT_FACTCHECK_RETRIES", 1
+                    ),
+                    mock.patch(
+                        "doci.ai_text._run_opencode_go",
+                        side_effect=[
+                            audit_raw,
+                            json.dumps(
+                                {"narration": rewritten},
+                                ensure_ascii=False,
+                            ),
+                        ],
+                    ),
+                ):
+                    result = factcheck.verify_and_correct(
+                        narration,
+                        research={
+                            "facts": [
+                                {
+                                    "claim": replacement,
+                                    "source_url": "https://example.org",
+                                }
+                            ]
+                        },
+                    )
+
+                if expected is None:
+                    self.assertIsNone(result)
+                else:
+                    self.assertEqual(result["narration"], expected)
+
+    def test_long_remove_rejects_short_cta_replacement(self) -> None:
+        before = "根拠のない説明です"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "remove",
+                        "verified_fact": "",
+                        "reason": "根拠不足",
+                        "source_url": "",
+                        "replacement": "か？",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        prefix = "前提を説明します。" * 100
+        suffix = "手順を確認します。" * 100
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps(
+                        {
+                            "narration": (
+                                f"{prefix}か？{suffix}"
+                            )
+                        },
+                        ensure_ascii=False,
+                    ),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                f"{prefix}{before}{suffix}",
+                research={
+                    "facts": [
+                        {
+                            "claim": "確認済み",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_shared_replacement_rejects_collapsing_at_one_target(self) -> None:
+        before_a = "エーの誤った説明"
+        before_b = "ビーの誤った説明"
+        replacement = "共通の正しい説明"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before_a,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    },
+                    {
+                        "before": before_b,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps(
+                        {
+                            "narration": (
+                                f"か？と{replacement}{replacement}"
+                            )
+                        },
+                        ensure_ascii=False,
+                    ),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                f"{before_a}と{before_b}",
+                research={
+                    "facts": [
+                        {
+                            "claim": replacement,
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_repeated_correct_rejects_unlisted_particle_adjustments(
+        self,
+    ) -> None:
+        before = "誤った説明"
+        replacement = "正しい説明"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = "。".join([f"{before}は有効です"] * 5)
+        rewritten = "。".join([f"{replacement}が有効です"] * 5)
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": replacement,
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_correct_rejects_remote_or_local_question_rewrite(self) -> None:
+        before = "誤った説明"
+        replacement = "正しい説明"
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": before,
+                        "decision": "correct",
+                        "verified_fact": replacement,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": replacement,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        filler = "確認手順を説明します。" * 80
+        cases = (
+            (
+                f"{before}{filler}この商品は購入しません。",
+                f"{replacement}{filler}この商品は購入しませんか？",
+            ),
+            (
+                f"{before}。手順を説明します。",
+                f"{replacement}か？手順を説明します。",
+            ),
+        )
+        for narration, rewritten in cases:
+            with self.subTest(rewritten=rewritten[-20:]):
+                with (
+                    mock.patch.object(
+                        config, "FACTCHECK_BACKEND", "opencode_go"
+                    ),
+                    mock.patch.object(
+                        config, "SCRIPT_FACTCHECK_RETRIES", 1
+                    ),
+                    mock.patch(
+                        "doci.ai_text._run_opencode_go",
+                        side_effect=[
+                            audit_raw,
+                            json.dumps(
+                                {"narration": rewritten},
+                                ensure_ascii=False,
+                            ),
+                        ],
+                    ),
+                ):
+                    result = factcheck.verify_and_correct(
+                        narration,
+                        research={
+                            "facts": [
+                                {
+                                    "claim": replacement,
+                                    "source_url": "https://example.org",
+                                }
+                            ]
+                        },
+                    )
+
+                self.assertIsNone(result)
 
     def test_correct_rejects_appended_substring_replacement(self) -> None:
         audit_raw = (

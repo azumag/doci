@@ -380,6 +380,45 @@ def _attempt_audit(
                     raise ValueError(
                         "soften 判定の置換形が断定を弱める形ではありません"
                     )
+        else:
+            # remove では置換文を使わない。監査モデルが混入させた任意文を
+            # Qwen の書き換え指示へ転送しない。
+            issue["replacement"] = ""
+    target_tokens: list[tuple[int, str, str]] = []
+    for issue_index, issue in enumerate(actionable):
+        target_tokens.append(
+            (
+                issue_index,
+                "before",
+                _target_comparison_text(issue["before"]),
+            )
+        )
+        if issue["decision"] in {"correct", "soften"}:
+            target_tokens.append(
+                (
+                    issue_index,
+                    "replacement",
+                    _target_comparison_text(issue["replacement"]),
+                )
+            )
+    for token_index, (issue_index, token_name, token) in enumerate(
+        target_tokens
+    ):
+        for other_issue, other_name, other_token in target_tokens[
+            token_index + 1 :
+        ]:
+            if issue_index == other_issue:
+                continue
+            if not (token in other_token or other_token in token):
+                continue
+            if (
+                token_name == other_name == "replacement"
+                and token == other_token
+            ):
+                continue
+            raise ValueError(
+                "複数の監査項目で対象・置換形が交差しています"
+            )
     data["issues"] = actionable
     return data
 
@@ -406,7 +445,11 @@ def _attempt_rewrite(
                     if issue["decision"] == "correct"
                     else ""
                 ),
-                "replacement": _prompt_data(issue.get("replacement", "")),
+                "replacement": (
+                    _prompt_data(issue.get("replacement", ""))
+                    if issue["decision"] in {"correct", "soften"}
+                    else ""
+                ),
             }
             for issue in audit["issues"]
         ],
@@ -454,14 +497,10 @@ def _attempt_rewrite(
         similarity < 0.45 or not 0.5 <= length_ratio <= 1.5
     ):
         raise ValueError("Qwen修正結果が原文から大きく逸脱しています")
-    expected_rewrite = comparable_original
     for issue in audit["issues"]:
         before = _target_comparison_text(issue["before"])
         if issue["decision"] in {"correct", "soften"}:
             replacement = _target_comparison_text(issue["replacement"])
-            expected_rewrite = expected_rewrite.replace(
-                before, replacement, 1
-            )
             if replacement not in comparable_rewritten:
                 raise ValueError("Qwen修正結果に指定の置換形が反映されていません")
             if replacement in before:
@@ -497,18 +536,70 @@ def _attempt_rewrite(
             before
         ) >= comparable_original.count(before):
             raise ValueError("Qwen修正結果で削除対象が減っていません")
+
+    # correct/soften は対象語と置換語を同じ印へ中立化する。remove は
+    # 対象別の印を残し、原文のその印だけを同じ位置で削除した列かを検証する。
+    scoped_original = comparable_original
+    scoped_rewritten = comparable_rewritten
+    used_markers: set[str] = set()
+    remove_markers: set[str] = set()
+    marker_by_replacement: dict[str, str] = {}
+    marker_codepoint = 0xE000
+
+    def allocate_marker() -> str:
+        nonlocal marker_codepoint
+        marker = chr(marker_codepoint)
+        while (
+            marker in comparable_original
+            or marker in comparable_rewritten
+            or marker in used_markers
+        ):
+            marker_codepoint += 1
+            marker = chr(marker_codepoint)
+        used_markers.add(marker)
+        marker_codepoint += 1
+        return marker
+
+    for issue_index, issue in enumerate(audit["issues"]):
+        before = _target_comparison_text(issue["before"])
+        if issue["decision"] in {"correct", "soften"}:
+            replacement = _target_comparison_text(issue["replacement"])
+            replacement_marker = marker_by_replacement.get(replacement)
+            if replacement_marker is None:
+                replacement_marker = allocate_marker()
+                marker_by_replacement[replacement] = replacement_marker
+            for target in sorted(
+                {before, replacement}, key=len, reverse=True
+            ):
+                scoped_original = scoped_original.replace(
+                    target, replacement_marker
+                )
+                scoped_rewritten = scoped_rewritten.replace(
+                    target, replacement_marker
+                )
         elif issue["decision"] == "remove":
-            expected_rewrite = expected_rewrite.replace(before, "", 1)
-    expected_matcher = difflib.SequenceMatcher(
-        None, expected_rewrite, comparable_rewritten
-    )
-    outside_change_chars = sum(
-        (i2 - i1) + (j2 - j1)
-        for tag, i1, i2, j1, j2 in expected_matcher.get_opcodes()
-        if tag != "equal"
-    )
-    outside_change_budget = max(8, int(len(expected_rewrite) * 0.2))
-    if outside_change_chars > outside_change_budget:
+            remove_marker = allocate_marker()
+            remove_markers.add(remove_marker)
+            scoped_original = scoped_original.replace(before, remove_marker)
+            scoped_rewritten = scoped_rewritten.replace(before, remove_marker)
+
+    original_index = 0
+    rewritten_index = 0
+    while original_index < len(scoped_original):
+        if (
+            rewritten_index < len(scoped_rewritten)
+            and scoped_original[original_index]
+            == scoped_rewritten[rewritten_index]
+        ):
+            original_index += 1
+            rewritten_index += 1
+        elif scoped_original[original_index] in remove_markers:
+            original_index += 1
+        else:
+            raise ValueError(
+                "Qwen修正結果が監査対象外まで変更しています"
+            )
+    if rewritten_index != len(scoped_rewritten):
         raise ValueError("Qwen修正結果が監査対象外まで変更しています")
     return rewritten
 
