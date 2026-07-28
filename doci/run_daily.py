@@ -276,6 +276,23 @@ def _run_once(
     reservation_id: str | None = None
     selected_topic = ""
 
+    def semantic_duplicate_check(
+        candidate_topic: str, recent_topics: list[str]
+    ) -> history.TopicMatch | None:
+        # 文字列照合が0件のときだけ呼ばれる。語彙が一致しない比喩の言い換え重複を
+        # LLMで補助判定する（通信・応答不良時はNoneを返し見逃し側に倒す）。
+        try:
+            matched = ai_text.check_semantic_duplicate(candidate_topic, recent_topics)
+        except Exception as exc:  # noqa: BLE001 判定不調で生成全体を止めない
+            _log(f"意味的重複判定に失敗→スキップせず継続: {str(exc)[:160]}")
+            return None
+        if matched is None:
+            return None
+        matched_topic, confidence = matched
+        return history.TopicMatch(
+            topic=matched_topic, ts="", similarity=confidence, source="LLM判定"
+        )
+
     def reserve_selected_topic(topic: str) -> None:
         nonlocal reservation_id, selected_topic
         selected_topic = topic.strip()
@@ -286,6 +303,9 @@ def _run_once(
                 selected_topic,
                 cooldown_days=cooldown_days,
                 reserve=do_upload,
+                semantic_check=(
+                    semantic_duplicate_check if cooldown_days > 0 else None
+                ),
             )
             if reservation_id:
                 reservation_state.update(
@@ -307,7 +327,7 @@ def _run_once(
         spec,
         corner,
         day,
-        history.recent_titles(spec),
+        history.recent_titles(spec, cooldown_days=cooldown_days),
         topic_guard=reserve_selected_topic,
         performance_decision=performance_decision,
     )

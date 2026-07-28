@@ -625,6 +625,67 @@ def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")
 
 
+_SEMANTIC_DUPLICATE_PROMPT = """\
+あなたはショート動画企画の重複審査担当です。「新しい題材候補」が「直近の題材一覧」のいずれかと、
+表現・比喩・切り口を変えただけで結論や主張構造が実質同じ使い回しでないかを判定してください。
+（例: 「見えざる手」と「見えない手」、「成長という名の列車」と「成長という名の神様」は同じ主張の言い換えで重複）
+テーマ領域が同じでも、具体的な結論・視点・題材が明確に異なるものは重複ではありません。
+
+新しい題材候補: {candidate}
+
+直近の題材一覧:
+{numbered}
+
+出力は有効なJSONオブジェクトのみ（説明・コードフェンス禁止）:
+{{"duplicate": true または false, "matched_index": 一致した番号（1始まり。無ければnull）, "confidence": 0から1の確信度, "reason": "判定理由（1文）"}}
+"""
+
+
+def check_semantic_duplicate(
+    candidate_topic: str,
+    recent_topics: list[str],
+    *,
+    limit: int = 24,
+    text_limit: int = 120,
+) -> tuple[str, float] | None:
+    """語彙が一致しない言い換え重複をLLMに判定させる。
+
+    一致ありなら (一致した過去題材, 確信度) を返す。通信・応答不良時は
+    誤スキップより見逃しを優先し None を返す（生成を止めない）。
+    """
+    candidate_topic = candidate_topic.strip()
+    candidates = [t.strip()[:text_limit] for t in recent_topics if t.strip()][-limit:]
+    if not candidate_topic or not candidates:
+        return None
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(candidates))
+    prompt = _SEMANTIC_DUPLICATE_PROMPT.format(
+        candidate=candidate_topic[:text_limit], numbered=numbered
+    )
+    try:
+        data = _extract_json(_dispatch(prompt, timeout=60))
+    except (
+        ValueError,
+        TimeoutError,
+        subprocess.TimeoutExpired,
+        RuntimeError,
+        OSError,
+    ):
+        return None
+    if not isinstance(data, dict) or not data.get("duplicate"):
+        return None
+    idx = data.get("matched_index")
+    matched = (
+        candidates[idx - 1]
+        if isinstance(idx, int)
+        and not isinstance(idx, bool)
+        and 1 <= idx <= len(candidates)
+        else candidates[0]
+    )
+    confidence = data.get("confidence")
+    score = confidence if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) else 1.0
+    return matched, max(0.0, min(1.0, float(score)))
+
+
 def _validate(script: dict) -> dict:
     for k in REQUIRED_KEYS:
         if k not in script:

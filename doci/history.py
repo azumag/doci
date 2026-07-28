@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Callable
 
 from .channel import ChannelSpec
 
@@ -93,6 +94,20 @@ _CONCEPT_PATTERNS = {
     "related_video": (r"関連動画",),
     "subscriber": (r"登録者", r"チャンネル登録"),
     "ab_test": (r"abテスト", r"テストと比較"),
+    # ideologyチャンネル(資本主義/共産主義)向け。比喩を変えた使い回しは技術用語を含まないため、
+    # YouTube向け概念だけでは一致せず素通りしてしまう（実測で確認済み）。
+    "utopian_ideal": (
+        r"楽園", r"理想郷", r"完璧な平等", r"みんなで幸せ", r"全員が同じ",
+        r"誰もが.{0,4}平等", r"誰か.{0,6}平等", r"よき社会", r"青図", r"設計図", r"天国",
+    ),
+    "tragedy_sacrifice": (r"犠牲", r"悲劇", r"地獄", r"暴落", r"泥濘", r"喰らう"),
+    "nordic_comparison": (r"北欧",),
+    "planned_economy": (r"計画経済",),
+    "invisible_hand": (r"見えざる手", r"見えない手", r"アダムスミス"),
+    "growth_worship": (r"成長", r"gdp", r"列車", r"エンジン", r"神様", r"宗教"),
+    "wealth_inequality": (r"格差", r"富の集中", r"上位1"),
+    "tech_giant": (r"テック巨人", r"テック企業"),
+    "more_desire": (r"もっと欲しい", r"欲望", r"衝動"),
 }
 _BOILERPLATE = (
     "初心者向け",
@@ -226,11 +241,16 @@ def reserve_topic(
     reserve: bool = True,
     now: datetime | None = None,
     similarity_threshold: float = 0.55,
+    semantic_check: (
+        Callable[[str, list[str]], TopicMatch | None] | None
+    ) = None,
 ) -> str | None:
     """題材を原子的に照合し、実投稿runならキューとして予約する。
 
     重複時はスキップ行も同じロック内で追記するため、並行runでも
     「照合は双方通過したが同じ題材を予約した」という競合を起こさない。
+    semantic_check は語彙が一致しない言い換え重複（比喩を変えただけ等）を
+    LLMで補助判定するための差し込み口。文字列照合が0件のときだけ呼ぶ。
     """
     if cooldown_days <= 0:
         return None
@@ -249,10 +269,11 @@ def reserve_topic(
                 rows.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-        best: TopicMatch | None = None
-        for row, previous_topic, source in _cooldown_candidates(
+        candidates = _cooldown_candidates(
             rows, now=current, cooldown_days=cooldown_days
-        ):
+        )
+        best: TopicMatch | None = None
+        for row, previous_topic, source in candidates:
             similarity = topic_similarity(topic, previous_topic)
             if similarity < similarity_threshold:
                 continue
@@ -264,6 +285,15 @@ def reserve_topic(
             )
             if best is None or candidate.similarity > best.similarity:
                 best = candidate
+        if best is None and semantic_check is not None:
+            seen_topics: set[str] = set()
+            recent_topics: list[str] = []
+            for _row, previous_topic, _source in reversed(candidates):
+                if previous_topic in seen_topics:
+                    continue
+                seen_topics.add(previous_topic)
+                recent_topics.append(previous_topic)
+            best = semantic_check(topic, recent_topics)
         if best is not None:
             exc = TopicCooldownSkip(topic, best, cooldown_days)
             if reserve:
@@ -517,14 +547,58 @@ def recent_topics(spec: ChannelSpec, limit: int = 30) -> list[str]:
     return topics[-limit:]
 
 
-def recent_titles(spec: ChannelSpec, limit: int = 30) -> list[str]:
+def recent_titles(
+    spec: ChannelSpec,
+    limit: int = 30,
+    *,
+    cooldown_days: int | None = None,
+    now: datetime | None = None,
+) -> list[str]:
     """重複回避プロンプト用に題名だけを返す。
 
     description まで全件結合するとOpenCode Goゲートウェイが長い入力をHTTP 500にするため、
-    題材の重複判定に必要なtitleだけを本文生成へ渡す。
+    題材の重複判定に必要なtitleだけを本文生成へ渡す。cooldown_daysを渡すと、
+    件数ではなくcooldown判定と同じ日数窓（既定30日）で絞ってからlimit件に切り詰める。
     """
-    titles = [row.get("title", "").strip() for row in _read_all(spec)]
-    return [title for title in titles if title][-limit:]
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff = current - timedelta(days=cooldown_days) if cooldown_days else None
+    titles: list[str] = []
+    for row in _read_all(spec):
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        if cutoff is not None:
+            ts = _parse_ts(row.get("ts"))
+            if ts is not None and (ts < cutoff or ts > current):
+                continue
+        titles.append(title)
+    return titles[-limit:]
+
+
+def cooldown_window_topics(
+    spec: ChannelSpec,
+    *,
+    cooldown_days: int,
+    now: datetime | None = None,
+) -> list[str]:
+    """過去cooldown_days日以内の公開済み/キュー済み題材を新しい順・重複なしで返す。
+
+    語彙一致に頼らない意味的重複判定（LLM）へ渡す候補一覧として使う。
+    """
+    if cooldown_days <= 0:
+        return []
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    candidates = _cooldown_candidates(
+        _read_all(spec), now=current, cooldown_days=cooldown_days
+    )
+    seen: set[str] = set()
+    topics: list[str] = []
+    for _row, topic, _source in reversed(candidates):
+        if topic in seen:
+            continue
+        seen.add(topic)
+        topics.append(topic)
+    return topics
 
 
 def record(
