@@ -104,8 +104,8 @@ voice = "narrator"
         self.assertEqual(spec.voice_for("shorts").speaker, 13)
         self.assertEqual(spec.style.bgm.dir, spec.root / "bgm")
         self.assertEqual(spec.publish.platforms, ("youtube",))
-        self.assertEqual(spec.publish.youtube.privacy, "unlisted")
-        self.assertTrue(spec.publish.youtube.review.enabled)
+        self.assertEqual(spec.publish.youtube.privacy, "public")
+        self.assertFalse(spec.publish.youtube.review.enabled)
         self.assertEqual(
             spec.publish.youtube.review.repository,
             "azumag/doci",

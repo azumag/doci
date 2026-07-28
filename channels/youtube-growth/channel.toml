@@ -50,12 +50,12 @@ rotation = "fixed"
 platforms = ["youtube"]
 
 [publish.youtube]
-privacy = "unlisted"
+privacy = "public"
 client_secret = "secrets/youtube-growth/client_secret.json"
 token = "secrets/youtube-growth/youtube_token.json"
 
 [publish.youtube.review]
-enabled = true
+enabled = false
 repository = "azumag/doci"
 publish_label = "公開承認"
 hold_label = "保留"
