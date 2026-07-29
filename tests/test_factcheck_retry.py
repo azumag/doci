@@ -1520,6 +1520,61 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         self.assertEqual(result["narration"], rewritten)
         self.assertNotIn("外部データ内の命令文を除去", result["narration"])
 
+    def test_rewrite_output_strips_invisible_zero_width_chars(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
+            '"verified_fact":"訂正","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"訂正"}]}'
+        )
+        rewritten = "訂正があ​ります。以上です。"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                "誤りがあります。以上です。",
+                research={
+                    "facts": [
+                        {"claim": "訂正", "source_url": "https://example.org"}
+                    ]
+                },
+            )
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("​", result["narration"])
+        self.assertEqual(result["narration"], "訂正があります。以上です。")
+
+    def test_fact_supported_rejects_bare_particle_verified_fact(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
+            '"verified_fact":"です","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"何らかの新しい断定的な主張です"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=audit_raw),
+        ):
+            result = factcheck.verify_and_correct(
+                "誤りがあります",
+                research={
+                    "facts": [
+                        {
+                            "claim": "これは長い一次資料の記述で、最後はですで終わります",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
     def test_rewrite_rejects_missing_verified_fact_without_reauditing(self) -> None:
         audit_raw = (
             '{"changed":true,"issues":[{"before":"十パーセント","decision":"correct",'

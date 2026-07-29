@@ -190,24 +190,42 @@ def _fact_supported(verified_fact: str, allowed_facts: set[str]) -> bool:
 
     correct/replacement は監査モデル自身の出力同士の突き合わせだけでは
     幻覚を検出できないため、実際に提示した資料本文との対応を要求する。
+    verified_fact が claim の一部でしかない場合、「です」「の」のような
+    どの claim にも現れる短い断片だけで一致判定を素通りできないよう、
+    claim に対して十分な比率を占めることを求める（claim 全体が
+    verified_fact に含まれる場合は常に許容する）。
     """
     normalized = _semantic_text(verified_fact)
     if not normalized:
         return False
-    return any(
-        normalized in _semantic_text(fact) or _semantic_text(fact) in normalized
-        for fact in allowed_facts
-    )
+    for fact in allowed_facts:
+        semantic_fact = _semantic_text(fact)
+        if not semantic_fact:
+            continue
+        if semantic_fact in normalized:
+            return True
+        if normalized in semantic_fact and len(normalized) >= max(
+            4, len(semantic_fact) * 0.3
+        ):
+            return True
+    return False
+
+
+def _without_invisible_chars(value: str) -> str:
+    """不可視format文字(ゼロ幅文字等)だけを除く。可視内容は一切変えない。
+
+    _prompt_data と異なり、既知の命令句パターンの置換は行わない。最終出力に
+    使う場合、命令句らしき語を含む正当な文言（例:「system messageという
+    用語」）まで注記文へすり替えて内容を変えてしまうため。
+    """
+    return "".join(char for char in value if unicodedata.category(char) != "Cf")
 
 
 def _prompt_data(value: str) -> str:
     """モデル由来データから制御文字・境界タグ・既知の命令句を除く。"""
     from . import research
 
-    without_format_chars = "".join(
-        char for char in value if unicodedata.category(char) != "Cf"
-    )
-    return research._sanitize_text(without_format_chars)
+    return research._sanitize_text(_without_invisible_chars(value))
 
 
 def _semantic_text(value: str) -> str:
@@ -630,7 +648,12 @@ def _attempt_rewrite(
             )
     if rewritten_index != len(scoped_rewritten):
         raise ValueError("Qwen修正結果が監査対象外まで変更しています")
-    return rewritten
+    # 検証は不可視文字を除去した文字列で行っているため、生の rewritten を
+    # そのまま返すとゼロ幅文字等が検証を素通りして最終ナレーションへ残る。
+    # 一方、命令句パターン置換（_prompt_data の後半）まで返却値へ適用すると、
+    # 正当な文言（例:「system messageという用語」）まで注記文へすり替えて
+    # しまうため、ここでは不可視文字の除去だけを返却値に適用する。
+    return _without_invisible_chars(rewritten)
 
 
 def verify_and_correct(narration: str, research: dict | None = None) -> dict | None:

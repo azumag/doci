@@ -37,7 +37,7 @@ class ReviewWorkflowSecurityTest(unittest.TestCase):
         self.assertIn("the Action never truncates a review", self.workflow)
         self.assertNotIn("head -c", self.workflow)
         self.assertIn("cat /tmp/doci-pr.diff", self.workflow)
-        self.assertIn("--model claude-opus-5", self.workflow)
+        self.assertIn("--model claude-fable-5", self.workflow)
         self.assertIn("unsafe review output", self.workflow)
         self.assertIn("Require structured review result", self.workflow)
         self.assertIn(
