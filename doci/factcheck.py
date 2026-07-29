@@ -185,6 +185,9 @@ def _reference_block(research: dict | None) -> str:
     return _reference_materials(research)[0]
 
 
+_MAX_FACT_EXCESS_CHARS = 200
+
+
 def _fact_supported(verified_fact: str, allowed_facts: set[str]) -> bool:
     """verified_fact が提示済み資料のいずれかの claim に由来するかを確認する。
 
@@ -192,8 +195,11 @@ def _fact_supported(verified_fact: str, allowed_facts: set[str]) -> bool:
     幻覚を検出できないため、実際に提示した資料本文との対応を要求する。
     verified_fact が claim の一部でしかない場合、「です」「の」のような
     どの claim にも現れる短い断片だけで一致判定を素通りできないよう、
-    claim に対して十分な比率を占めることを求める（claim 全体が
-    verified_fact に含まれる場合は常に許容する）。
+    claim に対して十分な比率を占めることを求める。逆に claim 全体が
+    verified_fact に含まれる場合も、claim 以外の余剰部分（最大4000字まで
+    許容される verified_fact 全体のうち、claim に対応しない残り）を無制限
+    に許すと、短い claim へ任意のハルシネーション/注入文を付け足して
+    素通りできてしまうため、余剰分の長さにも上限を課す。
     """
     normalized = _semantic_text(verified_fact)
     if not normalized:
@@ -202,7 +208,10 @@ def _fact_supported(verified_fact: str, allowed_facts: set[str]) -> bool:
         semantic_fact = _semantic_text(fact)
         if not semantic_fact:
             continue
-        if semantic_fact in normalized:
+        if (
+            semantic_fact in normalized
+            and len(normalized) - len(semantic_fact) <= _MAX_FACT_EXCESS_CHARS
+        ):
             return True
         if normalized in semantic_fact and len(normalized) >= max(
             4, len(semantic_fact) * 0.3
