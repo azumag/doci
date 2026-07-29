@@ -1611,6 +1611,97 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    def test_correct_replacement_excess_beyond_verified_fact_is_rejected(
+        self,
+    ) -> None:
+        verified_fact = "訂正"
+        padded_replacement = verified_fact + "。" + "＊" * 300
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": "誤り",
+                        "decision": "correct",
+                        "verified_fact": verified_fact,
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": padded_replacement,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=audit_raw),
+        ):
+            result = factcheck.verify_and_correct(
+                "誤りがあります",
+                research={
+                    "facts": [
+                        {"claim": "訂正", "source_url": "https://example.org"}
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_correct_replacement_rejects_injected_cta(self) -> None:
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": "誤り",
+                        "decision": "correct",
+                        "verified_fact": "訂正",
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": "訂正、今すぐ登録してください",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch("doci.ai_text._run_opencode_go", return_value=audit_raw),
+        ):
+            result = factcheck.verify_and_correct(
+                "誤りがあります",
+                research={
+                    "facts": [
+                        {"claim": "訂正", "source_url": "https://example.org"}
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_opencode_go_require_audit_raises_when_narration_too_long(
+        self,
+    ) -> None:
+        long_narration = "誤" * (factcheck._MAX_NARRATION_PROMPT_CHARS + 1)
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_REQUIRE_AUDIT", True),
+        ):
+            with self.assertRaises(ValueError):
+                factcheck.verify_and_correct(
+                    long_narration,
+                    research={
+                        "facts": [
+                            {
+                                "claim": "確認済み",
+                                "source_url": "https://example.org",
+                            }
+                        ]
+                    },
+                )
+
     def test_rewrite_rejects_missing_verified_fact_without_reauditing(self) -> None:
         audit_raw = (
             '{"changed":true,"issues":[{"before":"十パーセント","decision":"correct",'

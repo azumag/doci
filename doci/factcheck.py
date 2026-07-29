@@ -405,29 +405,37 @@ def _attempt_audit(
                 or _semantic_text(verified_fact)
                 not in _semantic_text(replacement)
                 or not _fact_supported(verified_fact, allowed_facts)
+                or len(replacement)
+                > max(80, max(len(before), len(verified_fact)) * 3)
             ):
+                # verified_fact自体はallowed_factsと突き合わせ済みでも、
+                # replacementはverified_factを含みさえすれば残余部分が
+                # 無検査になる（監査モデル経由の任意文注入経路）ため、
+                # before/verified_factに対する長さ上限も課す。
                 raise ValueError(
                     "correct 判定の検証済み事実・出典・置換形が"
                     "提示資料と一致しません"
                 )
-            if issue["decision"] == "soften":
-                strong_or_cta_scan = _SOFTEN_ALLOWED_STRONG_SCOPE.sub(
-                    "", replacement
+            # correct/soften いずれも、CTA・強断定表現の混入は許さない
+            # （soften は「断定を弱める」という目的上、correct は
+            # verified_fact以外の残余部分に紛れ込む注入文の対策として）。
+            cta_scan = _SOFTEN_ALLOWED_STRONG_SCOPE.sub("", replacement)
+            if any(
+                pattern.search(cta_scan) for pattern in _SOFTEN_DISALLOWED_PATTERNS
+            ):
+                raise ValueError(
+                    f"{issue['decision']} 判定の置換形に禁止表現が"
+                    "含まれています"
                 )
-                if (
-                    not any(
-                        pattern.search(replacement)
-                        for pattern in _SOFTEN_PATTERNS
-                    )
-                    or any(
-                        pattern.search(strong_or_cta_scan)
-                        for pattern in _SOFTEN_DISALLOWED_PATTERNS
-                    )
-                    or len(replacement) > max(80, len(before) * 3)
-                ):
-                    raise ValueError(
-                        "soften 判定の置換形が断定を弱める形ではありません"
-                    )
+            if issue["decision"] == "soften" and (
+                not any(
+                    pattern.search(replacement) for pattern in _SOFTEN_PATTERNS
+                )
+                or len(replacement) > max(80, len(before) * 3)
+            ):
+                raise ValueError(
+                    "soften 判定の置換形が断定を弱める形ではありません"
+                )
         else:
             # remove では置換文を使わない。監査モデルが混入させた任意文を
             # Qwen の書き換え指示へ転送しない。
@@ -695,10 +703,18 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
     if backend in {"opencode", "opencode_go"}:
         sanitized_narration = _prompt_data(narration)
         if len(sanitized_narration) > _MAX_NARRATION_PROMPT_CHARS:
-            _log(
+            message = (
                 "ナレーションがファクトチェック安全上限を超えたため"
                 "原文を維持します"
             )
+            if config.SCRIPT_FACTCHECK_REQUIRE_AUDIT:
+                # このパスは監査を一度も試行しないため、SCRIPT_FACTCHECK_
+                # REQUIRE_AUDIT=1（監査未実施の常態化を可視化したい設定）の
+                # 目的をここでも満たす必要がある。長編台本を扱うチャンネル
+                # では毎回このパスに入り得るため、静かなNoneのままにすると
+                # フラグが実質的に無効化されてしまう。
+                raise ValueError(message)
+            _log(message)
             return None
         factcheck_timeout = config.script_factcheck_timeout()
         factcheck_deadline = (
