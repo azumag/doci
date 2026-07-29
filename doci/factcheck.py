@@ -220,14 +220,27 @@ def _fact_supported(verified_fact: str, allowed_facts: set[str]) -> bool:
     return False
 
 
+_ALLOWED_CONTROL_CHARS = frozenset("\t\n\r")
+
+
 def _without_invisible_chars(value: str) -> str:
-    """不可視format文字(ゼロ幅文字等)だけを除く。可視内容は一切変えない。
+    """不可視format文字・危険な制御文字を除く。可視内容・改行/タブは変えない。
 
     _prompt_data と異なり、既知の命令句パターンの置換は行わない。最終出力に
     使う場合、命令句らしき語を含む正当な文言（例:「system messageという
     用語」）まで注記文へすり替えて内容を変えてしまうため。
+    検証(_target_comparison_text/_prompt_data 経由の research._sanitize_text)は
+    ESC・BEL・NUL等のCc制御文字も比較対象から除いているため、返却値でも
+    同様に除かないと、これらが検証をすり抜けて端末エスケープ混入や
+    字幕・音声合成の異常表示につながる。改行・タブ・復帰は正当な空白と
+    して残す。
     """
-    return "".join(char for char in value if unicodedata.category(char) != "Cf")
+    return "".join(
+        char
+        for char in value
+        if unicodedata.category(char) not in {"Cf", "Cc"}
+        or char in _ALLOWED_CONTROL_CHARS
+    )
 
 
 def _prompt_data(value: str) -> str:
@@ -608,13 +621,19 @@ def _attempt_rewrite(
         ) >= comparable_original.count(before):
             raise ValueError("Qwen修正結果で削除対象が減っていません")
 
-    # correct/soften は対象語と置換語を同じ印へ中立化する。remove は
-    # 対象別の印を残し、原文のその印だけを同じ位置で削除した列かを検証する。
+    # correct/soften は対象語(before)と置換語(replacement)に別々の印を
+    # 割り当てる。before の印は「そのまま」または「replacement の印へ
+    # 変わる」ことだけを許容する一方向の遷移とし、replacement の印は
+    # 自分自身以外への遷移を許さない。同じ印へ中立化すると、対象外の
+    # 位置に既存の replacement 相当文があった場合、それを before（監査済み
+    # の誤り文）へ逆置換しても出現数チェックと位置検証の両方を通過して
+    # しまう（before→replacement の純増減だけを見ており方向性がないため）。
     scoped_original = comparable_original
     scoped_rewritten = comparable_rewritten
     used_markers: set[str] = set()
     remove_markers: set[str] = set()
     marker_by_replacement: dict[str, str] = {}
+    allowed_transitions: dict[str, set[str]] = {}
     marker_codepoint = 0xE000
 
     def allocate_marker() -> str:
@@ -639,15 +658,20 @@ def _attempt_rewrite(
             if replacement_marker is None:
                 replacement_marker = allocate_marker()
                 marker_by_replacement[replacement] = replacement_marker
-            for target in sorted(
-                {before, replacement}, key=len, reverse=True
+            before_marker = allocate_marker()
+            for target, marker in sorted(
+                {(before, before_marker), (replacement, replacement_marker)},
+                key=lambda pair: len(pair[0]),
+                reverse=True,
             ):
-                scoped_original = scoped_original.replace(
-                    target, replacement_marker
-                )
-                scoped_rewritten = scoped_rewritten.replace(
-                    target, replacement_marker
-                )
+                scoped_original = scoped_original.replace(target, marker)
+                scoped_rewritten = scoped_rewritten.replace(target, marker)
+            allowed_transitions.setdefault(
+                before_marker, {before_marker}
+            ).add(replacement_marker)
+            allowed_transitions.setdefault(
+                replacement_marker, {replacement_marker}
+            )
         elif issue["decision"] == "remove":
             remove_marker = allocate_marker()
             remove_markers.add(remove_marker)
@@ -657,14 +681,15 @@ def _attempt_rewrite(
     original_index = 0
     rewritten_index = 0
     while original_index < len(scoped_original):
-        if (
-            rewritten_index < len(scoped_rewritten)
-            and scoped_original[original_index]
-            == scoped_rewritten[rewritten_index]
+        original_char = scoped_original[original_index]
+        if rewritten_index < len(scoped_rewritten) and (
+            original_char == scoped_rewritten[rewritten_index]
+            or scoped_rewritten[rewritten_index]
+            in allowed_transitions.get(original_char, ())
         ):
             original_index += 1
             rewritten_index += 1
-        elif scoped_original[original_index] in remove_markers:
+        elif original_char in remove_markers:
             original_index += 1
         else:
             raise ValueError(

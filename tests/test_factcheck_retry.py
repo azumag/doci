@@ -1578,6 +1578,36 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
         self.assertNotIn("​", result["narration"])
         self.assertEqual(result["narration"], "訂正があります。以上です。")
 
+    def test_rewrite_output_strips_dangerous_control_chars(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
+            '"verified_fact":"訂正","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"訂正"}]}'
+        )
+        rewritten = "訂正があ\x1bります。以上です。"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": rewritten}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                "誤りがあります。以上です。",
+                research={
+                    "facts": [
+                        {"claim": "訂正", "source_url": "https://example.org"}
+                    ]
+                },
+            )
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("\x1b", result["narration"])
+        self.assertEqual(result["narration"], "訂正があります。以上です。")
+
     def test_fact_supported_rejects_bare_particle_verified_fact(self) -> None:
         audit_raw = (
             '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
@@ -1937,6 +1967,54 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
                     "facts": [
                         {
                             "claim": f"{replacement_a}。{replacement_b}",
+                            "source_url": "https://example.org",
+                        }
+                    ]
+                },
+            )
+
+        self.assertIsNone(result)
+
+    def test_correct_rejects_reverse_swap_at_unaudited_position(self) -> None:
+        audit_raw = json.dumps(
+            {
+                "changed": True,
+                "issues": [
+                    {
+                        "before": "十パーセント",
+                        "decision": "correct",
+                        "verified_fact": "二十パーセント",
+                        "reason": "一次資料",
+                        "source_url": "https://example.org",
+                        "replacement": "二十パーセント",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        narration = "Xは十パーセントです。Bは二十パーセントです。Cは十パーセントです。"
+        # 監査が指摘した箇所(X,C)は正しく修正するが、監査対象外で
+        # 既に正しかったB(二十パーセント)を既知の誤り値(十パーセント)へ
+        # 逆に書き換える。before/replacementの純増減チェックだけを見ると
+        # 通過してしまう(before: 2→1に減少、replacement: 1→2に増加)。
+        corrupted = "Xは二十パーセントです。Bは十パーセントです。Cは二十パーセントです。"
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[
+                    audit_raw,
+                    json.dumps({"narration": corrupted}, ensure_ascii=False),
+                ],
+            ),
+        ):
+            result = factcheck.verify_and_correct(
+                narration,
+                research={
+                    "facts": [
+                        {
+                            "claim": "二十パーセント",
                             "source_url": "https://example.org",
                         }
                     ]
