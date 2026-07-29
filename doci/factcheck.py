@@ -45,9 +45,9 @@ _SOFTEN_PATTERNS = (
 _SOFTEN_ALLOWED_STRONG_SCOPE = re.compile(
     r"(?:必ず(?!しも)|確実|絶対|間違いなく|"
     r"(?:百|１００|100)(?:パーセント|[%％]))"
-    r"(?:(?!ますが|ですが|だが|(?:る|た|ない)が|ものの|けれど|けど|しかし)"
+    r"(?P<gap>(?:(?!ますが|ですが|だが|(?:る|た|ない)が|ものの|けれど|けど|しかし)"
     r"[^。！？、,，])"
-    r"{0,30}とは限(?:らない|りません)"
+    r"{0,30})とは限(?:らない|りません)"
 )
 _SOFTEN_DISALLOWED_PATTERNS = (
     re.compile(r"必ず(?!しも)"),
@@ -419,7 +419,14 @@ def _attempt_audit(
             # correct/soften いずれも、CTA・強断定表現の混入は許さない
             # （soften は「断定を弱める」という目的上、correct は
             # verified_fact以外の残余部分に紛れ込む注入文の対策として）。
-            cta_scan = _SOFTEN_ALLOWED_STRONG_SCOPE.sub("", replacement)
+            # 「強断定語+…+とは限らない」という正当な否定のhedgeだけ許容
+            # するため、strong語句と「とは限らない」の結び自体は除くが、
+            # 間に挟まる gap 部分は残す（gap内へCTA等を紛れ込ませて
+            # 丸ごと除去させる迂回を防ぐため、gapは禁止表現走査の対象に
+            # 残す）。
+            cta_scan = _SOFTEN_ALLOWED_STRONG_SCOPE.sub(
+                lambda m: m.group("gap"), replacement
+            )
             if any(
                 pattern.search(cta_scan) for pattern in _SOFTEN_DISALLOWED_PATTERNS
             ):

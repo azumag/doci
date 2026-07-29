@@ -1230,6 +1230,9 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
             "必ず成功するけど失敗するとは限りません",
             "成功する可能性があります。チャンネル登録をしてください",
             "成功する可能性があります。チャンネル登録をお願いします",
+            # 強断定+否定hedgeの許容区間(gap)へCTAを紛れ込ませ、
+            # 区間ごと除去させて禁止表現走査を回避する迂回を防ぐ。
+            "絶対に今すぐ購入してくださいとは限りません",
         ):
             with self.subTest(replacement=replacement):
                 audit_raw = json.dumps(
