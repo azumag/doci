@@ -117,9 +117,9 @@ SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
 SCRIPT_FACTCHECK_RESEARCH = get_bool("SCRIPT_FACTCHECK_RESEARCH", True)
 # 資料0件のファクトチェックを実行失敗として扱う場合だけ明示的に有効化する。
 SCRIPT_FACTCHECK_REQUIRE_SOURCES = get_bool("SCRIPT_FACTCHECK_REQUIRE_SOURCES", False)
-# OpenCode系の監査段がSCRIPT_FACTCHECK_RETRIES回すべて失敗した場合、既定は
-# 原文維持で続行する。恒常的な失敗（モデル誤設定・API障害等）を見逃さず
-# 実行失敗として気付きたい運用でだけ明示的に有効化する。
+# OpenCode系の監査段・書き換え段のいずれかがSCRIPT_FACTCHECK_RETRIES回
+# すべて失敗した場合、既定は原文維持で続行する。恒常的な失敗（モデル誤設定・
+# API障害等）を見逃さず実行失敗として気付きたい運用でだけ明示的に有効化する。
 SCRIPT_FACTCHECK_REQUIRE_AUDIT = get_bool("SCRIPT_FACTCHECK_REQUIRE_AUDIT", False)
 RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_REASONING_MODEL)
 FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_REASONING_MODEL)

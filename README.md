@@ -19,8 +19,9 @@ OpenCode GoのMiniMaxリサーチは実取得済みの候補・一次資料URL�
 ファクトチェックも取得済みの `facts` がある場合だけ実行し、MiniMaxが構造化監査、
 Qwenが監査結果だけに基づく文章修正を担当します。資料がない場合は原文を維持します。
 資料欠落を実行失敗にしたい運用だけ `SCRIPT_FACTCHECK_REQUIRE_SOURCES=1` を明示します。
-監査段の恒常的失敗（モデル誤設定・API障害等）も実行失敗にしたい運用だけ
-`SCRIPT_FACTCHECK_REQUIRE_AUDIT=1` を明示します（既定は原文維持で後続処理）。
+監査段・書き換え段いずれかの恒常的失敗（モデル誤設定・API障害等）も
+実行失敗にしたい運用だけ `SCRIPT_FACTCHECK_REQUIRE_AUDIT=1` を明示します
+（既定は原文維持で後続処理）。
 2段処理全体は既定で `SCRIPT_FACTCHECK_TOTAL_TIMEOUT=900` 秒に制限され、`0` で無制限にできます。
 
 同梱の `ideology` チャンネルには次の2コーナーがある。

@@ -686,7 +686,8 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
     バックエンド(特に MiniMax-M3)が長い日本語文字列のJSONエスケープを崩し不正JSONを
     返すことがあるため、SCRIPT_FACTCHECK_RETRIES 回まで再試行する。
     OpenCode系は監査・文章修正のどちらの段が尽きても、既定では安全側に原文を維持する
-    （監査段の恒常的失敗を実行失敗として気付きたい場合は SCRIPT_FACTCHECK_REQUIRE_AUDIT=1）。
+    （いずれかの段の恒常的失敗を実行失敗として気付きたい場合は
+    SCRIPT_FACTCHECK_REQUIRE_AUDIT=1）。
     """
     if not narration.strip():
         return None
@@ -811,10 +812,18 @@ def verify_and_correct(narration: str, research: dict | None = None) -> dict | N
                         f"ファクトチェック文章修正不良(試行{attempt}/"
                         f"{config.SCRIPT_FACTCHECK_RETRIES})→再試行: {str(e)[:120]}"
                     )
-        _log(
+        rewrite_failure_message = (
             "ファクトチェック文章修正に失敗したため原文を維持します: "
             f"{str(last_err)[:120] if last_err else '不明なエラー'}"
         )
+        if config.SCRIPT_FACTCHECK_REQUIRE_AUDIT:
+            # 監査は changed=true（事実誤りあり）と判定済みであり、書き換え
+            # 段の恒常的失敗（モデル誤設定・API障害等）を原文維持で握り潰す
+            # と、既知の問題が未修正のまま気付かれずに流れる。REQUIRE_AUDIT
+            # は「ファクトチェックが実際に機能しているか」を可視化する
+            # フラグであり、監査段だけでなくこの段の恒常的失敗にも適用する。
+            raise last_err or ValueError("ファクトチェック文章修正に失敗しました")
+        _log(rewrite_failure_message)
         return None
 
     last_err: Exception | None = None

@@ -129,6 +129,31 @@ class VerifyAndCorrectRetryTest(unittest.TestCase):
                     },
                 )
 
+    def test_opencode_go_can_require_successful_rewrite(self) -> None:
+        audit_raw = (
+            '{"changed":true,"issues":[{"before":"誤り","decision":"correct",'
+            '"verified_fact":"訂正","reason":"一次資料","source_url":"https://example.org",'
+            '"replacement":"訂正"}]}'
+        )
+        with (
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_RETRIES", 1),
+            mock.patch.object(config, "SCRIPT_FACTCHECK_REQUIRE_AUDIT", True),
+            mock.patch(
+                "doci.ai_text._run_opencode_go",
+                side_effect=[audit_raw, "不正なJSONその1"],
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                factcheck.verify_and_correct(
+                    "誤りがあります",
+                    research={
+                        "facts": [
+                            {"claim": "訂正", "source_url": "https://example.org"}
+                        ]
+                    },
+                )
+
     def test_opencode_cli_backend_does_not_call_claude(self) -> None:
         audit_raw = (
             '{"changed":true,"issues":[{"before":"誤り","decision":"soften",'
