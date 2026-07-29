@@ -80,6 +80,7 @@ def legacy_claude_factcheck_model(model: str) -> str:
 
 # --- text ---
 OPENCODE_GO_DEFAULT_MODEL = "opencode-go/qwen3.7-plus"
+OPENCODE_GO_REASONING_MODEL = "opencode-go/minimax-m3"
 # Claudeは明示された旧経路だけで使う。TEXT_MODEL等の既定値がOpenCode Goモデルでも、
 # 旧経路を明示した利用者がモデル名を設定し忘れた場合に不正なモデル名を渡さない。
 LEGACY_CLAUDE_MODEL = get("CLAUDE_MODEL", "claude-opus-4-8")
@@ -116,10 +117,18 @@ SCRIPT_FACTCHECK = get_bool("SCRIPT_FACTCHECK", False)
 SCRIPT_FACTCHECK_RESEARCH = get_bool("SCRIPT_FACTCHECK_RESEARCH", True)
 # 資料0件のファクトチェックを実行失敗として扱う場合だけ明示的に有効化する。
 SCRIPT_FACTCHECK_REQUIRE_SOURCES = get_bool("SCRIPT_FACTCHECK_REQUIRE_SOURCES", False)
-RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_DEFAULT_MODEL)
-FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_DEFAULT_MODEL)
+# OpenCode系の監査段・書き換え段のいずれかがSCRIPT_FACTCHECK_RETRIES回
+# すべて失敗した場合、既定は原文維持で続行する。恒常的な失敗（モデル誤設定・
+# API障害等）を見逃さず実行失敗として気付きたい運用でだけ明示的に有効化する。
+SCRIPT_FACTCHECK_REQUIRE_AUDIT = get_bool("SCRIPT_FACTCHECK_REQUIRE_AUDIT", False)
+RESEARCH_MODEL = get("RESEARCH_MODEL", OPENCODE_GO_REASONING_MODEL)
+FACTCHECK_MODEL = get("FACTCHECK_MODEL", OPENCODE_GO_REASONING_MODEL)
+FACTCHECK_REWRITE_MODEL = get(
+    "FACTCHECK_REWRITE_MODEL", OPENCODE_GO_DEFAULT_MODEL
+)
 _RESEARCH_MODEL_EXPLICIT = bool(get("RESEARCH_MODEL"))
 _FACTCHECK_MODEL_EXPLICIT = bool(get("FACTCHECK_MODEL"))
+_FACTCHECK_REWRITE_MODEL_EXPLICIT = bool(get("FACTCHECK_REWRITE_MODEL"))
 # リサーチ・検証・図表背景はOpenCode Goを既定にする。codex は明示時の選択肢、
 # claude は既存設定を明示した場合だけ使える後方互換経路。補助段の設定を省略した
 # 既存ユーザーが TEXT_BACKEND=anthropic/claude_cli を明示している場合だけ、その
@@ -200,6 +209,11 @@ if FACTCHECK_BACKEND in {"opencode_go", "opencode"}:
     FACTCHECK_MODEL = _migrate_implicit_opencode_model(
         FACTCHECK_MODEL, FACTCHECK_BACKEND, _FACTCHECK_BACKEND_EXPLICIT
     )
+    FACTCHECK_REWRITE_MODEL = _migrate_implicit_opencode_model(
+        FACTCHECK_REWRITE_MODEL,
+        FACTCHECK_BACKEND,
+        _FACTCHECK_BACKEND_EXPLICIT or _FACTCHECK_REWRITE_MODEL_EXPLICIT,
+    )
 # 構成プラン(plan.make_plan)のバックエンド。値は opencode | codex。直契約MiniMaxを
 # opencode-goゲートウェイ経由でなく codex exec 経由で使えるようにする。
 PLAN_BACKEND = get("PLAN_BACKEND", "opencode")
@@ -232,6 +246,15 @@ def script_research_timeout() -> int | None:
     return per_attempt * max(1, SCRIPT_RESEARCH_RETRIES)
 
 
+def script_factcheck_timeout() -> int | None:
+    """監査と文章修正を合わせた総待機上限を返す。"""
+    return (
+        SCRIPT_FACTCHECK_TOTAL_TIMEOUT
+        if SCRIPT_FACTCHECK_TOTAL_TIMEOUT > 0
+        else None
+    )
+
+
 # 下書きの再生成回数。minimax 等は稀に不完全JSONを返すため複数回試す。
 SCRIPT_DRAFT_RETRIES = get_int("SCRIPT_DRAFT_RETRIES", 3)
 # 下書き再試行を含む執筆段全体の予算。個別試行の残り時間をこの上限で絞り、
@@ -249,6 +272,10 @@ SCRIPT_RESEARCH_TOTAL_TIMEOUT = get_int("SCRIPT_RESEARCH_TOTAL_TIMEOUT", 0)
 TOPIC_COOLDOWN_DAYS = get_int("TOPIC_COOLDOWN_DAYS", 30)
 # ファクトチェックの再試行回数。MiniMax等が長い日本語JSONのエスケープを崩すことがあるため再試行する。
 SCRIPT_FACTCHECK_RETRIES = get_int("SCRIPT_FACTCHECK_RETRIES", 2)
+# MiniMax監査とQwen文章修正の全試行を合わせた総時間上限。0は無制限。
+SCRIPT_FACTCHECK_TOTAL_TIMEOUT = get_int(
+    "SCRIPT_FACTCHECK_TOTAL_TIMEOUT", 900
+)
 # --- 構成プラン: 起承転結＋図表策定（issue #2）。minimax が設計し qwen が執筆 ---
 SCRIPT_PLAN = get_bool("SCRIPT_PLAN", True)
 PLAN_MODEL = get("PLAN_MODEL", "opencode-go/minimax-m3")
