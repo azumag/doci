@@ -692,6 +692,92 @@ def check_semantic_duplicate(
     return matched, max(0.0, min(1.0, float(score)))
 
 
+_TITLE_PATTERN_DUPLICATE_PROMPT = """\
+あなたはYouTube動画タイトルの重複審査担当です。「新しいタイトル案」が「直近のタイトル一覧」の
+いずれかと、次の観点で同じ型の使い回しに見えないかを判定してください。
+
+- proper_noun: 固有名詞の重複（同じ企業名・人名・製品名などを核にしている）
+- problem_word: 問題語・キーワードの重複（同じ課題語「改善」「クリック率」等を核にしている）
+- rhetorical_template: 修辞テンプレートの重複（疑問形、「〜するな」型の警告・逆説、
+  「真実」「設計図」「罠」等の紋切り型比喩、「が殺す/壊す」型の煽り構文など、言い回しの骨格が同じ）
+
+上記3観点のうち2つ以上が同じ直近タイトルと重なる場合だけ重複と判定してください。
+1つだけ重なる（例えばどちらも疑問形なだけ）場合は重複ではありません。
+題材・具体的な結論が明確に異なる場合も重複ではありません。
+
+新しいタイトル案: {candidate}
+
+直近のタイトル一覧:
+{numbered}
+
+出力は有効なJSONオブジェクトのみ（説明・コードフェンス禁止）:
+{{"duplicate": true または false, "matched_index": 一致した番号（1始まり。無ければnull）,
+  "overlapping_axes": ["proper_noun","problem_word","rhetorical_template"]のうち該当するものの配列,
+  "confidence": 0から1の確信度, "reason": "判定理由（1文）"}}
+"""
+
+
+def check_title_pattern_duplicate(
+    candidate_title: str,
+    recent_titles: list[str],
+    *,
+    limit: int = 24,
+    text_limit: int = 200,
+) -> dict | None:
+    """タイトルの修辞パターン重複(固有名詞・問題語・型)をLLMに判定させる。
+
+    issue #37: 題材レベルのcooldown一致だけでは、題材(具体的な事実・数値)が
+    違ってもタイトルの型（固有名詞+問題語+疑問形/煽り構文）が繰り返される
+    使い回しを検出できない。一致ありなら判定結果の辞書を返す。通信・応答
+    不良時は誤検出より見逃しを優先しNoneを返す（生成を止めない）。
+    """
+    candidate_title = candidate_title.strip()
+    candidates = [t.strip()[:text_limit] for t in recent_titles if t.strip()][-limit:]
+    if not candidate_title or not candidates:
+        return None
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(candidates))
+    prompt = _TITLE_PATTERN_DUPLICATE_PROMPT.format(
+        candidate=candidate_title[:text_limit], numbered=numbered
+    )
+    try:
+        data = _extract_json(_dispatch(prompt, timeout=60))
+    except (
+        ValueError,
+        TimeoutError,
+        subprocess.TimeoutExpired,
+        RuntimeError,
+        OSError,
+    ):
+        return None
+    if not isinstance(data, dict) or not data.get("duplicate"):
+        return None
+    idx = data.get("matched_index")
+    matched = (
+        candidates[idx - 1]
+        if isinstance(idx, int)
+        and not isinstance(idx, bool)
+        and 1 <= idx <= len(candidates)
+        else candidates[0]
+    )
+    confidence = data.get("confidence")
+    score = (
+        confidence
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+        else 1.0
+    )
+    axes = data.get("overlapping_axes")
+    overlapping_axes = (
+        [a for a in axes if isinstance(a, str)] if isinstance(axes, list) else []
+    )
+    reason = data.get("reason")
+    return {
+        "matched_title": matched,
+        "confidence": max(0.0, min(1.0, float(score))),
+        "overlapping_axes": overlapping_axes,
+        "reason": str(reason)[:300] if isinstance(reason, str) else "",
+    }
+
+
 def _validate(script: dict) -> dict:
     for k in REQUIRED_KEYS:
         if k not in script:

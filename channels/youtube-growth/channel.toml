@@ -66,3 +66,4 @@ research = true
 factcheck = true
 plan = true
 performance_feedback = true
+title_pattern_check = true

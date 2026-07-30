@@ -199,6 +199,42 @@ def _credits(spec: ChannelSpec, corner) -> str:
     return "\n\n" + rendered.lstrip()
 
 
+def _apply_title_pattern_check(
+    spec: ChannelSpec,
+    script: dict,
+    recent_titles_for_prompt: list[str],
+    cooldown_days: int,
+) -> None:
+    """生成済みタイトルの修辞パターン重複を検出し、scriptへ記録する(issue #37)。
+
+    題材レベルのcooldownだけでは、題材(具体的な事実・数値)が違っても
+    タイトルの型（固有名詞+問題語+疑問形/煽り構文）が繰り返される使い回し
+    を検出できない。まずは検出・記録に留め、公開判断は変えない
+    （数値効果を推測せず、後日のCTR比較へつなげる）。
+    """
+    if not (spec.pipeline_get("title_pattern_check", False) and cooldown_days > 0):
+        return
+    try:
+        title_pattern_match = ai_text.check_title_pattern_duplicate(
+            str(script.get("title", "")), recent_titles_for_prompt
+        )
+    except Exception as exc:  # noqa: BLE001 判定不調で生成全体を止めない
+        _log(f"タイトル修辞パターン判定に失敗→記録なしで継続: {str(exc)[:160]}")
+        title_pattern_match = None
+    script["_title_pattern_check"] = {
+        "checked": True,
+        "match": title_pattern_match,
+    }
+    if title_pattern_match is not None:
+        axes = "/".join(title_pattern_match["overlapping_axes"]) or "型"
+        _log(
+            "タイトル修辞パターン重複の疑い: "
+            f"「{script.get('title', '')}」≈「{title_pattern_match['matched_title']}」"
+            f"（{axes}／確信度{title_pattern_match['confidence']:.2f}）: "
+            f"{title_pattern_match['reason']}"
+        )
+
+
 def _run_once(
     spec: ChannelSpec,
     day: str,
@@ -323,13 +359,17 @@ def _run_once(
             mode = "キュー予約" if do_upload else "dry-run照合"
             _log(f"題材cooldown: {cooldown_days}日 / {mode}「{selected_topic}」")
 
+    recent_titles_for_prompt = history.recent_titles(spec, cooldown_days=cooldown_days)
     script = ai_text.generate(
         spec,
         corner,
         day,
-        history.recent_titles(spec, cooldown_days=cooldown_days),
+        recent_titles_for_prompt,
         topic_guard=reserve_selected_topic,
         performance_decision=performance_decision,
+    )
+    _apply_title_pattern_check(
+        spec, script, recent_titles_for_prompt, cooldown_days
     )
     from . import youtube_review
 

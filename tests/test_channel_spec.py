@@ -122,6 +122,7 @@ voice = "narrator"
         self.assertTrue(spec.pipeline_get("factcheck"))
         self.assertTrue(spec.pipeline_get("plan"))
         self.assertTrue(spec.pipeline_get("performance_feedback"))
+        self.assertTrue(spec.pipeline_get("title_pattern_check"))
         self.assertEqual(
             spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS),
             30,
