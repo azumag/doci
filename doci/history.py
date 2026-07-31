@@ -484,7 +484,9 @@ def topic_match_similarity(
     theme_supported = topic_score >= 0.55 or angle_score >= 0.55
     if theme_score >= 0.55 and theme_supported:
         score = max(score, theme_score)
-    if angle_score >= 0.55 and (not current_theme or not previous_theme or theme_supported):
+    # angleはLLMが似た定型文を返しやすいため、本文またはcanonical_themeの
+    # 裏付けなしに単独で重複扱いへ昇格させない。
+    if angle_score >= 0.55 and (topic_score >= 0.55 or theme_score >= 0.55):
         score = max(score, angle_score)
     return score
 
