@@ -27,13 +27,17 @@ class InstagramError(RuntimeError):
     pass
 
 
+class InstagramUploadPreflightError(InstagramError):
+    """動画投稿を開始する前の資格情報・ローカル検証エラー。"""
+
+
 def _host_video(video_path: Path) -> str:
     """動画を公開ホストに上げて取得URLを返す。【未実装】公開ホスト方針が未定。
 
     決まったらここを実装する（例: Cloudflare R2 公開バケットへ put して公開URLを返す）。
     INSTAGRAM_HOST_BASE 等の設定もそれに合わせて使う。
     """
-    raise InstagramError(
+    raise InstagramUploadPreflightError(
         "Instagram の公開ホストが未実装です（IGは後回し）。公開ホスト方針(R2等)を決めて "
         "_host_video を実装してください。"
     )
@@ -64,8 +68,17 @@ def upload(
     uid = config.INSTAGRAM_USER_ID if user_id is None else user_id
     token = config.INSTAGRAM_ACCESS_TOKEN if access_token is None else access_token
     if not (uid and token):
-        raise InstagramError("INSTAGRAM_USER_ID / INSTAGRAM_ACCESS_TOKEN 未設定")
-    video_url = _host_video(Path(video_path))  # ← 未実装で停止（後回し）
+        raise InstagramUploadPreflightError(
+            "INSTAGRAM_USER_ID / INSTAGRAM_ACCESS_TOKEN 未設定"
+        )
+    video_path = Path(video_path)
+    try:
+        video_path.stat()
+    except OSError as exc:
+        raise InstagramUploadPreflightError(
+            f"動画ファイルを読み込めません: {video_path}"
+        ) from exc
+    video_url = _host_video(video_path)  # ← 未実装で停止（後回し）
 
     caption = (f"{title}\n\n{description}").strip()[:2200]
     # 1) メディアコンテナ作成（公開URLから取得）

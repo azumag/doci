@@ -21,6 +21,6 @@
 
 1. After implementation and local validation, request an independent Sol review and address actionable findings.
 2. Push a ready-for-review pull request so `.github/workflows/claude-review.yml` runs.
-3. Use the repository-side `Claude PR Review` Action with the explicit model `claude-opus-5`.
+3. Use the repository-side `Claude PR Review` Action with the explicit model `claude-fable-5`.
 4. Do not substitute a local Claude Code CLI review for the repository-side Action.
 5. Inspect the Action result and all required checks, address actionable findings, push fixes, and wait for the Action to review the updated head again before reporting completion.

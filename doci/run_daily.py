@@ -985,6 +985,11 @@ def main() -> int:
         action="store_true",
         help="全チャンネルのYouTube確認Issueだけを取得・反映",
     )
+    target.add_argument(
+        "--recover-publishing",
+        metavar="RESERVATION_ID",
+        help="外部結果を運用者が確認済みのpublishing予約を終端化",
+    )
     ap.add_argument(
         "--corner",
         help="指定が無ければチャンネル履歴の前回と交互",
@@ -992,6 +997,21 @@ def main() -> int:
     ap.add_argument("--date", default=_date.today().isoformat())
     ap.add_argument("--no-upload", action="store_true", help="生成のみ（アップロードしない）")
     ap.add_argument("--video-scenes", type=int, default=config.MINIMAX_VIDEO_SCENES)
+    ap.add_argument(
+        "--recovery-status",
+        choices=("cancelled", "published"),
+        default="cancelled",
+        help="publishing復旧の終端状態（--recover-publishing専用）",
+    )
+    ap.add_argument(
+        "--recovery-video-id",
+        help="published復旧時に外部で確認した動画ID",
+    )
+    ap.add_argument(
+        "--recovery-reason",
+        default="運用者が外部投稿の結果を確認し、未完了予約を復旧",
+        help="publishing復旧の監査理由",
+    )
     args = ap.parse_args()
     if args.list_channels:
         print(json.dumps(_list_channels(), ensure_ascii=False, indent=2))
@@ -1000,6 +1020,19 @@ def main() -> int:
         result, exit_code = _reconcile_all_youtube_reviews()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return exit_code
+    if args.recover_publishing:
+        try:
+            result = topic_ledger.recover_publishing(
+                args.recover_publishing,
+                status=args.recovery_status,
+                video_id=args.recovery_video_id,
+                reason=args.recovery_reason,
+            )
+        except Exception as exc:
+            _log(f"publishing復旧失敗: {exc}")
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.all_channels:
         if args.corner:
             ap.error("--corner は --all-channels と同時に指定できません")

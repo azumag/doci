@@ -213,6 +213,21 @@ token = "secrets/sample/youtube_token.json"
 ファイルロック下で原子的に予約する。`--no-upload` と `PUBLISH_DRY_RUN=1` は枠を消費せず、
 制作失敗時は解放、投稿成功または結果不明時は安全側に保持する。日付をまたいだ
 `queued`／`publishing`も結果確定まで次の枠を使わない。
+プロセス停止などで結果不明の `publishing` が残った場合は、自動解除せず、外部側の結果を
+運用者が確認してから次で明示的に終端化する。未投稿を確認した場合は `cancelled`、投稿済み
+動画を確認した場合は `published` と動画IDを指定する。共通台帳と該当チャネル履歴を同時に
+復旧し、操作理由を記録する。
+
+```bash
+# 外部投稿が発生していないことを確認した後
+python -m doci.run_daily --recover-publishing <reservation-id> \
+  --recovery-status cancelled --recovery-reason "YouTube Studioで投稿なしを確認"
+
+# 投稿済み動画を確認した場合
+python -m doci.run_daily --recover-publishing <reservation-id> \
+  --recovery-status published --recovery-video-id <video-id> \
+  --recovery-reason "YouTube Studioで投稿済みを確認"
+```
 `pipeline.performance_feedback = true` は投稿履歴の動画をYouTube Data APIで
 read-only同期し、十分な比較標本がある場合だけ相対的な形式仮説を次回promptへ渡す。
 retention等のAnalytics指標には、OAuthクライアントのGoogle Cloud projectで

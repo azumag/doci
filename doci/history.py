@@ -159,10 +159,10 @@ _CONCEPT_PATTERNS = {
     ),
     "invisible_hand": (r"見えざる手", r"見えない手", r"アダムスミス"),
     "growth_worship": (r"成長", r"gdp", r"列車", r"エンジン", r"神様", r"宗教"),
-    "wealth_inequality": (r"格差", r"富の集中", r"上位1"),
+    "wealth_inequality": (r"富の集中", r"上位1"),
     "inequality": (r"格差", r"不平等", r"貧富", r"階級差"),
     "tech_giant": (r"テック巨人", r"テック企業"),
-    "more_desire": (r"もっと欲しい", r"欲望", r"衝動"),
+    "more_desire": (r"もっと欲しい", r"衝動"),
     "consumption_desire": (r"消費欲", r"消費社会", r"欲望", r"贅沢", r"広告"),
 }
 _STRONG_TOPIC_CONCEPTS = frozenset(
@@ -364,10 +364,7 @@ def topic_similarity(left: str, right: str) -> float:
     if left_concepts and right_concepts:
         concept_overlap = len(left_concepts & right_concepts)
         shared_concepts = left_concepts & right_concepts
-        if concept_overlap and (
-            len(left_concepts | right_concepts) >= 2
-            or shared_concepts & _STRONG_TOPIC_CONCEPTS
-        ):
+        if concept_overlap and len(left_concepts | right_concepts) >= 2:
             # 共通する一般概念が1つあるだけで別題材を止めない。集合全体に占める
             # 一致率（Jaccard）で、同じ主題構造のときだけ強く判定する。
             concept_score = concept_overlap / len(left_concepts | right_concepts)
@@ -392,8 +389,16 @@ def _row_topic(row: dict) -> str:
     return f"{title} {description}".strip()
 
 
-def _row_topic_metadata(row: dict, topic: str | None = None) -> dict[str, str]:
+def _row_topic_metadata(
+    row: dict,
+    topic: str | None = None,
+    *,
+    cache: dict[int, dict[str, str]] | None = None,
+) -> dict[str, str]:
     """現行行・旧workdirのresearchから題材メタデータを復元する。"""
+    cache_key = id(row)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
     resolved_topic = topic or _row_topic(row)
     raw: dict[str, object] = {}
     nested = row.get("topic_metadata")
@@ -427,7 +432,10 @@ def _row_topic_metadata(row: dict, topic: str | None = None) -> dict[str, str]:
                         raw[target_key] = research[source_key]
         except (OSError, ValueError, TypeError):
             pass
-    return topic_metadata(resolved_topic, raw)
+    resolved = topic_metadata(resolved_topic, raw)
+    if cache is not None:
+        cache[cache_key] = resolved
+    return resolved
 
 
 def topic_match_similarity(
@@ -435,10 +443,16 @@ def topic_match_similarity(
     metadata: Mapping[str, object] | None,
     previous_topic: str,
     previous_row: dict,
+    *,
+    metadata_cache: dict[int, dict[str, str]] | None = None,
 ) -> float:
     """題材本文と大テーマの両方を使い、言い換えを見逃さない。"""
     current = topic_metadata(topic, metadata)
-    previous = _row_topic_metadata(previous_row, previous_topic)
+    previous = _row_topic_metadata(
+        previous_row,
+        previous_topic,
+        cache=metadata_cache,
+    )
     topic_score = topic_similarity(topic, previous_topic)
     score = topic_score
     current_theme = current["canonical_theme"]
@@ -520,6 +534,8 @@ def _continuation_allowed(
     previous_row: dict,
     previous_topic: str,
     similarity_threshold: float,
+    *,
+    metadata_cache: dict[int, dict[str, str]] | None = None,
 ) -> bool:
     """明示された続編だけを、元題材との新規性が確認できる場合に許可する。"""
     current = topic_metadata(topic, metadata)
@@ -542,7 +558,11 @@ def _continuation_allowed(
         return False
     if len(current["parent_topic"]) < 4 or len(current["novelty_reason"]) < 12:
         return False
-    previous = _row_topic_metadata(previous_row, previous_topic)
+    previous = _row_topic_metadata(
+        previous_row,
+        previous_topic,
+        cache=metadata_cache,
+    )
     if novelty_type == "opposing_view":
         if (
             current["novelty_axis"] != "stance"
@@ -589,6 +609,8 @@ def _semantic_match_allows_continuation(
     match: TopicMatch,
     candidates: list[tuple[dict, str, str]],
     similarity_threshold: float,
+    *,
+    metadata_cache: dict[int, dict[str, str]] | None = None,
 ) -> bool:
     """意味判定の一致先が明示的な続編の親なら、重複扱いにしない。"""
     matched_key = _normalise_topic(match.topic)
@@ -615,6 +637,7 @@ def _semantic_match_allows_continuation(
             row,
             previous_topic,
             similarity_threshold,
+            metadata_cache=metadata_cache,
         )
         for row, previous_topic, _source in matching
     )
@@ -740,12 +763,14 @@ def reserve_topic(
                 raw_metadata["parent_topic_id"] = resolved_parent_id
             metadata = {**metadata, "parent_topic_id": resolved_parent_id}
         best: TopicMatch | None = None
+        metadata_cache: dict[int, dict[str, str]] = {}
         for row, previous_topic, source in candidates:
             similarity = topic_match_similarity(
                 topic,
                 metadata,
                 previous_topic,
                 row,
+                metadata_cache=metadata_cache,
             )
             if similarity < similarity_threshold:
                 continue
@@ -755,6 +780,7 @@ def reserve_topic(
                 row,
                 previous_topic,
                 similarity_threshold,
+                metadata_cache=metadata_cache,
             ):
                 continue
             candidate = TopicMatch(
@@ -781,6 +807,7 @@ def reserve_topic(
                 semantic_match,
                 candidates,
                 similarity_threshold,
+                metadata_cache=metadata_cache,
             ):
                 best = semantic_match
         if best is not None:
@@ -839,6 +866,7 @@ def cancel_topic(
     reservation_id: str,
     reason: str,
     metadata: Mapping[str, object] | None = None,
+    topic_ledger_reservation_id: str | None = None,
 ) -> None:
     """制作失敗または投稿なしの予約を無効化する状態遷移を追記する。"""
     record(
@@ -852,6 +880,7 @@ def cancel_topic(
             "topic_metadata": topic_metadata(topic, metadata),
             **topic_metadata(topic, metadata),
             "reservation_id": reservation_id,
+            "topic_ledger_reservation_id": topic_ledger_reservation_id,
             "cancel_reason": reason[:500],
         },
     )

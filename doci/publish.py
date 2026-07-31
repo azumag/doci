@@ -193,18 +193,28 @@ def publish(
                 )
             )
         except Exception as e:  # noqa: BLE001 送信後の結果不明を安全側へ倒す
+            preflight_error = False
             if platform == "youtube":
                 from . import youtube
 
-                if isinstance(e, youtube.UploadPreflightError):
-                    results.append(
-                        PublishResult(
-                            platform,
-                            "error",
-                            detail=f"投稿前検証失敗: {str(e)[:180]}",
-                        )
+                preflight_error = isinstance(e, youtube.UploadPreflightError)
+            elif platform == "tiktok":
+                from . import tiktok
+
+                preflight_error = isinstance(e, tiktok.TikTokUploadPreflightError)
+            elif platform == "instagram":
+                from . import instagram
+
+                preflight_error = isinstance(e, instagram.InstagramUploadPreflightError)
+            if preflight_error:
+                results.append(
+                    PublishResult(
+                        platform,
+                        "error",
+                        detail=f"投稿前検証失敗: {str(e)[:180]}",
                     )
-                    continue
+                )
+                continue
             results.append(
                 PublishResult(
                     platform,

@@ -474,6 +474,13 @@ class TopicCooldownTest(unittest.TestCase):
             ),
             0.55,
         )
+        self.assertLess(
+            history.topic_similarity(
+                "日本の教育格差はなぜ広がるのか",
+                "アメリカの男女賃金格差の歴史",
+            ),
+            0.55,
+        )
 
     def test_rotation_ignores_queue_skip_and_cancel_events(self) -> None:
         self._append(

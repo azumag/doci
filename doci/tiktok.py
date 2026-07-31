@@ -34,6 +34,10 @@ class TikTokError(RuntimeError):
     pass
 
 
+class TikTokUploadPreflightError(TikTokError):
+    """動画投稿を開始する前の資格情報・ローカル検証エラー。"""
+
+
 def _post_form(url: str, fields: dict) -> dict:
     data = urllib.parse.urlencode(fields).encode()
     req = urllib.request.Request(
@@ -168,10 +172,18 @@ def upload(
     privacy: str | None = None,
 ) -> dict:
     """Direct Post で動画を投稿。{publish_id, status} を返す。"""
-    token = _access_token(token_file)
+    try:
+        token = _access_token(token_file)
+    except (TikTokError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise TikTokUploadPreflightError(str(exc)) from exc
     privacy = privacy or config.TIKTOK_PRIVACY
     video_path = Path(video_path)
-    size = video_path.stat().st_size
+    try:
+        size = video_path.stat().st_size
+    except OSError as exc:
+        raise TikTokUploadPreflightError(
+            f"動画ファイルを読み込めません: {video_path}"
+        ) from exc
     # ≤64MBは1チャンク。超過は ~32MB 分割（各 5–64MB 制約を満たす）。
     if size <= 64 * _MB:
         chunk_size, total = size, 1

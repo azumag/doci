@@ -422,6 +422,106 @@ class TopicLedgerTest(unittest.TestCase):
                 now=self.now + timedelta(days=31),
             )
 
+    def _prepare_publishing_reservation(
+        self, topic: str
+    ) -> tuple[SimpleNamespace, str, str]:
+        local_spec = SimpleNamespace(
+            id="alpha",
+            history_file=self.output / "alpha" / "history.jsonl",
+        )
+        ledger_reservation = topic_ledger.reserve(
+            self.alpha,
+            "video",
+            topic,
+            cooldown_days=30,
+            now=self.now,
+        )
+        assert ledger_reservation is not None
+        local_reservation = history.reserve_topic(
+            local_spec,
+            "video",
+            topic,
+            cooldown_days=30,
+            now=self.now,
+            topic_ledger_reservation_id=ledger_reservation,
+        )
+        assert local_reservation is not None
+        history.mark_topic_publishing(
+            local_spec,
+            "video",
+            topic,
+            local_reservation,
+            topic_ledger_reservation_id=ledger_reservation,
+        )
+        topic_ledger.mark_publishing(
+            self.alpha,
+            "video",
+            topic,
+            ledger_reservation,
+        )
+        return local_spec, ledger_reservation, local_reservation
+
+    def test_recover_publishing_cancelled_updates_both_ledgers(self) -> None:
+        topic = "外部未投稿を確認して再利用できる題材"
+        local_spec, ledger_reservation, local_reservation = (
+            self._prepare_publishing_reservation(topic)
+        )
+
+        with patch.object(
+            topic_ledger.channel,
+            "load",
+            return_value=local_spec,
+        ):
+            result = topic_ledger.recover_publishing(
+                ledger_reservation,
+                status="cancelled",
+                reason="YouTube Studioで投稿なしを確認",
+            )
+
+        self.assertTrue(result["local_history_recovered"])
+        self.assertEqual(result["status"], "cancelled")
+        ledger_rows = [
+            json.loads(line)
+            for line in topic_ledger.ledger_path().read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(ledger_rows[-1]["status"], "cancelled")
+        local_rows = history._read_path(local_spec.history_file)
+        self.assertEqual(local_rows[-1]["status"], "cancelled")
+        self.assertEqual(local_rows[-1]["reservation_id"], local_reservation)
+        self.assertEqual(
+            local_rows[-1]["topic_ledger_reservation_id"], ledger_reservation
+        )
+
+    def test_recover_publishing_published_records_confirmed_video(self) -> None:
+        topic = "外部投稿済みを確認して題材を確定する復旧"
+        local_spec, ledger_reservation, _local_reservation = (
+            self._prepare_publishing_reservation(topic)
+        )
+
+        with patch.object(
+            topic_ledger.channel,
+            "load",
+            return_value=local_spec,
+        ):
+            result = topic_ledger.recover_publishing(
+                ledger_reservation,
+                status="published",
+                video_id="confirmed-video",
+                reason="YouTube Studioで投稿済みを確認",
+            )
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["video_id"], "confirmed-video")
+        ledger_rows = [
+            json.loads(line)
+            for line in topic_ledger.ledger_path().read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(ledger_rows[-1]["status"], "published")
+        self.assertEqual(ledger_rows[-1]["video_id"], "confirmed-video")
+        local_rows = history._read_path(local_spec.history_file)
+        self.assertEqual(local_rows[-1]["status"], "published")
+        self.assertEqual(local_rows[-1]["video_id"], "confirmed-video")
+
     def test_invalid_terminal_row_does_not_hide_publishing(self) -> None:
         topic_ledger.ledger_path().write_text(
             "\n".join(

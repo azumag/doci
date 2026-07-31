@@ -380,7 +380,10 @@ def _lexical_match(
     topic_data: Mapping[str, object],
     candidates: list[LedgerCandidate],
     similarity_threshold: float,
+    *,
+    metadata_cache: dict[int, dict[str, str]] | None = None,
 ) -> history.TopicMatch | None:
+    cache = metadata_cache if metadata_cache is not None else {}
     best: history.TopicMatch | None = None
     for candidate in candidates:
         similarity = history.topic_match_similarity(
@@ -388,6 +391,7 @@ def _lexical_match(
             topic_data,
             candidate.topic,
             candidate.row,
+            metadata_cache=cache,
         )
         if similarity < similarity_threshold:
             continue
@@ -397,6 +401,7 @@ def _lexical_match(
             candidate.row,
             candidate.topic,
             similarity_threshold,
+            metadata_cache=cache,
         ):
             continue
         match = history.TopicMatch(
@@ -428,6 +433,8 @@ def _semantic_match_is_blocking(
     match: history.TopicMatch,
     candidates: list[LedgerCandidate],
     similarity_threshold: float,
+    *,
+    metadata_cache: dict[int, dict[str, str]] | None = None,
 ) -> bool:
     matched_key = history._normalise_topic(match.topic)
     matching = [
@@ -456,6 +463,7 @@ def _semantic_match_is_blocking(
         match,
         [(candidate.row, candidate.topic, candidate.source) for candidate in matching],
         similarity_threshold,
+        metadata_cache=metadata_cache,
     )
 
 
@@ -542,6 +550,7 @@ def reserve(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        metadata_cache: dict[int, dict[str, str]] = {}
         def read_and_match(*, advance_clock: bool = False) -> tuple[
             list[dict], list[LedgerCandidate], dict[str, str], history.TopicMatch | None
         ]:
@@ -590,6 +599,7 @@ def reserve(
                 current_topic_data,
                 candidates,
                 similarity_threshold,
+                metadata_cache=metadata_cache,
             )
             return rows, candidates, current_topic_data, best
 
@@ -631,6 +641,7 @@ def reserve(
                     semantic_match,
                     candidates,
                     similarity_threshold,
+                    metadata_cache=metadata_cache,
                 ):
                     best = semantic_match
                 break
@@ -785,3 +796,118 @@ def cancel(
         metadata=metadata,
         cancel_reason=reason,
     )
+
+
+def recover_publishing(
+    reservation_id: str,
+    *,
+    status: str = "cancelled",
+    video_id: str | None = None,
+    reason: str = "運用者が外部投稿の結果を確認し、未完了予約を復旧",
+) -> dict[str, object]:
+    """プロセス消失後のpublishing予約を、運用者確認付きで終端化する。
+
+    自動で取消して重複投稿を招かないよう、通常runからは呼ばない。運用者が
+    YouTube等の外部状態を確認した後、未投稿ならcancelled、投稿済みなら
+    video_id付きpublishedを明示して実行する。
+    """
+    reservation_id = reservation_id.strip()
+    if not reservation_id:
+        raise ValueError("reservation_idが空です")
+    if status not in {"cancelled", "published"}:
+        raise ValueError("statusはcancelledまたはpublishedです")
+    if status == "published" and not video_id:
+        raise ValueError("published復旧にはvideo_idが必要です")
+    current = datetime.now(timezone.utc)
+    path = ledger_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    local_recovered = False
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        rows = _read_rows(path)
+        latest = history._latest_reservation_rows(rows, current)
+        active = latest.get(reservation_id)
+        if active is None:
+            raise ValueError(f"共通題材台帳に予約がありません: {reservation_id}")
+        if str(active.get("status") or "") not in {"publishing", status}:
+            raise ValueError(
+                f"publishing以外の予約は復旧できません: {active.get('status')}"
+            )
+        channel_id = str(active.get("channel") or "")
+        corner = str(active.get("corner") or "")
+        topic = history._row_topic(active)
+        if not topic:
+            raise ValueError("復旧対象の題材が空です")
+        metadata = history._row_topic_metadata(active, topic)
+
+        spec = channel.load(channel_id)
+        local_rows = history._read_path(spec.history_file)
+        local_active: dict | None = None
+        for row in reversed(local_rows):
+            if str(row.get("topic_ledger_reservation_id") or "") != reservation_id:
+                continue
+            if str(row.get("status") or "") == "publishing":
+                local_active = row
+                break
+        if local_active is not None:
+            local_reservation_id = str(local_active.get("reservation_id") or "")
+            local_topic = history._row_topic(local_active) or topic
+            local_metadata = history._row_topic_metadata(local_active, local_topic)
+            if status == "cancelled":
+                history.cancel_topic(
+                    spec,
+                    corner,
+                    local_topic,
+                    local_reservation_id or reservation_id,
+                    reason,
+                    metadata=local_metadata,
+                    topic_ledger_reservation_id=reservation_id,
+                )
+            else:
+                history.record(
+                    spec,
+                    corner,
+                    str(local_active.get("title") or ""),
+                    video_id,
+                    extra={
+                        "status": "published",
+                        "topic": local_topic,
+                        "topic_concepts": history.topic_concepts(local_topic),
+                        "topic_metadata": local_metadata,
+                        **local_metadata,
+                        "reservation_id": local_reservation_id or reservation_id,
+                        "topic_ledger_reservation_id": reservation_id,
+                        "recovery_reason": reason[:500],
+                    },
+                )
+            local_recovered = True
+
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "channel": channel_id,
+            "corner": corner,
+            "topic": topic,
+            "status": status,
+            "reservation_id": reservation_id,
+            "video_id": video_id if status == "published" else None,
+            "topic_metadata": metadata,
+            **metadata,
+            "recovery_reason": reason[:500],
+        }
+        if active.get("daily_upload_day"):
+            row["daily_upload_day"] = active["daily_upload_day"]
+        with path.open("a", encoding="utf-8") as file:
+            _append(file, row)
+
+    return {
+        "channel": channel_id,
+        "corner": corner,
+        "topic": topic,
+        "reservation_id": reservation_id,
+        "status": status,
+        "video_id": video_id if status == "published" else None,
+        "local_history_recovered": local_recovered,
+    }
