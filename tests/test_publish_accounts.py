@@ -467,6 +467,37 @@ class PublishAccountsTest(unittest.TestCase):
             ig_upload.call_args.kwargs["access_token"], "secret-value"
         )
 
+    def test_tiktok_terminal_statuses_are_not_all_success(self) -> None:
+        tik_token = self.root / "tiktok-status-token.json"
+        settings = PublishSpec(
+            platforms=("tiktok",),
+            tiktok=TikTokPublishSpec(token=tik_token, privacy="SELF_ONLY"),
+        )
+        cases = (
+            ("PUBLISH_COMPLETE", "ok"),
+            ("FAILED", "error"),
+            ("PROCESSING", "unknown"),
+            ("", "unknown"),
+        )
+        for api_status, expected in cases:
+            with self.subTest(api_status=api_status):
+                with patch.object(
+                    tiktok,
+                    "upload",
+                    return_value={"publish_id": "tik-id", "status": api_status},
+                ):
+                    result = publish._do_upload(
+                        "tiktok",
+                        self.root / "video.mp4",
+                        "Title",
+                        "Description",
+                        [],
+                        self.route,
+                        settings,
+                    )
+                self.assertEqual(result.status, expected)
+                self.assertEqual(result.detail, api_status)
+
     def test_youtube_auth_cli_uses_selected_channel_paths(self) -> None:
         settings = self._youtube_spec("alpha")
         fake_spec = SimpleNamespace(publish=settings)

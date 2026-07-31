@@ -130,7 +130,21 @@ def _do_upload(
             token_file=settings.token,
             privacy=settings.privacy,
         )
-        return PublishResult("tiktok", "ok", id=r.get("publish_id"), detail=r.get("status", ""))
+        status = str(r.get("status") or "")
+        if status == "PUBLISH_COMPLETE":
+            result_status = "ok"
+        elif status == "FAILED":
+            result_status = "error"
+        else:
+            # PROCESSING、空値、未知の状態は、TikTok側の公開結果を
+            # 確定できないため再投稿せず手動確認へ回す。
+            result_status = "unknown"
+        return PublishResult(
+            "tiktok",
+            result_status,
+            id=r.get("publish_id"),
+            detail=status,
+        )
     if platform == "instagram":
         from . import instagram
 

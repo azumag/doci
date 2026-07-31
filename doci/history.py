@@ -301,7 +301,9 @@ def topic_metadata(
         canonical_theme = ""
     novelty_type = text("novelty_type", 40)
     if novelty_type not in {"new", *_CONTINUATION_TYPES}:
-        novelty_type = "new"
+        # 欠落・不正な構造化出力を新規題材とみなすと、同じ題材を
+        # 「新規」として通してしまう。未知のまま保存し、続編許可にも使わない。
+        novelty_type = "unknown"
     return {
         "canonical_theme": canonical_theme,
         "angle": text("angle", 500),
@@ -470,17 +472,9 @@ def topic_match_similarity(
         and not _is_generic_descriptor(previous_angle)
     ):
         angle_score = topic_similarity(current_angle, previous_angle)
-    # canonical_themeは候補抽出の補助であり、異なる本文を単独で止めない。
-    # 本文・具体的な切り口・強い概念のいずれかが同じときだけ大テーマを
-    # 最終的な重複スコアへ昇格させ、同じ分野名を誤って共有した行を許可する。
-    shared_concepts = set(topic_concepts(topic)) & set(
-        topic_concepts(previous_topic)
-    )
-    theme_supported = (
-        topic_score >= 0.55
-        or angle_score >= 0.55
-        or bool(shared_concepts & _STRONG_TOPIC_CONCEPTS)
-    )
+    # 同じ分野の強い概念が1語あるだけでは、異なる対象・切り口を
+    # canonical_themeの重複として昇格させない。
+    theme_supported = topic_score >= 0.55 or angle_score >= 0.55
     if theme_score >= 0.55 and theme_supported:
         score = max(score, theme_score)
     if angle_score >= 0.55 and (not current_theme or not previous_theme or theme_supported):

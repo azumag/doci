@@ -46,6 +46,19 @@ def _real_publish_requested(do_upload: bool) -> bool:
     return bool(do_upload and not config.PUBLISH_DRY_RUN)
 
 
+def _publish_result_summary(results: list) -> list[dict[str, object]]:
+    """外部投稿結果を、履歴・復旧用にboundedな値へ写す。"""
+    return [
+        {
+            "platform": str(result.platform)[:40],
+            "status": str(result.status)[:40],
+            "id": str(result.id)[:200] if result.id else None,
+            "detail": str(result.detail or "")[:240],
+        }
+        for result in results
+    ][:12]
+
+
 def _finalize_performance_application(
     spec: ChannelSpec,
     corner_key: str,
@@ -672,6 +685,18 @@ def _run_once(
             thumbnail=thumbnail_path,
             youtube_privacy=youtube_privacy,
         )
+        publish_summary = _publish_result_summary(pub_results)
+        if topic_ledger_reservation_id:
+            # どのプラットフォームまで外部へ到達したかを、結果不明の間も
+            # 共通台帳へ残す。外部再確認時の重複投稿防止に使う。
+            topic_ledger.mark_publishing(
+                spec,
+                corner.key,
+                selected_topic,
+                topic_ledger_reservation_id,
+                metadata=selected_topic_metadata,
+                publish_results=publish_summary,
+            )
         for r in pub_results:
             _log(f"  {r.platform}: {r.status}{(' ' + (r.url or r.detail)) if (r.url or r.detail) else ''}")
             if r.platform == "youtube" and r.status == "ok":
@@ -730,12 +755,13 @@ def _run_once(
     has_published = any(result.status == "ok" for result in pub_results)
     has_unknown = any(result.status == "unknown" for result in pub_results)
     final_status = (
-        "published"
-        if has_published
-        else "publishing"
+        "publishing"
         if has_unknown
+        else "published"
+        if has_published
         else "generated"
     )
+    publish_summary = _publish_result_summary(pub_results)
     if topic_ledger_reservation_id and final_status != "publishing":
         # 外部投稿成功後の履歴詳細保存より先に確定する。後段で落ちても
         # 共通台帳は公開済み題材を再利用不可として保持する。
@@ -747,6 +773,7 @@ def _run_once(
             status=final_status,
             metadata=selected_topic_metadata,
             video_id=video_id,
+            publish_results=publish_summary,
         )
         reservation_state["topic_stage"] = final_status
     history.record(
@@ -775,7 +802,7 @@ def _run_once(
             "duration_sec": round(tts.duration, 1),
             "tier": route.tier,
             "platforms": route.platforms,
-            "publish": [{"platform": r.platform, "status": r.status, "id": r.id} for r in pub_results],
+            "publish": publish_summary,
             "youtube_privacy": youtube_privacy if video_id else None,
             "youtube_theme_review": (
                 theme_assessment.to_dict() if theme_assessment is not None else None

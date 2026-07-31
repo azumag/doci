@@ -289,7 +289,9 @@ def _daily_upload_keys(
         if timestamp is None:
             continue
         reservation_day = str(row.get("daily_upload_day") or "").strip()
-        if not reservation_day and reservation_days is not None:
+        # 新しいpublished行は公開時点の日付を持つ。旧形式のpublished行も
+        # 予約日の引継ぎではなく終端行の時刻へフォールバックさせる。
+        if not reservation_day and reservation_days is not None and status != "published":
             reservation_day = next(
                 (
                     reservation_days[correlation_id]
@@ -703,6 +705,7 @@ def _append_event(
     metadata: Mapping[str, object] | None = None,
     video_id: str | None = None,
     cancel_reason: str | None = None,
+    publish_results: list[Mapping[str, object]] | None = None,
 ) -> None:
     if not reservation_id:
         return
@@ -713,8 +716,9 @@ def _append_event(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        event_ts = datetime.now(timezone.utc)
         row = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": event_ts.isoformat(),
             "channel": spec.id,
             "corner": corner,
             "topic": topic,
@@ -724,6 +728,21 @@ def _append_event(
             "topic_metadata": topic_data,
             **topic_data,
         }
+        if status == "published":
+            # 予約日ではなく、実際に終端化した時点のJST日を日次枠へ
+            # 計上する。23:59予約→00:01公開を前日の枠へ戻さない。
+            row["daily_upload_day"] = event_ts.astimezone(_JST).date().isoformat()
+        if publish_results is not None:
+            row["publish_results"] = [
+                {
+                    "platform": str(result.get("platform") or "")[:40],
+                    "status": str(result.get("status") or "")[:40],
+                    "id": str(result.get("id") or "")[:200] or None,
+                    "detail": str(result.get("detail") or "")[:240],
+                }
+                for result in publish_results
+                if isinstance(result, Mapping)
+            ][:12]
         if cancel_reason:
             row["cancel_reason"] = cancel_reason[:500]
         with path.open("a", encoding="utf-8") as file:
@@ -740,6 +759,7 @@ def mark_publishing(
     reservation_id: str,
     *,
     metadata: Mapping[str, object] | None = None,
+    publish_results: list[Mapping[str, object]] | None = None,
 ) -> None:
     """外部投稿開始前に、結果不明でも題材をfail-closedにする。"""
     _append_event(
@@ -749,6 +769,7 @@ def mark_publishing(
         reservation_id,
         "publishing",
         metadata=metadata,
+        publish_results=publish_results,
     )
 
 
@@ -761,6 +782,7 @@ def complete(
     status: str,
     metadata: Mapping[str, object] | None = None,
     video_id: str | None = None,
+    publish_results: list[Mapping[str, object]] | None = None,
 ) -> None:
     """予約を最終状態へ進める。generatedは次回の重複候補にしない。"""
     if status not in {"published", "generated"}:
@@ -773,6 +795,7 @@ def complete(
         status,
         metadata=metadata,
         video_id=video_id,
+        publish_results=publish_results,
     )
 
 
@@ -815,8 +838,11 @@ def recover_publishing(
         raise ValueError("reservation_idが空です")
     if status not in {"cancelled", "published"}:
         raise ValueError("statusはcancelledまたはpublishedです")
+    video_id = str(video_id or "").strip() or None
     if status == "published" and not video_id:
         raise ValueError("published復旧にはvideo_idが必要です")
+    if status == "cancelled" and video_id:
+        raise ValueError("cancelled復旧にvideo_idは指定できません")
     current = datetime.now(timezone.utc)
     path = ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -831,7 +857,8 @@ def recover_publishing(
         active = latest.get(reservation_id)
         if active is None:
             raise ValueError(f"共通題材台帳に予約がありません: {reservation_id}")
-        if str(active.get("status") or "") not in {"publishing", status}:
+        active_status = str(active.get("status") or "")
+        if active_status not in {"publishing", status}:
             raise ValueError(
                 f"publishing以外の予約は復旧できません: {active.get('status')}"
             )
@@ -840,7 +867,25 @@ def recover_publishing(
         topic = history._row_topic(active)
         if not topic:
             raise ValueError("復旧対象の題材が空です")
+        if active_status == status:
+            existing_video_id = str(active.get("video_id") or "").strip() or None
+            if status == "published" and existing_video_id != video_id:
+                raise ValueError(
+                    "published復旧済みですが、指定されたvideo_idが異なります"
+                )
+            # 同じ終端内容の再実行は監査行を増やさず成功扱いにする。
+            return {
+                "channel": channel_id,
+                "corner": corner,
+                "topic": topic,
+                "reservation_id": reservation_id,
+                "status": status,
+                "video_id": existing_video_id if status == "published" else None,
+                "local_history_recovered": False,
+                "idempotent": True,
+            }
         metadata = history._row_topic_metadata(active, topic)
+        active_publish_results = active.get("publish_results")
 
         spec = channel.load(channel_id)
         local_rows = history._read_path(spec.history_file)
@@ -880,12 +925,14 @@ def recover_publishing(
                         "reservation_id": local_reservation_id or reservation_id,
                         "topic_ledger_reservation_id": reservation_id,
                         "recovery_reason": reason[:500],
+                        "publish_results": active_publish_results,
                     },
                 )
             local_recovered = True
 
+        event_ts = datetime.now(timezone.utc)
         row = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": event_ts.isoformat(),
             "channel": channel_id,
             "corner": corner,
             "topic": topic,
@@ -896,7 +943,11 @@ def recover_publishing(
             **metadata,
             "recovery_reason": reason[:500],
         }
-        if active.get("daily_upload_day"):
+        if status == "published":
+            row["daily_upload_day"] = event_ts.astimezone(_JST).date().isoformat()
+        if isinstance(active_publish_results, list):
+            row["publish_results"] = active_publish_results[:12]
+        if status == "cancelled" and active.get("daily_upload_day"):
             row["daily_upload_day"] = active["daily_upload_day"]
         with path.open("a", encoding="utf-8") as file:
             _append(file, row)

@@ -522,6 +522,45 @@ class TopicLedgerTest(unittest.TestCase):
         self.assertEqual(local_rows[-1]["status"], "published")
         self.assertEqual(local_rows[-1]["video_id"], "confirmed-video")
 
+    def test_recover_publishing_is_idempotent_and_rejects_conflicts(self) -> None:
+        topic = "同じ外部投稿確認を二重実行しない復旧"
+        local_spec, ledger_reservation, _local_reservation = (
+            self._prepare_publishing_reservation(topic)
+        )
+
+        with patch.object(topic_ledger.channel, "load", return_value=local_spec):
+            first = topic_ledger.recover_publishing(
+                ledger_reservation,
+                status="published",
+                video_id="confirmed-video",
+            )
+            rows_after_first = topic_ledger.ledger_path().read_text(
+                encoding="utf-8"
+            ).splitlines()
+            second = topic_ledger.recover_publishing(
+                ledger_reservation,
+                status="published",
+                video_id="confirmed-video",
+            )
+
+        self.assertEqual(first["status"], "published")
+        self.assertTrue(second["idempotent"])
+        self.assertEqual(
+            len(topic_ledger.ledger_path().read_text(encoding="utf-8").splitlines()),
+            len(rows_after_first),
+        )
+        with self.assertRaisesRegex(ValueError, "video_idが異なります"):
+            topic_ledger.recover_publishing(
+                ledger_reservation,
+                status="published",
+                video_id="different-video",
+            )
+        with self.assertRaises(ValueError):
+            topic_ledger.recover_publishing(
+                ledger_reservation,
+                status="cancelled",
+            )
+
     def test_invalid_terminal_row_does_not_hide_publishing(self) -> None:
         topic_ledger.ledger_path().write_text(
             "\n".join(
@@ -751,7 +790,7 @@ class TopicLedgerTest(unittest.TestCase):
         )
         topic_ledger.ensure_daily_capacity(limited, now=after_midnight)
 
-    def test_terminal_event_crossing_jst_midnight_keeps_original_slot_day(self) -> None:
+    def test_published_event_crossing_jst_midnight_consumes_publication_slot_day(self) -> None:
         limited = SimpleNamespace(
             id="terminal-boundary",
             history_file=self.output / "terminal-boundary" / "history.jsonl",
@@ -782,6 +821,7 @@ class TopicLedgerTest(unittest.TestCase):
                             "reservation_id": reservation_id,
                             "video_id": "cross-day-video",
                             "topic": "日付をまたいで確定する投稿",
+                            "daily_upload_day": "2026-08-02",
                         },
                         ensure_ascii=False,
                     ),
@@ -790,7 +830,12 @@ class TopicLedgerTest(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        topic_ledger.ensure_daily_capacity(limited, now=after_midnight)
+        with self.assertRaises(topic_ledger.DailyUploadLimitSkip):
+            topic_ledger.ensure_daily_capacity(limited, now=after_midnight)
+        topic_ledger.ensure_daily_capacity(
+            limited,
+            now=after_midnight + timedelta(days=1),
+        )
 
 
 if __name__ == "__main__":

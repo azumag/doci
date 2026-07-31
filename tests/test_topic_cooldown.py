@@ -482,6 +482,37 @@ class TopicCooldownTest(unittest.TestCase):
             0.55,
         )
 
+    def test_shared_canonical_theme_does_not_promote_distinct_topics(self) -> None:
+        similarity = history.topic_match_similarity(
+            "日本の教育格差はなぜ広がるのか",
+            {
+                "canonical_theme": "社会の格差構造",
+                "angle": "学校選択が地域の学習機会を分ける仕組み",
+            },
+            "アメリカの男女賃金格差の歴史",
+            {
+                "topic": "アメリカの男女賃金格差の歴史",
+                "status": "published",
+                "topic_metadata": {
+                    "canonical_theme": "社会の格差構造",
+                    "angle": "職種と昇進制度が生涯賃金を分ける仕組み",
+                },
+            },
+        )
+        self.assertLess(similarity, 0.55)
+
+    def test_invalid_or_missing_novelty_is_not_treated_as_new(self) -> None:
+        self.assertEqual(
+            history.topic_metadata("題材", {})["novelty_type"],
+            "unknown",
+        )
+        self.assertEqual(
+            history.topic_metadata("題材", {"novelty_type": "invented"})[
+                "novelty_type"
+            ],
+            "unknown",
+        )
+
     def test_rotation_ignores_queue_skip_and_cancel_events(self) -> None:
         self._append(
             {

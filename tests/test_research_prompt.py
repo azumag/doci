@@ -709,6 +709,57 @@ class ResearchPromptTest(unittest.TestCase):
                     allowed_video_source_urls={"youtube:retrieved"},
                 )
 
+    def test_attempt_requires_structured_novelty_when_requested(self) -> None:
+        payload = {
+            "topic": "YouTubeの視聴維持率を改善する冒頭設計",
+            "angle": "離脱が起きる瞬間をStudioのグラフから特定する",
+            "canonical_theme": "YouTube制作者の冒頭離脱を改善する分析",
+            "format": "指標",
+            "novelty_type": "new",
+            "novelty_axis": "",
+            "viewpoint": "",
+            "comparison_key": "冒頭30秒の視聴者維持率グラフ",
+            "parent_topic": "",
+            "parent_topic_id": "",
+            "novelty_reason": "",
+            "youtube_creator_audience": "YouTube制作者",
+            "youtube_creator_problem": "冒頭で視聴者が離脱する原因を特定する",
+            "viewer_action": "YouTube Studioの視聴者維持率グラフで離脱点を確認する",
+            "theme_fit": "clear",
+            "theme_fit_reason": "YouTube Studioの指標分析が題材の中心だから",
+            "facts": [
+                {
+                    "claim": "確認済みの事実",
+                    "source_url": "https://support.google.com/youtube/help",
+                }
+            ],
+        }
+        with mock.patch.object(
+            research.llm,
+            "run_claude",
+            return_value=json.dumps(payload, ensure_ascii=False),
+        ):
+            result = research._attempt(
+                "prompt",
+                backend_override="claude",
+                require_structured_novelty=True,
+            )
+        self.assertEqual(result["novelty_type"], "new")
+
+        invalid = dict(payload)
+        invalid.pop("comparison_key")
+        with mock.patch.object(
+            research.llm,
+            "run_claude",
+            return_value=json.dumps(invalid, ensure_ascii=False),
+        ):
+            with self.assertRaisesRegex(ValueError, "構造化新規性フィールド"):
+                research._attempt(
+                    "prompt",
+                    backend_override="claude",
+                    require_structured_novelty=True,
+                )
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
             mock.patch.object(config, "RESEARCH_BACKEND", "opencode-go"),

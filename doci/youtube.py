@@ -42,7 +42,7 @@ _WRITABLE_VIDEO_STATUS_KEYS = {
 
 
 class UploadPreflightError(RuntimeError):
-    """動画データ受理前に確定したローカル・認証・初回要求エラー。"""
+    """動画データ受理前に確定したローカル・認証・投稿前要求エラー。"""
 
 
 def _build_service(credentials):
@@ -481,23 +481,12 @@ def upload(
         )
     except Exception as exc:
         raise UploadPreflightError(str(exc)[:240]) from exc
+    # resumable uploadの最初のnext_chunk()は、セッション開始だけでなく
+    # メディア本体のPUTまで送る実装がある。ここでのHTTP 4xxを投稿前検証と
+    # 誤分類すると、外部状態不明の再投稿を許してしまうため、unknownのまま返す。
     resp = None
-    first_chunk = True
     while resp is None:
-        try:
-            status, resp = req.next_chunk()
-        except Exception as exc:  # noqa: BLE001 - 応答なしの通信失敗はunknownのまま
-            response = getattr(exc, "resp", None)
-            http_status = getattr(exc, "status_code", None) or getattr(
-                response, "status", None
-            )
-            if first_chunk and isinstance(http_status, int) and 400 <= http_status < 500:
-                raise UploadPreflightError(
-                    "初回投稿要求が受理されませんでした "
-                    f"(HTTP {http_status})"
-                ) from exc
-            raise
-        first_chunk = False
+        status, resp = req.next_chunk()
         if status:
             print(f"upload {int(status.progress() * 100)}%")
     video_id = resp["id"]

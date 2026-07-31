@@ -889,6 +889,7 @@ def generate(
                 past_topics,
                 spec,
                 performance_guidance=performance_guidance,
+                require_structured_novelty=True,
             )
             if research:
                 _log(f"題材: {research.get('topic', '')} / 裏取り事実 {len(research.get('facts', []))}件")

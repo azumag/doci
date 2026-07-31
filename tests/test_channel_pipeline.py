@@ -510,7 +510,7 @@ factcheck = false
                     "topic": "既存と重複する題材",
                     "facts": [{"claim": "fact", "source_url": "https://example.com"}],
                 },
-            ),
+            ) as research_mock,
             patch.object(ai_text, "_dispatch") as dispatch_mock,
         ):
             with self.assertRaisesRegex(RuntimeError, "duplicate topic"):
@@ -523,6 +523,7 @@ factcheck = false
                 )
 
         self.assertEqual(guarded_topics, ["既存と重複する題材"])
+        self.assertTrue(research_mock.call_args.kwargs["require_structured_novelty"])
         dispatch_mock.assert_not_called()
 
     def test_generate_preserves_theme_review_research_fields(self) -> None:
@@ -588,6 +589,7 @@ factcheck = false
         *,
         publish_dry_run: bool = False,
         publish_unknown: bool = False,
+        publish_results: list[publish.PublishResult] | None = None,
         generate_side_effect=None,
     ):
         def fake_fetch_image(_prompt, out_path, **_kwargs):
@@ -613,6 +615,7 @@ factcheck = false
             id=None if publish_dry_run or publish_unknown else video_id,
             detail="投稿結果不明" if publish_unknown else "",
         )
+        result_rows = publish_results if publish_results is not None else [uploaded]
         with (
             patch.dict(os.environ, {"DOCI_REVIEW_RECONCILED": ""}),
             patch.object(config, "OUTPUT", self.output_dir),
@@ -641,7 +644,7 @@ factcheck = false
             patch.object(run_daily.compose, "compose", side_effect=fake_compose),
             patch("doci.thumbnail.render", side_effect=fake_thumbnail),
             patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail),
-            patch("doci.publish.publish", return_value=[uploaded]) as publish_mock,
+            patch("doci.publish.publish", return_value=result_rows) as publish_mock,
             patch.object(topic_ledger, "recent_topics", return_value=[]),
             patch.object(topic_ledger, "reserve", wraps=topic_ledger.reserve) as ledger_reserve_mock,
             patch.object(history, "reserve_topic", wraps=history.reserve_topic) as history_reserve_mock,
@@ -878,6 +881,49 @@ factcheck = false
         self.assertEqual(
             ledger_rows[-1]["reservation_id"],
             history_rows[-1]["topic_ledger_reservation_id"],
+        )
+
+    def test_mixed_publish_results_keep_topic_in_publishing_state(self) -> None:
+        spec = self._review_spec("review-mixed-results")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+
+        def generate_and_guard(*_args, **kwargs):
+            kwargs["topic_metadata_guard"](script["_research"])
+            kwargs["topic_guard"](script["_research"]["topic"])
+            return script
+
+        result, _, _, _, _, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "mixed123",
+            publish_results=[
+                publish.PublishResult("youtube", "ok", id="mixed123"),
+                publish.PublishResult(
+                    "tiktok", "unknown", detail="投稿結果不明: timeout"
+                ),
+            ],
+            generate_side_effect=generate_and_guard,
+        )
+
+        with patch.object(config, "OUTPUT", self.output_dir):
+            ledger_rows = [
+                json.loads(line)
+                for line in (self.output_dir / "topic_ledger.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            history_rows = [
+                json.loads(line)
+                for line in spec.history_file.read_text(encoding="utf-8").splitlines()
+            ]
+        self.assertEqual(result["video_id"], "mixed123")
+        self.assertEqual(ledger_rows[-1]["status"], "publishing")
+        self.assertEqual(history_rows[-1]["status"], "publishing")
+        self.assertEqual(
+            [item["status"] for item in ledger_rows[-1]["publish_results"]],
+            ["ok", "unknown"],
         )
 
     def test_run_daily_scopes_workdir_voice_and_history_to_channel(self) -> None:

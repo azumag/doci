@@ -15,6 +15,7 @@ import re
 import socket
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
     ThreadPoolExecutor,
@@ -32,6 +33,95 @@ _DEFAULT_RESEARCH_TIMEOUT = object()
 
 class UnsupportedResearchBackendError(ValueError):
     """RESEARCH_BACKEND の設定値が未対応であることを示す。"""
+
+
+_NOVELTY_TYPES = frozenset(
+    {"new", "sequel", "opposing_view", "audience_adaptation"}
+)
+_NOVELTY_AXES = frozenset(
+    {"", "stance", "time", "case", "mechanism", "metric", "audience"}
+)
+_THEME_FIT_VALUES = frozenset({"clear", "ambiguous", "off_topic"})
+_STRUCTURED_NOVELTY_FIELDS = (
+    "canonical_theme",
+    "angle",
+    "format",
+    "novelty_type",
+    "novelty_axis",
+    "viewpoint",
+    "comparison_key",
+    "parent_topic",
+    "parent_topic_id",
+    "novelty_reason",
+    "youtube_creator_audience",
+    "youtube_creator_problem",
+    "viewer_action",
+    "theme_fit",
+    "theme_fit_reason",
+)
+
+
+def validate_structured_novelty(data: Mapping[str, object]) -> None:
+    """題材の横断重複判定に必要なLLM出力をfail-closedで検証する。"""
+    if not isinstance(data, Mapping):
+        raise ValueError("リサーチ結果がJSONオブジェクトではありません")
+
+    missing = [
+        key
+        for key in _STRUCTURED_NOVELTY_FIELDS
+        if key not in data or not isinstance(data.get(key), str)
+    ]
+    if missing:
+        raise ValueError(
+            "構造化新規性フィールドが不足または文字列ではありません: "
+            + ", ".join(missing)
+        )
+
+    nonempty = ("canonical_theme", "angle", "format", "comparison_key", "theme_fit_reason")
+    empty = [key for key in nonempty if not str(data[key]).strip()]
+    if empty:
+        raise ValueError("構造化新規性フィールドが空です: " + ", ".join(empty))
+
+    novelty_type = str(data["novelty_type"]).strip()
+    novelty_axis = str(data["novelty_axis"]).strip()
+    theme_fit = str(data["theme_fit"]).strip()
+    if novelty_type not in _NOVELTY_TYPES:
+        raise ValueError(f"novelty_typeが不正です: {novelty_type}")
+    if novelty_axis not in _NOVELTY_AXES:
+        raise ValueError(f"novelty_axisが不正です: {novelty_axis}")
+    if theme_fit not in _THEME_FIT_VALUES:
+        raise ValueError(f"theme_fitが不正です: {theme_fit}")
+    if str(data["parent_topic_id"]).strip():
+        raise ValueError("parent_topic_idはリサーチ段階では空である必要があります")
+
+    continuation = novelty_type != "new"
+    continuation_fields = ("parent_topic", "novelty_reason", "novelty_axis")
+    if continuation:
+        missing_continuation = [
+            key for key in continuation_fields if not str(data[key]).strip()
+        ]
+        if missing_continuation:
+            raise ValueError(
+                "続編・派生題材の新規性フィールドが空です: "
+                + ", ".join(missing_continuation)
+            )
+        if novelty_type == "opposing_view":
+            if novelty_axis != "stance" or not str(data["viewpoint"]).strip():
+                raise ValueError(
+                    "opposing_viewにはstanceとviewpointが必要です"
+                )
+        elif novelty_type == "sequel":
+            if novelty_axis not in {"time", "case", "mechanism", "metric"}:
+                raise ValueError(
+                    "sequelのnovelty_axisはtime/case/mechanism/metricです"
+                )
+        elif novelty_axis != "audience":
+            raise ValueError("audience_adaptationのnovelty_axisはaudienceです")
+    else:
+        if any(str(data[key]).strip() for key in ("novelty_axis", "viewpoint", "parent_topic", "novelty_reason")):
+            raise ValueError(
+                "novelty_type=newでは派生題材用フィールドを空にしてください"
+            )
 
 
 # バックエンドごとの「Webで確認する」手順の言い回し。OpenCode Goは候補・一次資料URLを
@@ -891,6 +981,7 @@ def _attempt(
     model_override: str | None = None,
     model_explicit_override: bool | None = None,
     require_youtube_examples: bool = False,
+    require_structured_novelty: bool = False,
     allowed_source_urls: set[str] | None = None,
     allowed_video_source_urls: set[str] | None = None,
 ) -> dict:
@@ -992,6 +1083,8 @@ def _attempt(
         ]
         if len(data["facts"]) < 3:
             raise ValueError("YouTube公式一次資料に基づく事実が3件未満です")
+    if require_structured_novelty:
+        validate_structured_novelty(data)
     return data
 
 
@@ -1104,6 +1197,7 @@ def web_research(
     model_explicit_override: bool | None = None,
     focus_text: str = "",
     require_youtube_examples: bool | None = None,
+    require_structured_novelty: bool = False,
 ) -> dict | None:
     """題材選定＋Web裏取り。不正JSON等は再試行し、尽きたら例外（呼び出し側がリサーチ無しで続行）。"""
     past = "、".join(past_topics[-20:]) if past_topics else "（まだありません）"
@@ -1250,6 +1344,7 @@ def web_research(
                 model_override=model_override,
                 model_explicit_override=model_explicit_override,
                 require_youtube_examples=needs_youtube_examples,
+                require_structured_novelty=require_structured_novelty,
                 allowed_source_urls=allowed_source_urls,
                 allowed_video_source_urls=allowed_video_source_urls,
             )
