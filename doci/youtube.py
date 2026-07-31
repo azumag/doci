@@ -481,12 +481,29 @@ def upload(
         )
     except Exception as exc:
         raise UploadPreflightError(str(exc)[:240]) from exc
-    # resumable uploadの最初のnext_chunk()は、セッション開始だけでなく
-    # メディア本体のPUTまで送る実装がある。ここでのHTTP 4xxを投稿前検証と
-    # 誤分類すると、外部状態不明の再投稿を許してしまうため、unknownのまま返す。
+    # resumable uploadの最初のnext_chunk()は、セッション開始POSTだけでなく
+    # メディア本体のPUTまで送る実装がある。URI未設定のセッション開始4xxだけを
+    # 投稿前検証とし、URI設定後のメディア4xxは外部状態不明のまま返す。
     resp = None
     while resp is None:
-        status, resp = req.next_chunk()
+        try:
+            status, resp = req.next_chunk()
+        except Exception as exc:  # noqa: BLE001 - 受理後の失敗はunknownのまま
+            response = getattr(exc, "resp", None)
+            http_status = getattr(exc, "status_code", None) or getattr(
+                response, "status", None
+            )
+            resumable_uri = getattr(req, "resumable_uri", object())
+            if (
+                isinstance(http_status, int)
+                and 400 <= http_status < 500
+                and resumable_uri is None
+            ):
+                raise UploadPreflightError(
+                    "YouTube投稿セッション開始が受理されませんでした "
+                    f"(HTTP {http_status})"
+                ) from exc
+            raise
         if status:
             print(f"upload {int(status.progress() * 100)}%")
     video_id = resp["id"]
