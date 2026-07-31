@@ -165,9 +165,6 @@ _CONCEPT_PATTERNS = {
     "more_desire": (r"もっと欲しい", r"衝動"),
     "consumption_desire": (r"消費欲", r"消費社会", r"欲望", r"贅沢", r"広告"),
 }
-_STRONG_TOPIC_CONCEPTS = frozenset(
-    {"scarcity", "planned_economy", "inequality", "consumption_desire"}
-)
 _BOILERPLATE = (
     "初心者向け",
     "youtube",
@@ -366,7 +363,6 @@ def topic_similarity(left: str, right: str) -> float:
     concept_score = 0.0
     if left_concepts and right_concepts:
         concept_overlap = len(left_concepts & right_concepts)
-        shared_concepts = left_concepts & right_concepts
         if concept_overlap and len(left_concepts | right_concepts) >= 2:
             # 共通する一般概念が1つあるだけで別題材を止めない。集合全体に占める
             # 一致率（Jaccard）で、同じ主題構造のときだけ強く判定する。
@@ -999,7 +995,6 @@ def reserve_performance_decision(
         file.seek(0, 2)
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
         file.flush()
-        os.fsync(file.fileno())
         os.fsync(file.fileno())
         return application_id
 

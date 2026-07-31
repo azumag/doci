@@ -29,6 +29,8 @@ _INIT = "https://open.tiktokapis.com/v2/post/publish/video/init/"
 _STATUS = "https://open.tiktokapis.com/v2/post/publish/status/fetch/"
 _SCOPE = "video.publish"
 _MB = 1024 * 1024
+_STATUS_POLL_ATTEMPTS = 20
+_STATUS_POLL_INTERVAL_SECONDS = 3
 
 
 class TikTokError(RuntimeError):
@@ -236,9 +238,10 @@ def upload(
             with urllib.request.urlopen(req, timeout=300):
                 pass
 
-    # ステータス確認（数回ポーリング）
+    # ステータス確認。PROCESSINGが通常挙動のため、最大約1分まで
+    # ポーリングしてから結果不明としてfail-closedへ渡す。
     status = ""
-    for _ in range(10):
+    for attempt in range(_STATUS_POLL_ATTEMPTS):
         try:
             st = _post_json(_STATUS, token, {"publish_id": publish_id})
             status = ((st.get("data") or {}).get("status")) or ""
@@ -246,7 +249,8 @@ def upload(
             break
         if status in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX", "FAILED"):
             break
-        time.sleep(3)
+        if attempt + 1 < _STATUS_POLL_ATTEMPTS:
+            time.sleep(_STATUS_POLL_INTERVAL_SECONDS)
     print(f"tiktok: publish_id={publish_id} status={status} privacy={privacy}")
     return {"publish_id": publish_id, "status": status}
 
