@@ -155,6 +155,46 @@ class PublishAccountsTest(unittest.TestCase):
         self.assertEqual(result.status, "dry_run")
         upload_mock.assert_not_called()
 
+    def test_upload_exception_is_classified_as_unknown(self) -> None:
+        spec = SimpleNamespace(publish=self._youtube_spec("alpha"))
+        with (
+            patch.object(config, "PUBLISH_YOUTUBE", True),
+            patch.object(publish, "_do_upload", side_effect=TimeoutError("timeout")),
+        ):
+            result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=self.route,
+                spec=spec,
+            )[0]
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("投稿結果不明", result.detail)
+
+    def test_youtube_preflight_error_is_reusable_same_day(self) -> None:
+        spec = SimpleNamespace(publish=self._youtube_spec("alpha"))
+        with (
+            patch.object(config, "PUBLISH_YOUTUBE", True),
+            patch.object(
+                youtube,
+                "upload",
+                side_effect=youtube.UploadPreflightError("scope不足"),
+            ),
+        ):
+            result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=self.route,
+                spec=spec,
+            )[0]
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("投稿前検証失敗", result.detail)
+
     def test_youtube_upload_and_thumbnail_receive_channel_credentials(self) -> None:
         settings = self._youtube_spec("alpha")
         thumbnail = self.root / "thumbnail.png"

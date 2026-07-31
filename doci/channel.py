@@ -89,6 +89,7 @@ class YouTubeReviewSpec:
     """限定公開動画を GitHub Issue で確認する運用設定。"""
 
     enabled: bool = False
+    require_approval: bool = False
     repository: str = ""
     publish_label: str = "公開承認"
     hold_label: str = "保留"
@@ -174,6 +175,8 @@ _PIPELINE_KEYS = {
     "asset_media",
     "topic_cooldown_days",
     "performance_feedback",
+    "title_pattern_check",
+    "max_uploads_per_day",
 }
 _STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
@@ -193,6 +196,7 @@ _PUBLISH_KEYS = {"platforms", "youtube", "tiktok", "instagram"}
 _YOUTUBE_PUBLISH_KEYS = {"privacy", "client_secret", "token", "review"}
 _YOUTUBE_REVIEW_KEYS = {
     "enabled",
+    "require_approval",
     "repository",
     "publish_label",
     "hold_label",
@@ -428,6 +432,15 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
     review_enabled = review.get("enabled", False)
     if not isinstance(review_enabled, bool):
         raise ChannelConfigError("publish.youtube.review.enabled must be a boolean")
+    require_approval = review.get("require_approval", False)
+    if not isinstance(require_approval, bool):
+        raise ChannelConfigError(
+            "publish.youtube.review.require_approval must be a boolean"
+        )
+    if require_approval and not review_enabled:
+        raise ChannelConfigError(
+            "publish.youtube.review.require_approval requires enabled=true"
+        )
     review_repository = _string(
         review,
         "repository",
@@ -524,6 +537,7 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
             token=youtube_token,
             review=YouTubeReviewSpec(
                 enabled=review_enabled,
+                require_approval=require_approval,
                 repository=review_repository,
                 publish_label=review_labels["publish_label"],
                 hold_label=review_labels["hold_label"],
@@ -644,6 +658,15 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     performance_feedback = pipeline.get("performance_feedback")
     if performance_feedback is not None and not isinstance(performance_feedback, bool):
         raise ChannelConfigError("pipeline.performance_feedback must be a boolean")
+    max_uploads_per_day = pipeline.get("max_uploads_per_day")
+    if max_uploads_per_day is not None and (
+        isinstance(max_uploads_per_day, bool)
+        or not isinstance(max_uploads_per_day, int)
+        or max_uploads_per_day < 0
+    ):
+        raise ChannelConfigError(
+            "pipeline.max_uploads_per_day must be a non-negative integer"
+        )
     style = data.get("style", {})
     publish = data.get("publish", {})
     if not isinstance(style, dict):

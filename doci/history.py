@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -69,6 +71,44 @@ def _parse_ts(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _latest_reservation_rows(rows: list[dict], now: datetime) -> dict[str, dict]:
+    """現在時刻までに確定した予約状態だけで最新行を決める。
+
+    壊れた時刻のterminal行や未来のterminal行が、結果不明のpublishingを
+    見えなくして再利用を許さないようにする。時刻不明のpublishingだけは
+    fail-closedで最新状態として残す。
+    """
+    latest: dict[str, tuple[int, datetime, dict]] = {}
+    invalid_publishing: dict[str, tuple[int, dict]] = {}
+    for index, row in enumerate(rows):
+        reservation_id = str(row.get("reservation_id") or "")
+        if not reservation_id:
+            continue
+        status = str(row.get("status") or "")
+        timestamp = _parse_ts(row.get("ts"))
+        if timestamp is None:
+            if status == "publishing":
+                invalid_publishing[reservation_id] = (index, row)
+            continue
+        if timestamp > now and status not in {"queued", "publishing"}:
+            continue
+        current = latest.get(reservation_id)
+        if current is None or index > current[0]:
+            latest[reservation_id] = (index, timestamp, row)
+    for reservation_id, (index, row) in invalid_publishing.items():
+        current = latest.get(reservation_id)
+        if current is None or index > current[0]:
+            latest[reservation_id] = (
+                index,
+                datetime.min.replace(tzinfo=timezone.utc),
+                row,
+            )
+    return {
+        reservation_id: state[2]
+        for reservation_id, state in latest.items()
+    }
+
+
 def _normalise_topic(value: str) -> str:
     text = unicodedata.normalize("NFKC", value).casefold()
     text = re.sub(r"\bctr\b", "クリック率", text)
@@ -102,13 +142,32 @@ _CONCEPT_PATTERNS = {
     ),
     "tragedy_sacrifice": (r"犠牲", r"悲劇", r"地獄", r"暴落", r"泥濘", r"喰らう"),
     "nordic_comparison": (r"北欧",),
-    "planned_economy": (r"計画経済",),
+    "scarcity": (
+        r"物不足",
+        r"食料不足",
+        r"供給不足",
+        r"日用品不足",
+        r"品不足",
+        r"欠乏",
+        r"配給",
+    ),
+    "planned_economy": (
+        r"計画経済",
+        r"配給制度",
+        r"統制経済",
+        r"価格統制",
+    ),
     "invisible_hand": (r"見えざる手", r"見えない手", r"アダムスミス"),
     "growth_worship": (r"成長", r"gdp", r"列車", r"エンジン", r"神様", r"宗教"),
     "wealth_inequality": (r"格差", r"富の集中", r"上位1"),
+    "inequality": (r"格差", r"不平等", r"貧富", r"階級差"),
     "tech_giant": (r"テック巨人", r"テック企業"),
     "more_desire": (r"もっと欲しい", r"欲望", r"衝動"),
+    "consumption_desire": (r"消費欲", r"消費社会", r"欲望", r"贅沢", r"広告"),
 }
+_STRONG_TOPIC_CONCEPTS = frozenset(
+    {"scarcity", "planned_economy", "inequality", "consumption_desire"}
+)
 _BOILERPLATE = (
     "初心者向け",
     "youtube",
@@ -124,6 +183,97 @@ _BOILERPLATE = (
     "本当の理由",
 )
 
+_CONTINUATION_TYPES = frozenset(
+    {"sequel", "opposing_view", "audience_adaptation"}
+)
+_TOPIC_METADATA_FIELDS = (
+    "canonical_theme",
+    "angle",
+    "audience",
+    "format",
+    "novelty_type",
+    "parent_topic",
+    "parent_topic_id",
+    "novelty_reason",
+    "source",
+    "viewpoint",
+    "novelty_axis",
+    "comparison_key",
+)
+_GENERIC_CANONICAL_THEMES = frozenset(
+    {
+        "youtube",
+        "youtube運用",
+        "youtube運営",
+        "youtube攻略",
+        "youtube成長",
+        "youtubeの運用",
+        "youtubeの成長",
+        "youtubeショート",
+        "動画",
+        "動画制作",
+        "動画運用",
+        "動画改善",
+        "コンテンツ",
+        "コンテンツ制作",
+        "歴史",
+        "思想",
+        "哲学",
+        "政治",
+        "経済",
+        "社会",
+        "文化",
+        "制度",
+        "資本主義",
+        "資本主義ネタ",
+        "共産主義",
+        "社会主義",
+    }
+)
+_GENERIC_CANONICAL_PARTS = (
+    "youtube",
+    "ユーチューブ",
+    "チャンネル",
+    "動画",
+    "ショート",
+    "コンテンツ",
+    "運用",
+    "運営",
+    "攻略",
+    "成長",
+    "改善",
+    "方法",
+    "設計",
+    "成功",
+    "伸ばし方",
+)
+_GENERIC_DESCRIPTOR_PARTS = _GENERIC_CANONICAL_PARTS + (
+    "解説",
+    "確認",
+    "比較",
+    "理由",
+    "ポイント",
+    "コツ",
+    "秘訣",
+    "について",
+    "とは",
+    "する",
+)
+
+
+def _is_generic_descriptor(value: str) -> bool:
+    normalised = _normalise_topic(value)
+    remainder = normalised
+    for part in _GENERIC_DESCRIPTOR_PARTS:
+        remainder = remainder.replace(part, "")
+    remainder = re.sub(
+        r"^[のにをがはでと]+|[のにをがはでと]+$", "", remainder
+    )
+    return (
+        normalised in _GENERIC_CANONICAL_THEMES
+        or len(remainder) < 5
+    )
+
 
 def topic_concepts(value: str) -> list[str]:
     normalised = _normalise_topic(value)
@@ -132,6 +282,40 @@ def topic_concepts(value: str) -> list[str]:
         for concept, patterns in _CONCEPT_PATTERNS.items()
         if any(re.search(pattern, normalised) for pattern in patterns)
     )
+
+
+def topic_metadata(
+    topic: str, metadata: Mapping[str, object] | None = None
+) -> dict[str, str]:
+    """題材台帳へ保存する bounded なメタデータを正規化する。"""
+    raw = metadata if isinstance(metadata, Mapping) else {}
+
+    def text(key: str, limit: int) -> str:
+        value = raw.get(key)
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.split())[:limit]
+
+    canonical_theme = text("canonical_theme", 300) or topic.strip()[:300]
+    if _is_generic_descriptor(canonical_theme):
+        canonical_theme = ""
+    novelty_type = text("novelty_type", 40)
+    if novelty_type not in {"new", *_CONTINUATION_TYPES}:
+        novelty_type = "new"
+    return {
+        "canonical_theme": canonical_theme,
+        "angle": text("angle", 500),
+        "audience": text("audience", 160),
+        "format": text("format", 80),
+        "novelty_type": novelty_type,
+        "parent_topic": text("parent_topic", 300),
+        "parent_topic_id": text("parent_topic_id", 120),
+        "novelty_reason": text("novelty_reason", 500),
+        "source": text("source", 80) or "research",
+        "viewpoint": text("viewpoint", 160),
+        "novelty_axis": text("novelty_axis", 40),
+        "comparison_key": text("comparison_key", 200),
+    }
 
 
 def _topic_fingerprint(value: str) -> str:
@@ -179,7 +363,11 @@ def topic_similarity(left: str, right: str) -> float:
     concept_score = 0.0
     if left_concepts and right_concepts:
         concept_overlap = len(left_concepts & right_concepts)
-        if concept_overlap and len(left_concepts | right_concepts) >= 2:
+        shared_concepts = left_concepts & right_concepts
+        if concept_overlap and (
+            len(left_concepts | right_concepts) >= 2
+            or shared_concepts & _STRONG_TOPIC_CONCEPTS
+        ):
             # 共通する一般概念が1つあるだけで別題材を止めない。集合全体に占める
             # 一致率（Jaccard）で、同じ主題構造のときだけ強く判定する。
             concept_score = concept_overlap / len(left_concepts | right_concepts)
@@ -204,32 +392,298 @@ def _row_topic(row: dict) -> str:
     return f"{title} {description}".strip()
 
 
+def _row_topic_metadata(row: dict, topic: str | None = None) -> dict[str, str]:
+    """現行行・旧workdirのresearchから題材メタデータを復元する。"""
+    resolved_topic = topic or _row_topic(row)
+    raw: dict[str, object] = {}
+    nested = row.get("topic_metadata")
+    if isinstance(nested, Mapping):
+        raw.update(nested)
+    for key in _TOPIC_METADATA_FIELDS:
+        if key not in raw and key in row:
+            raw[key] = row[key]
+    workdir = row.get("workdir")
+    if workdir:
+        try:
+            script = json.loads(
+                (Path(str(workdir)) / "script.json").read_text(encoding="utf-8")
+            )
+            research = script.get("_research")
+            if isinstance(research, Mapping):
+                for source_key, target_key in (
+                    ("canonical_theme", "canonical_theme"),
+                    ("angle", "angle"),
+                    ("youtube_creator_audience", "audience"),
+                    ("format", "format"),
+                    ("novelty_type", "novelty_type"),
+                    ("parent_topic", "parent_topic"),
+                    ("parent_topic_id", "parent_topic_id"),
+                    ("novelty_reason", "novelty_reason"),
+                    ("viewpoint", "viewpoint"),
+                    ("novelty_axis", "novelty_axis"),
+                    ("comparison_key", "comparison_key"),
+                ):
+                    if target_key not in raw and source_key in research:
+                        raw[target_key] = research[source_key]
+        except (OSError, ValueError, TypeError):
+            pass
+    return topic_metadata(resolved_topic, raw)
+
+
+def topic_match_similarity(
+    topic: str,
+    metadata: Mapping[str, object] | None,
+    previous_topic: str,
+    previous_row: dict,
+) -> float:
+    """題材本文と大テーマの両方を使い、言い換えを見逃さない。"""
+    current = topic_metadata(topic, metadata)
+    previous = _row_topic_metadata(previous_row, previous_topic)
+    topic_score = topic_similarity(topic, previous_topic)
+    score = topic_score
+    current_theme = current["canonical_theme"]
+    previous_theme = previous["canonical_theme"]
+    theme_score = 0.0
+    if len(current_theme) >= 4 and len(previous_theme) >= 4:
+        theme_score = topic_similarity(current_theme, previous_theme)
+    current_angle = current["angle"]
+    previous_angle = previous["angle"]
+    angle_score = 0.0
+    if (
+        len(current_angle) >= 4
+        and len(previous_angle) >= 4
+        and not _is_generic_descriptor(current_angle)
+        and not _is_generic_descriptor(previous_angle)
+    ):
+        angle_score = topic_similarity(current_angle, previous_angle)
+    # canonical_themeは候補抽出の補助であり、異なる本文を単独で止めない。
+    # 本文・具体的な切り口・強い概念のいずれかが同じときだけ大テーマを
+    # 最終的な重複スコアへ昇格させ、同じ分野名を誤って共有した行を許可する。
+    shared_concepts = set(topic_concepts(topic)) & set(
+        topic_concepts(previous_topic)
+    )
+    theme_supported = (
+        topic_score >= 0.55
+        or angle_score >= 0.55
+        or bool(shared_concepts & _STRONG_TOPIC_CONCEPTS)
+    )
+    if theme_score >= 0.55 and theme_supported:
+        score = max(score, theme_score)
+    if angle_score >= 0.55 and (not current_theme or not previous_theme or theme_supported):
+        score = max(score, angle_score)
+    return score
+
+
+def _stable_topic_id(row: dict) -> str:
+    return str(
+        row.get("video_id")
+        or row.get("topic_ledger_reservation_id")
+        or row.get("reservation_id")
+        or ""
+    ).strip()
+
+
+def _resolve_parent_topic_id(
+    metadata: Mapping[str, object] | None,
+    candidates: list[tuple[dict, str, str]],
+    similarity_threshold: float,
+) -> str | None:
+    """公開済み候補から親IDを内部解決する。曖昧なら続編を許可しない。"""
+    current = topic_metadata("", metadata)
+    if current["novelty_type"] not in _CONTINUATION_TYPES:
+        return ""
+    if current["parent_topic_id"]:
+        return current["parent_topic_id"]
+    if not current["parent_topic"]:
+        return None
+    matches: set[str] = set()
+    for row, previous_topic, _source in candidates:
+        status = str(row.get("status") or "")
+        if not (
+            status == "published"
+            or (not status and bool(row.get("video_id")))
+        ):
+            continue
+        stable_id = _stable_topic_id(row)
+        if stable_id and topic_similarity(
+            current["parent_topic"], previous_topic
+        ) >= similarity_threshold:
+            matches.add(stable_id)
+    if len(matches) == 1:
+        return next(iter(matches))
+    return None
+
+
+def _continuation_allowed(
+    topic: str,
+    metadata: Mapping[str, object] | None,
+    previous_row: dict,
+    previous_topic: str,
+    similarity_threshold: float,
+) -> bool:
+    """明示された続編だけを、元題材との新規性が確認できる場合に許可する。"""
+    current = topic_metadata(topic, metadata)
+    novelty_type = current["novelty_type"]
+    if novelty_type not in _CONTINUATION_TYPES:
+        return False
+    previous_status = str(previous_row.get("status") or "")
+    previous_is_published = previous_status == "published" or (
+        not previous_status and bool(previous_row.get("video_id"))
+    )
+    if not previous_is_published:
+        # 制作中の親を続編扱いすると、親の失敗前に別動画を通せてしまう。
+        return False
+    previous_id = _stable_topic_id(previous_row)
+    if not previous_id:
+        return False
+    if not current["parent_topic_id"]:
+        return False
+    if current["parent_topic_id"] and current["parent_topic_id"] != previous_id:
+        return False
+    if len(current["parent_topic"]) < 4 or len(current["novelty_reason"]) < 12:
+        return False
+    previous = _row_topic_metadata(previous_row, previous_topic)
+    if novelty_type == "opposing_view":
+        if (
+            current["novelty_axis"] != "stance"
+            or not current["viewpoint"]
+            or not current["comparison_key"]
+            or not previous["comparison_key"]
+        ):
+            return False
+        if previous["viewpoint"] and (
+            _normalise_topic(current["viewpoint"])
+            == _normalise_topic(previous["viewpoint"])
+        ):
+            return False
+    elif novelty_type == "sequel":
+        if (
+            current["novelty_axis"] not in {"time", "case", "mechanism", "metric"}
+            or not current["comparison_key"]
+            or not previous["comparison_key"]
+        ):
+            return False
+    if novelty_type in {"opposing_view", "sequel"} and topic_similarity(
+        current["comparison_key"], previous["comparison_key"]
+    ) >= similarity_threshold:
+        return False
+    if topic_similarity(current["parent_topic"], previous_topic) < similarity_threshold:
+        return False
+    previous_angle = previous["angle"]
+    if current["angle"] and previous_angle:
+        if topic_similarity(current["angle"], previous_angle) >= similarity_threshold:
+            return False
+    elif not current["angle"]:
+        return False
+    if novelty_type == "audience_adaptation":
+        if not current["audience"] or not previous["audience"]:
+            return False
+        if topic_similarity(current["audience"], previous["audience"]) >= similarity_threshold:
+            return False
+    return True
+
+
+def _semantic_match_allows_continuation(
+    topic: str,
+    metadata: Mapping[str, object] | None,
+    match: TopicMatch,
+    candidates: list[tuple[dict, str, str]],
+    similarity_threshold: float,
+) -> bool:
+    """意味判定の一致先が明示的な続編の親なら、重複扱いにしない。"""
+    matched_key = _normalise_topic(match.topic)
+    matching = [
+        candidate
+        for candidate in candidates
+        if matched_key
+        and _normalise_topic(candidate[1]) == matched_key
+    ]
+    if not matching and matched_key:
+        # 意味判定側が入力を短縮して返す実装にも対応する。ただし、
+        # 類似度の低い別候補まで続編の親と誤認しない。
+        ranked = sorted(
+            candidates,
+            key=lambda candidate: topic_similarity(match.topic, candidate[1]),
+            reverse=True,
+        )
+        if ranked and topic_similarity(match.topic, ranked[0][1]) >= 0.9:
+            matching = [ranked[0]]
+    return bool(matching) and all(
+        _continuation_allowed(
+            topic,
+            metadata,
+            row,
+            previous_topic,
+            similarity_threshold,
+        )
+        for row, previous_topic, _source in matching
+    )
+
+
 def _cooldown_candidates(
     rows: list[dict], *, now: datetime, cooldown_days: int
 ) -> list[tuple[dict, str, str]]:
     cutoff = now - timedelta(days=cooldown_days)
     candidates: list[tuple[dict, str, str]] = []
-    latest_reservations: dict[str, dict] = {}
-    for row in rows:
-        reservation_id = str(row.get("reservation_id") or "")
-        if reservation_id:
-            latest_reservations[reservation_id] = row
+    latest_reservations = _latest_reservation_rows(rows, now)
     for row in rows:
         ts = _parse_ts(row.get("ts"))
-        if ts is None or ts < cutoff or ts > now:
-            continue
         status = str(row.get("status") or "")
+        if ts is None:
+            if status != "publishing":
+                continue
+        elif ts > now and status not in {"queued", "publishing"}:
+            continue
+        elif status != "publishing" and ts < cutoff:
+            continue
         reservation_id = str(row.get("reservation_id") or "")
         if reservation_id and latest_reservations.get(reservation_id) is not row:
             continue
         is_published = status == "published" or (not status and bool(row.get("video_id")))
-        is_queued = status == "queued"
+        is_queued = status in {"queued", "publishing"}
+        if status == "queued" and not _queued_reservation_is_active(row, ts, now):
+            continue
         if not (is_published or is_queued):
             continue
         topic = _row_topic(row)
         if topic:
-            candidates.append((row, topic, "公開済み" if is_published else "キュー済み"))
+            label = (
+                "公開済み"
+                if is_published
+                else "投稿処理中"
+                if status == "publishing"
+                else "キュー済み"
+            )
+            candidates.append((row, topic, label))
     return candidates
+
+
+def _queued_reservation_is_active(
+    row: dict,
+    timestamp: datetime | None,
+    now: datetime,
+) -> bool:
+    """孤児予約を無期限に題材cooldownへ残さない。"""
+    if timestamp is None:
+        return True
+    from . import config
+
+    if str(row.get("status") or "") == "publishing":
+        return True
+    ttl_hours = config.TOPIC_RESERVATION_TTL_HOURS
+    if ttl_hours > 0 and timestamp < now - timedelta(hours=ttl_hours):
+        return False
+    owner_pid = row.get("owner_pid")
+    if isinstance(owner_pid, int) and owner_pid > 0:
+        try:
+            os.kill(owner_pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        else:
+            return True
+    return ttl_hours <= 0 or timestamp >= now - timedelta(hours=ttl_hours)
 
 
 def reserve_topic(
@@ -244,6 +698,8 @@ def reserve_topic(
     semantic_check: (
         Callable[[str, list[str]], TopicMatch | None] | None
     ) = None,
+    metadata: Mapping[str, object] | None = None,
+    topic_ledger_reservation_id: str | None = None,
 ) -> str | None:
     """題材を原子的に照合し、実投稿runならキューとして予約する。
 
@@ -257,6 +713,8 @@ def reserve_topic(
     topic = topic.strip()
     if not topic:
         raise ValueError("cooldown判定に使う題材が空です")
+    raw_metadata = metadata if isinstance(metadata, dict) else None
+    metadata = topic_metadata(topic, metadata)
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     path = spec.history_file
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -272,10 +730,32 @@ def reserve_topic(
         candidates = _cooldown_candidates(
             rows, now=current, cooldown_days=cooldown_days
         )
+        resolved_parent_id = _resolve_parent_topic_id(
+            metadata,
+            candidates,
+            similarity_threshold,
+        )
+        if resolved_parent_id and not metadata["parent_topic_id"]:
+            if raw_metadata is not None:
+                raw_metadata["parent_topic_id"] = resolved_parent_id
+            metadata = {**metadata, "parent_topic_id": resolved_parent_id}
         best: TopicMatch | None = None
         for row, previous_topic, source in candidates:
-            similarity = topic_similarity(topic, previous_topic)
+            similarity = topic_match_similarity(
+                topic,
+                metadata,
+                previous_topic,
+                row,
+            )
             if similarity < similarity_threshold:
+                continue
+            if _continuation_allowed(
+                topic,
+                metadata,
+                row,
+                previous_topic,
+                similarity_threshold,
+            ):
                 continue
             candidate = TopicMatch(
                 topic=previous_topic,
@@ -289,11 +769,20 @@ def reserve_topic(
             seen_topics: set[str] = set()
             recent_topics: list[str] = []
             for _row, previous_topic, _source in reversed(candidates):
-                if previous_topic in seen_topics:
+                key = _normalise_topic(previous_topic)
+                if not key or key in seen_topics:
                     continue
-                seen_topics.add(previous_topic)
+                seen_topics.add(key)
                 recent_topics.append(previous_topic)
-            best = semantic_check(topic, recent_topics)
+            semantic_match = semantic_check(topic, recent_topics)
+            if semantic_match is not None and not _semantic_match_allows_continuation(
+                topic,
+                metadata,
+                semantic_match,
+                candidates,
+                similarity_threshold,
+            ):
+                best = semantic_match
         if best is not None:
             exc = TopicCooldownSkip(topic, best, cooldown_days)
             if reserve:
@@ -306,6 +795,8 @@ def reserve_topic(
                     "status": "skipped",
                     "topic": topic,
                     "topic_concepts": topic_concepts(topic),
+                    "topic_metadata": metadata,
+                    **metadata,
                     "skip_reason": exc.reason,
                     "matched_topic": best.topic,
                     "matched_ts": best.ts,
@@ -314,6 +805,7 @@ def reserve_topic(
                 file.seek(0, 2)
                 file.write(json.dumps(row, ensure_ascii=False) + "\n")
                 file.flush()
+                os.fsync(file.fileno())
             raise exc
         if not reserve:
             return None
@@ -327,11 +819,16 @@ def reserve_topic(
             "status": "queued",
             "topic": topic,
             "topic_concepts": topic_concepts(topic),
-            "reservation_id": reservation_id,
+                    "topic_metadata": metadata,
+                    **metadata,
+                    "reservation_id": reservation_id,
+                    "topic_ledger_reservation_id": topic_ledger_reservation_id,
+                    "owner_pid": os.getpid(),
         }
         file.seek(0, 2)
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
         file.flush()
+        os.fsync(file.fileno())
         return reservation_id
 
 
@@ -341,6 +838,7 @@ def cancel_topic(
     topic: str,
     reservation_id: str,
     reason: str,
+    metadata: Mapping[str, object] | None = None,
 ) -> None:
     """制作失敗または投稿なしの予約を無効化する状態遷移を追記する。"""
     record(
@@ -351,8 +849,37 @@ def cancel_topic(
             "status": "cancelled",
             "topic": topic,
             "topic_concepts": topic_concepts(topic),
+            "topic_metadata": topic_metadata(topic, metadata),
+            **topic_metadata(topic, metadata),
             "reservation_id": reservation_id,
             "cancel_reason": reason[:500],
+        },
+    )
+
+
+def mark_topic_publishing(
+    spec: ChannelSpec,
+    corner: str,
+    topic: str,
+    reservation_id: str,
+    metadata: Mapping[str, object] | None = None,
+    topic_ledger_reservation_id: str | None = None,
+) -> None:
+    """外部投稿を開始する前に、結果不明でも題材をfail-closedにする。"""
+    if not reservation_id:
+        return
+    record(
+        spec,
+        corner,
+        "",
+        extra={
+            "status": "publishing",
+            "topic": topic,
+            "topic_concepts": topic_concepts(topic),
+            "topic_metadata": topic_metadata(topic, metadata),
+            **topic_metadata(topic, metadata),
+            "reservation_id": reservation_id,
+            "topic_ledger_reservation_id": topic_ledger_reservation_id,
         },
     )
 
@@ -448,6 +975,8 @@ def reserve_performance_decision(
         file.seek(0, 2)
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
         file.flush()
+        os.fsync(file.fileno())
+        os.fsync(file.fileno())
         return application_id
 
 
@@ -623,3 +1152,4 @@ def record(
         fcntl.flock(file.fileno(), fcntl.LOCK_EX)
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
         file.flush()
+        os.fsync(file.fileno())

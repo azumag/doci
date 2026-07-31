@@ -50,12 +50,13 @@ rotation = "fixed"
 platforms = ["youtube"]
 
 [publish.youtube]
-privacy = "public"
+privacy = "unlisted"
 client_secret = "secrets/youtube-growth/client_secret.json"
 token = "secrets/youtube-growth/youtube_token.json"
 
 [publish.youtube.review]
-enabled = false
+enabled = true
+require_approval = true
 repository = "azumag/doci"
 publish_label = "公開承認"
 hold_label = "保留"
@@ -67,3 +68,4 @@ factcheck = true
 plan = true
 performance_feedback = true
 title_pattern_check = true
+max_uploads_per_day = 1

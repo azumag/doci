@@ -221,7 +221,231 @@ class TopicCooldownTest(unittest.TestCase):
                 now=self.now + timedelta(minutes=2),
             )
 
+    def test_explicit_opposing_view_allows_new_angle_in_channel_history(self) -> None:
+        original = "計画経済が物不足を生んだ理由"
+        original_metadata = {
+            "canonical_theme": "計画経済の配分制度と物不足",
+            "angle": "制度設計の失敗から不足が生まれた過程",
+            "audience": "歴史に関心のある視聴者",
+            "viewpoint": "制度設計を批判的に検証する立場",
+            "comparison_key": "制度設計の制約",
+        }
+        reservation = history.reserve_topic(
+            self.spec,
+            "video",
+            original,
+            cooldown_days=30,
+            metadata=original_metadata,
+            now=self.now,
+        )
+        assert reservation is not None
+        self._append(
+            {
+                "ts": (self.now + timedelta(minutes=1)).isoformat(),
+                "channel": "youtube-growth",
+                "corner": "video",
+                "status": "published",
+                "video_id": "video-id",
+                "topic": original,
+                "reservation_id": reservation,
+                "topic_metadata": original_metadata,
+            }
+        )
+
+        continuation = history.reserve_topic(
+            self.spec,
+            "analytics",
+            original,
+            cooldown_days=30,
+            metadata={
+                **original_metadata,
+                "novelty_type": "opposing_view",
+                "parent_topic": original,
+                "novelty_reason": "同じ制度を支持者側の合理性から検証する",
+                "angle": "不足を生んだ制約ではなく配分の優先順位を比較する",
+                "novelty_axis": "stance",
+                "viewpoint": "制度を支持する側の合理性",
+                "comparison_key": "制度を支持する側の合理性",
+            },
+            now=self.now + timedelta(minutes=2),
+        )
+        self.assertIsNotNone(continuation)
+
+    def test_generic_canonical_theme_does_not_block_distinct_topic(self) -> None:
+        first = history.reserve_topic(
+            self.spec,
+            "video",
+            "冒頭離脱を減らす構成設計",
+            cooldown_days=30,
+            metadata={
+                "canonical_theme": "YouTubeチャンネル運用の改善",
+                "angle": "冒頭30秒の離脱点を確認する",
+            },
+            now=self.now,
+        )
+        assert first is not None
+        self._append(
+            {
+                "ts": (self.now + timedelta(minutes=1)).isoformat(),
+                "channel": "youtube-growth",
+                "corner": "video",
+                "status": "published",
+                "video_id": "video-id",
+                "topic": "冒頭離脱を減らす構成設計",
+                "reservation_id": first,
+                "topic_metadata": {
+                    "canonical_theme": "YouTubeチャンネル運用の改善",
+                    "angle": "冒頭30秒の離脱点を確認する",
+                },
+            }
+        )
+
+        second = history.reserve_topic(
+            self.spec,
+            "analytics",
+            "サムネイルの文字を読みやすくする配色",
+            cooldown_days=30,
+            metadata={"canonical_theme": "YouTubeチャンネル運用の改善"},
+            now=self.now + timedelta(minutes=2),
+        )
+        self.assertIsNotNone(second)
+
+    def test_specific_canonical_theme_does_not_block_unrelated_topic_alone(self) -> None:
+        first = history.reserve_topic(
+            self.spec,
+            "video",
+            "江戸幕府が鎖国を選んだ外交事情",
+            cooldown_days=30,
+            metadata={
+                "canonical_theme": "江戸幕府の外交制限と海上交易",
+                "angle": "外交判断の背景を一次資料でたどる",
+            },
+            now=self.now,
+        )
+        assert first is not None
+        self._append(
+            {
+                "ts": (self.now + timedelta(minutes=1)).isoformat(),
+                "channel": "youtube-growth",
+                "corner": "video",
+                "status": "published",
+                "video_id": "video-id",
+                "topic": "江戸幕府が鎖国を選んだ外交事情",
+                "reservation_id": first,
+                "topic_metadata": {
+                    "canonical_theme": "江戸幕府の外交制限と海上交易",
+                    "angle": "外交判断の背景を一次資料でたどる",
+                },
+            }
+        )
+
+        second = history.reserve_topic(
+            self.spec,
+            "analytics",
+            "明治政府が鉄道敷設を急いだ財政事情",
+            cooldown_days=30,
+            metadata={
+                "canonical_theme": "江戸幕府の外交制限と海上交易",
+                "angle": "公債発行と都市交通の整備を比較する",
+            },
+            now=self.now + timedelta(minutes=2),
+        )
+        self.assertIsNotNone(second)
+
+    def test_stale_channel_reservation_does_not_block_after_lease(self) -> None:
+        self._append(
+            {
+                "ts": (self.now - timedelta(hours=25)).isoformat(),
+                "channel": "youtube-growth",
+                "corner": "video",
+                "status": "queued",
+                "topic": "期限切れ予約の題材",
+                "reservation_id": "stale",
+            }
+        )
+        reservation = history.reserve_topic(
+            self.spec,
+            "analytics",
+            "期限切れ予約の題材",
+            cooldown_days=30,
+            now=self.now,
+        )
+        self.assertIsNotNone(reservation)
+
+    def test_generic_angle_does_not_block_distinct_topics(self) -> None:
+        first = history.reserve_topic(
+            self.spec,
+            "video",
+            "企業が市場から撤退した理由",
+            cooldown_days=30,
+            metadata={
+                "canonical_theme": "経済",
+                "angle": "成功の秘訣を解説する",
+            },
+            now=self.now,
+        )
+        assert first is not None
+        self._append(
+            {
+                "ts": (self.now + timedelta(minutes=1)).isoformat(),
+                "channel": "youtube-growth",
+                "corner": "video",
+                "status": "published",
+                "video_id": "video-id",
+                "topic": "企業が市場から撤退した理由",
+                "reservation_id": first,
+                "topic_metadata": {
+                    "canonical_theme": "経済",
+                    "angle": "成功の秘訣を解説する",
+                },
+            }
+        )
+        second = history.reserve_topic(
+            self.spec,
+            "analytics",
+            "国家が価格統制を導入した背景",
+            cooldown_days=30,
+            metadata={
+                "canonical_theme": "経済",
+                "angle": "成功の秘訣を解説する",
+            },
+            now=self.now + timedelta(minutes=2),
+        )
+        self.assertIsNotNone(second)
+
+    def test_publishing_channel_reservation_remains_fail_closed(self) -> None:
+        topic = "投稿結果不明でも再利用させない題材"
+        reservation = history.reserve_topic(
+            self.spec,
+            "video",
+            topic,
+            cooldown_days=30,
+            now=self.now,
+        )
+        assert reservation is not None
+        history.mark_topic_publishing(
+            self.spec,
+            "video",
+            topic,
+            reservation,
+        )
+        with self.assertRaises(history.TopicCooldownSkip):
+            history.reserve_topic(
+                self.spec,
+                "analytics",
+                topic,
+                cooldown_days=30,
+                now=datetime.now(timezone.utc) + timedelta(days=31),
+            )
+
     def test_semantic_aliases_and_boilerplate_avoid_known_false_results(self) -> None:
+        self.assertGreaterEqual(
+            history.topic_similarity(
+                "ソ連の配給制度と食料不足",
+                "計画経済における日用品の供給不足",
+            ),
+            0.55,
+        )
         self.assertGreaterEqual(
             history.topic_similarity(
                 "視聴維持率を上げる",

@@ -234,6 +234,26 @@ class ThemeAssessmentTest(unittest.TestCase):
         self.assertEqual(privacy, "unlisted")
         self.assertIsNone(assessment)
 
+    def test_require_approval_keeps_clear_script_unlisted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = _spec(
+                Path(tmp),
+                review=YouTubeReviewSpec(
+                    enabled=True,
+                    require_approval=True,
+                    repository="owner/repo",
+                ),
+            )
+
+            privacy, assessment = youtube_review.choose_privacy(
+                spec,
+                _assessment_script(),
+            )
+
+        self.assertEqual(privacy, "unlisted")
+        self.assertIsNotNone(assessment)
+        self.assertTrue(assessment.eligible_for_public)
+
 
 class GithubIdentityTest(unittest.TestCase):
     def tearDown(self) -> None:

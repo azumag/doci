@@ -12,6 +12,13 @@ from doci import config, history, run_daily, youtube_review
 
 
 class RunDailyCliTest(unittest.TestCase):
+    def test_global_publish_dry_run_disables_reservations(self) -> None:
+        with patch.object(config, "PUBLISH_DRY_RUN", True):
+            self.assertFalse(run_daily._real_publish_requested(True))
+        with patch.object(config, "PUBLISH_DRY_RUN", False):
+            self.assertTrue(run_daily._real_publish_requested(True))
+        self.assertFalse(run_daily._real_publish_requested(False))
+
     def test_review_issues_are_checked_only_for_real_upload_runs(self) -> None:
         spec = SimpleNamespace(
             publish=SimpleNamespace(
@@ -354,6 +361,45 @@ class RunDailyCliTest(unittest.TestCase):
 
         cancel_mock.assert_not_called()
         cancel_performance_mock.assert_not_called()
+
+    def test_run_keeps_publishing_reservations_when_result_is_interrupted(self) -> None:
+        spec = SimpleNamespace(id="alpha")
+
+        def interrupt_after_publish_stage(*args):
+            args[-1].update(
+                {
+                    "spec": spec,
+                    "corner": "video",
+                    "topic": "中断時も結果確認が必要な題材",
+                    "reservation_id": "reservation",
+                    "topic_ledger_spec": spec,
+                    "topic_ledger_corner": "video",
+                    "topic_ledger_topic": "中断時も結果確認が必要な題材",
+                    "topic_ledger_reservation_id": "ledger-reservation",
+                    "topic_stage": "publishing",
+                    "performance_spec": spec,
+                    "performance_corner": "video",
+                    "performance_decision_id": "decision",
+                    "performance_application_id": "application",
+                }
+            )
+            raise KeyboardInterrupt()
+
+        with (
+            patch.object(run_daily, "_run_once", side_effect=interrupt_after_publish_stage),
+            patch.object(run_daily.topic_ledger, "cancel") as ledger_cancel_mock,
+            patch.object(run_daily.history, "cancel_topic") as history_cancel_mock,
+            patch.object(
+                run_daily.history,
+                "cancel_performance_decision",
+            ) as performance_cancel_mock,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                run_daily.run(spec, "2026-07-17", "video", True, 0)
+
+        ledger_cancel_mock.assert_not_called()
+        history_cancel_mock.assert_not_called()
+        performance_cancel_mock.assert_not_called()
 
     def test_performance_publish_marks_external_before_history_write(self) -> None:
         spec = SimpleNamespace(id="alpha")

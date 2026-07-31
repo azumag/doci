@@ -25,6 +25,7 @@ from . import (
     history,
     imagegen,
     routing,
+    topic_ledger,
     voicevox,
 )
 from .channel import ChannelSpec
@@ -38,6 +39,11 @@ def _workdir_name(day: str, corner_key: str, hhmmss: str) -> str:
 
 def _log(msg: str) -> None:
     print(f"[doci] {msg}", flush=True)
+
+
+def _real_publish_requested(do_upload: bool) -> bool:
+    """投稿フラグと全体dry-runを合わせた、外部状態を確定する実行判定。"""
+    return bool(do_upload and not config.PUBLISH_DRY_RUN)
 
 
 def _finalize_performance_application(
@@ -243,11 +249,14 @@ def _run_once(
     video_scenes: int,
     reservation_state: dict,
 ) -> dict:
+    real_publish = _real_publish_requested(do_upload)
     if corner_key and corner_key not in spec.corners:
         raise ValueError(f"unknown corner for channel {spec.id}: {corner_key}")
     review_spec = spec.publish.youtube.review
     if os.environ.get("DOCI_REVIEW_RECONCILED") != "1":
-        _reconcile_youtube_review(spec, do_upload)
+        _reconcile_youtube_review(spec, real_publish)
+    if real_publish:
+        topic_ledger.ensure_daily_capacity(spec)
     corner = (
         spec.corners[corner_key]
         if corner_key
@@ -271,7 +280,7 @@ def _run_once(
             from . import performance
 
             performance_decision = performance.refresh(spec, corner_key=corner.key)
-            if performance_decision["status"] == "active" and do_upload:
+            if performance_decision["status"] == "active" and real_publish:
                 performance_application_id = history.reserve_performance_decision(
                     spec,
                     corner.key,
@@ -310,7 +319,14 @@ def _run_once(
         spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
     )
     reservation_id: str | None = None
+    topic_ledger_reservation_id: str | None = None
     selected_topic = ""
+    selected_topic_metadata: dict[str, object] = {}
+
+    def capture_topic_metadata(research: dict) -> None:
+        nonlocal selected_topic_metadata
+        if isinstance(research, dict):
+            selected_topic_metadata = dict(research)
 
     def semantic_duplicate_check(
         candidate_topic: str, recent_topics: list[str]
@@ -330,18 +346,38 @@ def _run_once(
         )
 
     def reserve_selected_topic(topic: str) -> None:
-        nonlocal reservation_id, selected_topic
+        nonlocal reservation_id, selected_topic, topic_ledger_reservation_id
         selected_topic = topic.strip()
         try:
+            topic_ledger_reservation_id = topic_ledger.reserve(
+                spec,
+                corner.key,
+                selected_topic,
+                cooldown_days=cooldown_days,
+                metadata=selected_topic_metadata,
+                semantic_check=(
+                    semantic_duplicate_check if cooldown_days > 0 else None
+                ),
+                reserve=real_publish,
+            )
+            if topic_ledger_reservation_id:
+                reservation_state.update(
+                    {
+                        "topic_ledger_spec": spec,
+                        "topic_ledger_corner": corner.key,
+                        "topic_ledger_topic": selected_topic,
+                        "topic_ledger_metadata": selected_topic_metadata,
+                        "topic_ledger_reservation_id": topic_ledger_reservation_id,
+                    }
+                )
             reservation_id = history.reserve_topic(
                 spec,
                 corner.key,
                 selected_topic,
                 cooldown_days=cooldown_days,
-                reserve=do_upload,
-                semantic_check=(
-                    semantic_duplicate_check if cooldown_days > 0 else None
-                ),
+                reserve=real_publish,
+                metadata=selected_topic_metadata,
+                topic_ledger_reservation_id=topic_ledger_reservation_id,
             )
             if reservation_id:
                 reservation_state.update(
@@ -350,22 +386,31 @@ def _run_once(
                         "corner": corner.key,
                         "topic": selected_topic,
                         "reservation_id": reservation_id,
+                        "topic_metadata": selected_topic_metadata,
                     }
                 )
         except history.TopicCooldownSkip as exc:
             _log(f"題材スキップ: {exc.reason}")
             raise
         if cooldown_days > 0:
-            mode = "キュー予約" if do_upload else "dry-run照合"
+            mode = "キュー予約" if real_publish else "dry-run照合"
             _log(f"題材cooldown: {cooldown_days}日 / {mode}「{selected_topic}」")
 
     recent_titles_for_prompt = history.recent_titles(spec, cooldown_days=cooldown_days)
+    for shared_topic in topic_ledger.recent_topics(
+        limit=20,
+        cooldown_days=cooldown_days,
+    ):
+        if shared_topic not in recent_titles_for_prompt:
+            recent_titles_for_prompt.append(shared_topic)
+    recent_titles_for_prompt = recent_titles_for_prompt[-30:]
     script = ai_text.generate(
         spec,
         corner,
         day,
         recent_titles_for_prompt,
         topic_guard=reserve_selected_topic,
+        topic_metadata_guard=capture_topic_metadata,
         performance_decision=performance_decision,
     )
     _apply_title_pattern_check(
@@ -377,7 +422,13 @@ def _run_once(
     if theme_assessment is not None:
         script["_youtube_theme_review"] = theme_assessment.to_dict()
         if theme_assessment.eligible_for_public:
-            _log("YouTube主題ガード: 3項目と主題適合が明確→public")
+            if review_spec.require_approval:
+                _log(
+                    "YouTube主題ガード: 3項目と主題適合は明確だが"
+                    "承認制のためunlisted"
+                )
+            else:
+                _log("YouTube主題ガード: 3項目と主題適合が明確→public")
         else:
             _log(
                 "YouTube主題ガード: "
@@ -590,6 +641,25 @@ def _run_once(
     review_issue_error = None
     pub_results: list = []
     if do_upload:
+        if real_publish:
+            if topic_ledger_reservation_id:
+                topic_ledger.mark_publishing(
+                    spec,
+                    corner.key,
+                    selected_topic,
+                    topic_ledger_reservation_id,
+                    metadata=selected_topic_metadata,
+                )
+            if reservation_id:
+                history.mark_topic_publishing(
+                    spec,
+                    corner.key,
+                    selected_topic,
+                    reservation_id,
+                    metadata=selected_topic_metadata,
+                    topic_ledger_reservation_id=topic_ledger_reservation_id,
+                )
+            reservation_state["topic_stage"] = "publishing"
         from . import publish
         _log(f"投稿 (route={route.tier} → {'/'.join(route.platforms)})…")
         pub_results = publish.publish(
@@ -606,6 +676,10 @@ def _run_once(
             _log(f"  {r.platform}: {r.status}{(' ' + (r.url or r.detail)) if (r.url or r.detail) else ''}")
             if r.platform == "youtube" and r.status == "ok":
                 video_id = r.id
+        if any(result.status == "unknown" for result in pub_results):
+            # APIが受理した直後のタイムアウトも含め、成功IDが無い限り
+            # publishingを解除しない。重複投稿より手動確認を優先する。
+            reservation_state["external_unknown"] = True
         if (
             video_id
             and review_spec.enabled
@@ -653,11 +727,28 @@ def _run_once(
         _log("アップロードはスキップ (--no-upload)")
 
     # 6) 履歴
+    has_published = any(result.status == "ok" for result in pub_results)
+    has_unknown = any(result.status == "unknown" for result in pub_results)
     final_status = (
         "published"
-        if any(result.status == "ok" for result in pub_results)
+        if has_published
+        else "publishing"
+        if has_unknown
         else "generated"
     )
+    if topic_ledger_reservation_id and final_status != "publishing":
+        # 外部投稿成功後の履歴詳細保存より先に確定する。後段で落ちても
+        # 共通台帳は公開済み題材を再利用不可として保持する。
+        topic_ledger.complete(
+            spec,
+            corner.key,
+            selected_topic,
+            topic_ledger_reservation_id,
+            status=final_status,
+            metadata=selected_topic_metadata,
+            video_id=video_id,
+        )
+        reservation_state["topic_stage"] = final_status
     history.record(
         spec,
         corner.key,
@@ -667,7 +758,12 @@ def _run_once(
             "status": final_status,
             "topic": selected_topic,
             "topic_concepts": history.topic_concepts(selected_topic),
+            "topic_metadata": history.topic_metadata(
+                selected_topic,
+                selected_topic_metadata,
+            ),
             "reservation_id": reservation_id,
+            "topic_ledger_reservation_id": topic_ledger_reservation_id,
             "performance_decision_id": (
                 performance_decision["decision_id"]
                 if performance_application_id and performance_decision
@@ -722,19 +818,45 @@ def run(
             reservation_state,
         )
     except BaseException as exc:
+        reason = f"{type(exc).__name__}: {str(exc)[:400]}"
+        topic_ledger_id = reservation_state.get("topic_ledger_reservation_id")
+        if (
+            topic_ledger_id
+            and not reservation_state.get("finalized")
+            and not reservation_state.get("external_published")
+            and not reservation_state.get("external_unknown")
+            and reservation_state.get("topic_stage") != "publishing"
+        ):
+            try:
+                topic_ledger.cancel(
+                    reservation_state["topic_ledger_spec"],
+                    reservation_state["topic_ledger_corner"],
+                    reservation_state["topic_ledger_topic"],
+                    topic_ledger_id,
+                    reason,
+                    metadata=reservation_state.get("topic_ledger_metadata"),
+                )
+            except Exception as cleanup_exc:  # 元の制作失敗を隠さない
+                _log(f"共通題材台帳の取消失敗: {cleanup_exc}")
         reservation_id = reservation_state.get("reservation_id")
         if (
             reservation_id
             and not reservation_state.get("finalized")
             and not reservation_state.get("external_published")
+            and not reservation_state.get("external_unknown")
+            and reservation_state.get("topic_stage") != "publishing"
         ):
-            history.cancel_topic(
-                reservation_state["spec"],
-                reservation_state["corner"],
-                reservation_state["topic"],
-                reservation_id,
-                f"{type(exc).__name__}: {str(exc)[:400]}",
-            )
+            try:
+                history.cancel_topic(
+                    reservation_state["spec"],
+                    reservation_state["corner"],
+                    reservation_state["topic"],
+                    reservation_id,
+                    reason,
+                    metadata=reservation_state.get("topic_metadata"),
+                )
+            except Exception as cleanup_exc:  # 元の制作失敗を隠さない
+                _log(f"チャネル題材履歴の取消失敗: {cleanup_exc}")
         performance_application_id = reservation_state.get(
             "performance_application_id"
         )
@@ -742,14 +864,19 @@ def run(
             performance_application_id
             and not reservation_state.get("finalized")
             and not reservation_state.get("external_published")
+            and not reservation_state.get("external_unknown")
+            and reservation_state.get("topic_stage") != "publishing"
         ):
-            history.cancel_performance_decision(
-                reservation_state["performance_spec"],
-                reservation_state["performance_corner"],
-                reservation_state["performance_decision_id"],
-                performance_application_id,
-                f"{type(exc).__name__}: {str(exc)[:400]}",
-            )
+            try:
+                history.cancel_performance_decision(
+                    reservation_state["performance_spec"],
+                    reservation_state["performance_corner"],
+                    reservation_state["performance_decision_id"],
+                    performance_application_id,
+                    reason,
+                )
+            except Exception as cleanup_exc:  # 元の制作失敗を隠さない
+                _log(f"実績仮説の取消失敗: {cleanup_exc}")
         raise
 
 
@@ -803,6 +930,14 @@ def _run_all_channels(
                 {"channel": channel_id, "status": "ok", "result": result}
             )
         except history.TopicCooldownSkip as exc:
+            results.append(
+                {
+                    "channel": channel_id,
+                    "status": "skipped",
+                    "reason": exc.reason,
+                }
+            )
+        except topic_ledger.DailyUploadLimitSkip as exc:
             results.append(
                 {
                     "channel": channel_id,
@@ -885,6 +1020,19 @@ def main() -> int:
             video_scenes=args.video_scenes,
         )
     except history.TopicCooldownSkip as exc:
+        print(
+            json.dumps(
+                {
+                    "channel": spec.id,
+                    "status": "skipped",
+                    "reason": exc.reason,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    except topic_ledger.DailyUploadLimitSkip as exc:
         print(
             json.dumps(
                 {

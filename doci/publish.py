@@ -27,7 +27,7 @@ _CANON = {
 @dataclass
 class PublishResult:
     platform: str
-    status: str  # "ok" | "skipped" | "error" | "dry_run"
+    status: str  # "ok" | "skipped" | "error" | "unknown" | "dry_run"
     url: str | None = None
     id: str | None = None
     detail: str = ""
@@ -192,6 +192,24 @@ def publish(
                     youtube_privacy,
                 )
             )
-        except Exception as e:  # noqa: BLE001 1つ失敗しても他は続行
-            results.append(PublishResult(platform, "error", detail=str(e)[:200]))
+        except Exception as e:  # noqa: BLE001 送信後の結果不明を安全側へ倒す
+            if platform == "youtube":
+                from . import youtube
+
+                if isinstance(e, youtube.UploadPreflightError):
+                    results.append(
+                        PublishResult(
+                            platform,
+                            "error",
+                            detail=f"投稿前検証失敗: {str(e)[:180]}",
+                        )
+                    )
+                    continue
+            results.append(
+                PublishResult(
+                    platform,
+                    "unknown",
+                    detail=f"投稿結果不明: {str(e)[:180]}",
+                )
+            )
     return results

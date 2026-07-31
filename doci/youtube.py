@@ -41,6 +41,10 @@ _WRITABLE_VIDEO_STATUS_KEYS = {
 }
 
 
+class UploadPreflightError(RuntimeError):
+    """動画送信開始前に確定したローカル・認証設定エラー。"""
+
+
 def _build_service(credentials):
     """YouTube service構築を、依存未導入のfixtureテストから差し替え可能にする。"""
     import httplib2
@@ -440,31 +444,43 @@ def upload(
     token_file: Path | None = None,
     client_secret_file: Path | None = None,
 ) -> str:
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
-
     privacy = privacy or config.YOUTUBE_PRIVACY
-    creds = _load_credentials(
-        interactive=False,
-        token_file=token_file,
-        client_secret_file=client_secret_file,
-    )
-    youtube = build("youtube", "v3", credentials=creds)
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
 
-    body = {
-        "snippet": {
-            "title": title[:100],
-            "description": description,
-            "tags": tags[:30],
-            "categoryId": "24",  # Entertainment
-        },
-        "status": {
-            "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": False,
-        },
-    }
-    media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True, mimetype="video/mp4")
-    req = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        creds = _load_credentials(
+            interactive=False,
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+        )
+        youtube = build("youtube", "v3", credentials=creds)
+
+        body = {
+            "snippet": {
+                "title": title[:100],
+                "description": description,
+                "tags": tags[:30],
+                "categoryId": "24",  # Entertainment
+            },
+            "status": {
+                "privacyStatus": privacy,
+                "selfDeclaredMadeForKids": False,
+            },
+        }
+        media = MediaFileUpload(
+            str(video_path),
+            chunksize=-1,
+            resumable=True,
+            mimetype="video/mp4",
+        )
+        req = youtube.videos().insert(
+            part="snippet,status",
+            body=body,
+            media_body=media,
+        )
+    except Exception as exc:
+        raise UploadPreflightError(str(exc)[:240]) from exc
     resp = None
     while resp is None:
         status, resp = req.next_chunk()
