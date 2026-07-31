@@ -18,7 +18,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    # Fable 5のsubscription reviewは大きめの差分で15分を超えることがある。
+    # Opus 5のsubscription reviewは大きめの差分で15分を超えることがある。
     timeout-minutes: 30
     permissions:
       contents: read
@@ -83,7 +83,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt_file: /tmp/doci-claude-review-prompt.md
           claude_args: >-
-            --model claude-fable-5
+            --model claude-opus-5
             --max-turns 4
             --json-schema
             '{"type":"object","additionalProperties":false,"properties":{"summary":{"type":"string","maxLength":1200},"findings":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"properties":{"severity":{"type":"string","enum":["BLOCKER","HIGH","MEDIUM"]},"file":{"type":"string","maxLength":300},"line":{"type":"integer","minimum":1},"body":{"type":"string","maxLength":1200}},"required":["severity","file","line","body"]}}},"required":["summary","findings"]}'
