@@ -513,6 +513,13 @@ class TopicCooldownTest(unittest.TestCase):
             "unknown",
         )
 
+    def test_youtube_creator_audience_is_saved_as_continuation_audience(self) -> None:
+        metadata = history.topic_metadata(
+            "YouTube制作者向けの題材",
+            {"youtube_creator_audience": "初めて投稿するYouTube制作者"},
+        )
+        self.assertEqual(metadata["audience"], "初めて投稿するYouTube制作者")
+
     def test_rotation_ignores_queue_skip_and_cancel_events(self) -> None:
         self._append(
             {

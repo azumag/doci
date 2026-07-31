@@ -307,7 +307,8 @@ def topic_metadata(
     return {
         "canonical_theme": canonical_theme,
         "angle": text("angle", 500),
-        "audience": text("audience", 160),
+        "audience": text("audience", 160)
+        or text("youtube_creator_audience", 160),
         "format": text("format", 80),
         "novelty_type": novelty_type,
         "parent_topic": text("parent_topic", 300),
@@ -430,7 +431,13 @@ def _row_topic_metadata(
                     ("novelty_axis", "novelty_axis"),
                     ("comparison_key", "comparison_key"),
                 ):
-                    if target_key not in raw and source_key in research:
+                    if (
+                        source_key in research
+                        and (
+                            target_key not in raw
+                            or not str(raw.get(target_key) or "").strip()
+                        )
+                    ):
                         raw[target_key] = research[source_key]
         except (OSError, ValueError, TypeError):
             pass

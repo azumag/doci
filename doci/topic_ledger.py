@@ -596,6 +596,10 @@ def reserve(
                 candidates,
                 similarity_threshold,
             )
+            # semantic再判定で台帳を読み直すと行dictも作り直される。古い
+            # id(row)キャッシュを残すと、CPythonのID再利用で別行のメタデータを
+            # 誤って参照し得るため、読込単位でだけキャッシュを有効にする。
+            metadata_cache.clear()
             best = _lexical_match(
                 topic,
                 current_topic_data,
