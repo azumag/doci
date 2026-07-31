@@ -686,7 +686,7 @@ def _queued_reservation_is_active(
     timestamp: datetime | None,
     now: datetime,
 ) -> bool:
-    """孤児予約を無期限に題材cooldownへ残さない。"""
+    """孤児予約を無期限に題材cooldownへ残さず、PID名前空間にも依存しない。"""
     if timestamp is None:
         return True
     from . import config
@@ -696,17 +696,10 @@ def _queued_reservation_is_active(
     ttl_hours = config.TOPIC_RESERVATION_TTL_HOURS
     if ttl_hours > 0 and timestamp < now - timedelta(hours=ttl_hours):
         return False
-    owner_pid = row.get("owner_pid")
-    if isinstance(owner_pid, int) and owner_pid > 0:
-        try:
-            os.kill(owner_pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            pass
-        else:
-            return True
-    return ttl_hours <= 0 or timestamp >= now - timedelta(hours=ttl_hours)
+    # 旧履歴にowner_pidが残っていても、共有コンテナ・ホスト間でPIDを
+    # 解釈しない。稼働中runを早期に孤児扱いして重複予約を許すより、
+    # 明示的なTTLでのみqueued予約を解放する。
+    return True
 
 
 def reserve_topic(
@@ -850,7 +843,6 @@ def reserve_topic(
                     **metadata,
                     "reservation_id": reservation_id,
                     "topic_ledger_reservation_id": topic_ledger_reservation_id,
-                    "owner_pid": os.getpid(),
         }
         file.seek(0, 2)
         file.write(json.dumps(row, ensure_ascii=False) + "\n")

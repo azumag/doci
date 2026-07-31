@@ -453,6 +453,100 @@ class RunDailyCliTest(unittest.TestCase):
         self.assertEqual(rows[0]["last_run"]["title"], "Latest")
         self.assertEqual(rows[1]["status"], "error")
 
+    def test_main_recovers_publishing_as_cancelled(self) -> None:
+        recovery = {
+            "channel": "alpha",
+            "reservation_id": "ledger-id",
+            "status": "cancelled",
+            "local_history_recovered": True,
+        }
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "doci.run_daily",
+                    "--recover-publishing",
+                    "ledger-id",
+                    "--recovery-reason",
+                    "投稿なしを確認",
+                ],
+            ),
+            patch.object(
+                run_daily.topic_ledger,
+                "recover_publishing",
+                return_value=recovery,
+            ) as recover_mock,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            exit_code = run_daily.main()
+
+        self.assertEqual(exit_code, 0)
+        recover_mock.assert_called_once_with(
+            "ledger-id",
+            status="cancelled",
+            video_id=None,
+            reason="投稿なしを確認",
+        )
+        self.assertEqual(json.loads(stdout.getvalue()), recovery)
+
+    def test_main_recovers_publishing_as_published(self) -> None:
+        recovery = {
+            "channel": "alpha",
+            "reservation_id": "ledger-id",
+            "status": "published",
+            "video_id": "video-id",
+        }
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "doci.run_daily",
+                    "--recover-publishing",
+                    "ledger-id",
+                    "--recovery-status",
+                    "published",
+                    "--recovery-video-id",
+                    "video-id",
+                ],
+            ),
+            patch.object(
+                run_daily.topic_ledger,
+                "recover_publishing",
+                return_value=recovery,
+            ) as recover_mock,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            exit_code = run_daily.main()
+
+        self.assertEqual(exit_code, 0)
+        recover_mock.assert_called_once_with(
+            "ledger-id",
+            status="published",
+            video_id="video-id",
+            reason="運用者が外部投稿の結果を確認し、未完了予約を復旧",
+        )
+        self.assertEqual(json.loads(stdout.getvalue()), recovery)
+
+    def test_main_returns_one_when_published_recovery_lacks_video_id(self) -> None:
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "doci.run_daily",
+                    "--recover-publishing",
+                    "ledger-id",
+                    "--recovery-status",
+                    "published",
+                ],
+            ),
+            patch.object(run_daily, "_log") as log_mock,
+        ):
+            exit_code = run_daily.main()
+
+        self.assertEqual(exit_code, 1)
+        log_mock.assert_called_once()
+        self.assertIn("video_idが必要", log_mock.call_args.args[0])
+
     def test_main_list_channels_does_not_require_default_channel(self) -> None:
         with (
             patch("sys.argv", ["doci.run_daily", "--list-channels"]),

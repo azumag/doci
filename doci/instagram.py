@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -82,10 +83,22 @@ def upload(
 
     caption = (f"{title}\n\n{description}").strip()[:2200]
     # 1) メディアコンテナ作成（公開URLから取得）
-    cont = _post(
-        f"{uid}/media",
-        {"media_type": "REELS", "video_url": video_url, "caption": caption, "access_token": token},
-    )
+    try:
+        cont = _post(
+            f"{uid}/media",
+            {
+                "media_type": "REELS",
+                "video_url": video_url,
+                "caption": caption,
+                "access_token": token,
+            },
+        )
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500:
+            raise InstagramUploadPreflightError(
+                f"コンテナ作成が受理されませんでした (HTTP {exc.code})"
+            ) from exc
+        raise
     creation_id = cont.get("id")
     if not creation_id:
         raise InstagramError(f"コンテナ作成失敗: {json.dumps(cont)[:300]}")

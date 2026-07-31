@@ -680,7 +680,6 @@ def reserve(
                     "topic": topic,
                     "status": "queued",
                     "reservation_id": reservation_id,
-                    "owner_pid": os.getpid(),
                     "daily_upload_limit": daily_limit or None,
                     "daily_upload_day": (
                         current.astimezone(_JST).date().isoformat()

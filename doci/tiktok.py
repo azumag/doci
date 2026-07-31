@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -191,25 +192,32 @@ def upload(
         chunk_size = 32 * _MB
         total = (size + chunk_size - 1) // chunk_size
 
-    init = _post_json(
-        _INIT,
-        token,
-        {
-            "post_info": {
-                "title": _caption(title, tags),
-                "privacy_level": privacy,
-                "disable_comment": False,
-                "disable_duet": False,
-                "disable_stitch": False,
+    try:
+        init = _post_json(
+            _INIT,
+            token,
+            {
+                "post_info": {
+                    "title": _caption(title, tags),
+                    "privacy_level": privacy,
+                    "disable_comment": False,
+                    "disable_duet": False,
+                    "disable_stitch": False,
+                },
+                "source_info": {
+                    "source": "FILE_UPLOAD",
+                    "video_size": size,
+                    "chunk_size": chunk_size,
+                    "total_chunk_count": total,
+                },
             },
-            "source_info": {
-                "source": "FILE_UPLOAD",
-                "video_size": size,
-                "chunk_size": chunk_size,
-                "total_chunk_count": total,
-            },
-        },
-    )
+        )
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500:
+            raise TikTokUploadPreflightError(
+                f"投稿初期化が受理されませんでした (HTTP {exc.code})"
+            ) from exc
+        raise
     data = init.get("data") or {}
     publish_id = data.get("publish_id")
     upload_url = data.get("upload_url")
