@@ -155,6 +155,114 @@ class PublishAccountsTest(unittest.TestCase):
         self.assertEqual(result.status, "dry_run")
         upload_mock.assert_not_called()
 
+    def test_upload_exception_is_classified_as_unknown(self) -> None:
+        spec = SimpleNamespace(publish=self._youtube_spec("alpha"))
+        with (
+            patch.object(config, "PUBLISH_YOUTUBE", True),
+            patch.object(publish, "_do_upload", side_effect=TimeoutError("timeout")),
+        ):
+            result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=self.route,
+                spec=spec,
+            )[0]
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("投稿結果不明", result.detail)
+
+    def test_youtube_preflight_error_is_reusable_same_day(self) -> None:
+        spec = SimpleNamespace(publish=self._youtube_spec("alpha"))
+        with (
+            patch.object(config, "PUBLISH_YOUTUBE", True),
+            patch.object(
+                youtube,
+                "upload",
+                side_effect=youtube.UploadPreflightError("scope不足"),
+            ),
+        ):
+            result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=self.route,
+                spec=spec,
+            )[0]
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("投稿前検証失敗", result.detail)
+
+    def test_tiktok_and_instagram_preflight_errors_are_reusable(self) -> None:
+        tik_token = self.root / "tiktok-preflight.json"
+        tik_token.write_text("{}", encoding="utf-8")
+        spec = SimpleNamespace(
+            publish=PublishSpec(
+                platforms=("tiktok", "instagram"),
+                tiktok=TikTokPublishSpec(token=tik_token, privacy="SELF_ONLY"),
+                instagram=InstagramPublishSpec(
+                    user_id="ig-user", access_token_env="IG_PREFLIGHT_TOKEN"
+                ),
+            )
+        )
+        tiktok_route = routing.Route(
+            tier="short",
+            is_youtube_short=False,
+            platforms=["tiktok"],
+            hashtag="",
+            landscape=False,
+        )
+        instagram_route = routing.Route(
+            tier="short",
+            is_youtube_short=False,
+            platforms=["instagram"],
+            hashtag="",
+            landscape=False,
+        )
+        with (
+            patch.object(config, "PUBLISH_TIKTOK", True),
+            patch.object(config, "TIKTOK_CLIENT_KEY", "key"),
+            patch.object(config, "TIKTOK_CLIENT_SECRET", "secret"),
+            patch.object(
+                publish,
+                "_do_upload",
+                side_effect=tiktok.TikTokUploadPreflightError("token不正"),
+            ),
+        ):
+            tiktok_result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=tiktok_route,
+                spec=spec,
+            )[0]
+
+        with (
+            patch.object(config, "PUBLISH_INSTAGRAM", True),
+            patch.dict(os.environ, {"IG_PREFLIGHT_TOKEN": "token"}),
+            patch.object(
+                publish,
+                "_do_upload",
+                side_effect=instagram.InstagramUploadPreflightError("公開ホスト未実装"),
+            ),
+        ):
+            instagram_result = publish.publish(
+                self.root / "video.mp4",
+                title="Title",
+                description="Description",
+                tags=[],
+                route=instagram_route,
+                spec=spec,
+            )[0]
+
+        self.assertEqual(tiktok_result.status, "error")
+        self.assertIn("投稿前検証失敗", tiktok_result.detail)
+        self.assertEqual(instagram_result.status, "error")
+        self.assertIn("投稿前検証失敗", instagram_result.detail)
+
     def test_youtube_upload_and_thumbnail_receive_channel_credentials(self) -> None:
         settings = self._youtube_spec("alpha")
         thumbnail = self.root / "thumbnail.png"
@@ -358,6 +466,37 @@ class PublishAccountsTest(unittest.TestCase):
         self.assertEqual(
             ig_upload.call_args.kwargs["access_token"], "secret-value"
         )
+
+    def test_tiktok_terminal_statuses_are_not_all_success(self) -> None:
+        tik_token = self.root / "tiktok-status-token.json"
+        settings = PublishSpec(
+            platforms=("tiktok",),
+            tiktok=TikTokPublishSpec(token=tik_token, privacy="SELF_ONLY"),
+        )
+        cases = (
+            ("PUBLISH_COMPLETE", "ok"),
+            ("FAILED", "error"),
+            ("PROCESSING", "unknown"),
+            ("", "unknown"),
+        )
+        for api_status, expected in cases:
+            with self.subTest(api_status=api_status):
+                with patch.object(
+                    tiktok,
+                    "upload",
+                    return_value={"publish_id": "tik-id", "status": api_status},
+                ):
+                    result = publish._do_upload(
+                        "tiktok",
+                        self.root / "video.mp4",
+                        "Title",
+                        "Description",
+                        [],
+                        self.route,
+                        settings,
+                    )
+                self.assertEqual(result.status, expected)
+                self.assertEqual(result.detail, api_status)
 
     def test_youtube_auth_cli_uses_selected_channel_paths(self) -> None:
         settings = self._youtube_spec("alpha")

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -28,10 +29,16 @@ _INIT = "https://open.tiktokapis.com/v2/post/publish/video/init/"
 _STATUS = "https://open.tiktokapis.com/v2/post/publish/status/fetch/"
 _SCOPE = "video.publish"
 _MB = 1024 * 1024
+_STATUS_POLL_ATTEMPTS = 20
+_STATUS_POLL_INTERVAL_SECONDS = 3
 
 
 class TikTokError(RuntimeError):
     pass
+
+
+class TikTokUploadPreflightError(TikTokError):
+    """動画投稿を開始する前の資格情報・ローカル検証エラー。"""
 
 
 def _post_form(url: str, fields: dict) -> dict:
@@ -168,10 +175,18 @@ def upload(
     privacy: str | None = None,
 ) -> dict:
     """Direct Post で動画を投稿。{publish_id, status} を返す。"""
-    token = _access_token(token_file)
+    try:
+        token = _access_token(token_file)
+    except (TikTokError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise TikTokUploadPreflightError(str(exc)) from exc
     privacy = privacy or config.TIKTOK_PRIVACY
     video_path = Path(video_path)
-    size = video_path.stat().st_size
+    try:
+        size = video_path.stat().st_size
+    except OSError as exc:
+        raise TikTokUploadPreflightError(
+            f"動画ファイルを読み込めません: {video_path}"
+        ) from exc
     # ≤64MBは1チャンク。超過は ~32MB 分割（各 5–64MB 制約を満たす）。
     if size <= 64 * _MB:
         chunk_size, total = size, 1
@@ -179,25 +194,32 @@ def upload(
         chunk_size = 32 * _MB
         total = (size + chunk_size - 1) // chunk_size
 
-    init = _post_json(
-        _INIT,
-        token,
-        {
-            "post_info": {
-                "title": _caption(title, tags),
-                "privacy_level": privacy,
-                "disable_comment": False,
-                "disable_duet": False,
-                "disable_stitch": False,
+    try:
+        init = _post_json(
+            _INIT,
+            token,
+            {
+                "post_info": {
+                    "title": _caption(title, tags),
+                    "privacy_level": privacy,
+                    "disable_comment": False,
+                    "disable_duet": False,
+                    "disable_stitch": False,
+                },
+                "source_info": {
+                    "source": "FILE_UPLOAD",
+                    "video_size": size,
+                    "chunk_size": chunk_size,
+                    "total_chunk_count": total,
+                },
             },
-            "source_info": {
-                "source": "FILE_UPLOAD",
-                "video_size": size,
-                "chunk_size": chunk_size,
-                "total_chunk_count": total,
-            },
-        },
-    )
+        )
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500:
+            raise TikTokUploadPreflightError(
+                f"投稿初期化が受理されませんでした (HTTP {exc.code})"
+            ) from exc
+        raise
     data = init.get("data") or {}
     publish_id = data.get("publish_id")
     upload_url = data.get("upload_url")
@@ -216,9 +238,10 @@ def upload(
             with urllib.request.urlopen(req, timeout=300):
                 pass
 
-    # ステータス確認（数回ポーリング）
+    # ステータス確認。PROCESSINGが通常挙動のため、最大約1分まで
+    # ポーリングしてから結果不明としてfail-closedへ渡す。
     status = ""
-    for _ in range(10):
+    for attempt in range(_STATUS_POLL_ATTEMPTS):
         try:
             st = _post_json(_STATUS, token, {"publish_id": publish_id})
             status = ((st.get("data") or {}).get("status")) or ""
@@ -226,7 +249,8 @@ def upload(
             break
         if status in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX", "FAILED"):
             break
-        time.sleep(3)
+        if attempt + 1 < _STATUS_POLL_ATTEMPTS:
+            time.sleep(_STATUS_POLL_INTERVAL_SECONDS)
     print(f"tiktok: publish_id={publish_id} status={status} privacy={privacy}")
     return {"publish_id": publish_id, "status": status}
 

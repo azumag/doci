@@ -104,8 +104,9 @@ voice = "narrator"
         self.assertEqual(spec.voice_for("shorts").speaker, 13)
         self.assertEqual(spec.style.bgm.dir, spec.root / "bgm")
         self.assertEqual(spec.publish.platforms, ("youtube",))
-        self.assertEqual(spec.publish.youtube.privacy, "public")
-        self.assertFalse(spec.publish.youtube.review.enabled)
+        self.assertEqual(spec.publish.youtube.privacy, "unlisted")
+        self.assertTrue(spec.publish.youtube.review.enabled)
+        self.assertTrue(spec.publish.youtube.review.require_approval)
         self.assertEqual(
             spec.publish.youtube.review.repository,
             "azumag/doci",
@@ -123,6 +124,7 @@ voice = "narrator"
         self.assertTrue(spec.pipeline_get("plan"))
         self.assertTrue(spec.pipeline_get("performance_feedback"))
         self.assertTrue(spec.pipeline_get("title_pattern_check"))
+        self.assertEqual(spec.pipeline_get("max_uploads_per_day"), 1)
         self.assertEqual(
             spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS),
             30,

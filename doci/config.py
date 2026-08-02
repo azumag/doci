@@ -270,6 +270,9 @@ SCRIPT_RESEARCH_TOTAL_TIMEOUT = get_int("SCRIPT_RESEARCH_TOTAL_TIMEOUT", 0)
 # 公開済み/キュー済み題材の再利用を避ける既定期間。channel.toml の
 # pipeline.topic_cooldown_days でチャンネル単位に上書きでき、0で無効化する。
 TOPIC_COOLDOWN_DAYS = get_int("TOPIC_COOLDOWN_DAYS", 30)
+# 制作プロセスが異常終了したキュー予約を題材cooldownから外すまでの時間。
+# 0以下なら予約を期限なしで有効とする。
+TOPIC_RESERVATION_TTL_HOURS = get_int("TOPIC_RESERVATION_TTL_HOURS", 24)
 # ファクトチェックの再試行回数。MiniMax等が長い日本語JSONのエスケープを崩すことがあるため再試行する。
 SCRIPT_FACTCHECK_RETRIES = get_int("SCRIPT_FACTCHECK_RETRIES", 2)
 # MiniMax監査とQwen文章修正の全試行を合わせた総時間上限。0は無制限。

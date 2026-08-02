@@ -304,10 +304,16 @@ def choose_privacy(
     spec: ChannelSpec,
     script: dict,
 ) -> tuple[str, ThemeAssessment | None]:
-    """確認運用が有効なチャンネルだけ、安全側の公開判定を適用する。"""
+    """確認運用が有効なチャンネルだけ、安全側の公開判定を適用する。
+
+    require_approval は、主題判定が明確でも自動公開せず、既存の確認Issueの
+    「公開承認」ラベルだけを公開権限にする運用で使う。
+    """
     if not spec.publish.youtube.review.enabled:
         return spec.publish.youtube.privacy, None
     assessment = assess(script)
+    if spec.publish.youtube.review.require_approval:
+        return "unlisted", assessment
     return assessment.privacy, assessment
 
 
@@ -584,6 +590,10 @@ def _issue_body(
     review: YouTubeReviewSpec,
 ) -> str:
     reason = " / ".join(assessment.reasons) or "主題適合の最終確認"
+    if review.require_approval:
+        reason = (
+            "承認制のため、主題判定が明確でも公開承認ラベルが付くまで限定公開"
+        )
     return f"""\
 <!-- doci-youtube-review video_id={video_id} -->
 ## 確認対象

@@ -27,7 +27,7 @@ _CANON = {
 @dataclass
 class PublishResult:
     platform: str
-    status: str  # "ok" | "skipped" | "error" | "dry_run"
+    status: str  # "ok" | "skipped" | "error" | "unknown" | "dry_run"
     url: str | None = None
     id: str | None = None
     detail: str = ""
@@ -130,7 +130,21 @@ def _do_upload(
             token_file=settings.token,
             privacy=settings.privacy,
         )
-        return PublishResult("tiktok", "ok", id=r.get("publish_id"), detail=r.get("status", ""))
+        status = str(r.get("status") or "")
+        if status == "PUBLISH_COMPLETE":
+            result_status = "ok"
+        elif status == "FAILED":
+            result_status = "error"
+        else:
+            # PROCESSING、空値、未知の状態は、TikTok側の公開結果を
+            # 確定できないため再投稿せず手動確認へ回す。
+            result_status = "unknown"
+        return PublishResult(
+            "tiktok",
+            result_status,
+            id=r.get("publish_id"),
+            detail=status,
+        )
     if platform == "instagram":
         from . import instagram
 
@@ -192,6 +206,34 @@ def publish(
                     youtube_privacy,
                 )
             )
-        except Exception as e:  # noqa: BLE001 1つ失敗しても他は続行
-            results.append(PublishResult(platform, "error", detail=str(e)[:200]))
+        except Exception as e:  # noqa: BLE001 送信後の結果不明を安全側へ倒す
+            preflight_error = False
+            if platform == "youtube":
+                from . import youtube
+
+                preflight_error = isinstance(e, youtube.UploadPreflightError)
+            elif platform == "tiktok":
+                from . import tiktok
+
+                preflight_error = isinstance(e, tiktok.TikTokUploadPreflightError)
+            elif platform == "instagram":
+                from . import instagram
+
+                preflight_error = isinstance(e, instagram.InstagramUploadPreflightError)
+            if preflight_error:
+                results.append(
+                    PublishResult(
+                        platform,
+                        "error",
+                        detail=f"投稿前検証失敗: {str(e)[:180]}",
+                    )
+                )
+                continue
+            results.append(
+                PublishResult(
+                    platform,
+                    "unknown",
+                    detail=f"投稿結果不明: {str(e)[:180]}",
+                )
+            )
     return results

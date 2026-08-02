@@ -196,6 +196,45 @@ class ReserveTopicSemanticCheckTest(unittest.TestCase):
         )
         self.assertIsNotNone(reservation)
 
+    def test_semantic_match_for_explicit_opposing_view_allows_continuation(self) -> None:
+        parent = "配給制度が不足を生んだ理由"
+        self._append(
+            {
+                "ts": (self.now - timedelta(days=1)).isoformat(),
+                "status": "published",
+                "video_id": "parent-video",
+                "topic": parent,
+                "topic_metadata": {
+                    "angle": "制度設計の制約から不足を検証する",
+                    "comparison_key": "制度設計の制約",
+                    "viewpoint": "制度を批判的に検証する立場",
+                },
+            }
+        )
+
+        metadata = {
+            "novelty_type": "opposing_view",
+            "parent_topic": parent,
+            "parent_topic_id": "parent-video",
+            "novelty_reason": "同じ制度を支持者側の合理性から検証する",
+            "angle": "不足ではなく配分の優先順位を比較する",
+            "novelty_axis": "stance",
+            "viewpoint": "制度を支持する側の合理性",
+            "comparison_key": "制度を支持する側の合理性",
+        }
+        reservation = history.reserve_topic(
+            self.spec,
+            "capitalism",
+            parent,
+            cooldown_days=30,
+            metadata=metadata,
+            semantic_check=lambda topic, recent: history.TopicMatch(
+                topic=recent[0], ts="", similarity=0.9, source="LLM判定"
+            ),
+            now=self.now,
+        )
+        self.assertIsNotNone(reservation)
+
 
 class CheckSemanticDuplicateTest(unittest.TestCase):
     def test_llm_flags_reworded_topic_as_duplicate(self) -> None:
@@ -246,6 +285,24 @@ class CheckSemanticDuplicateTest(unittest.TestCase):
             result = ai_text.check_semantic_duplicate("新しい候補", [])
         dispatch.assert_not_called()
         self.assertIsNone(result)
+
+    def test_semantic_limit_keeps_newest_candidates(self) -> None:
+        newest_first = [f"題材{i}" for i in range(30)]
+        with mock.patch.object(
+            ai_text,
+            "_dispatch",
+            return_value=json.dumps(
+                {"duplicate": True, "matched_index": 1, "confidence": 0.9}
+            ),
+        ) as dispatch:
+            result = ai_text.check_semantic_duplicate(
+                "新しい候補", newest_first
+            )
+
+        self.assertEqual(result, ("題材0", 0.9))
+        prompt = dispatch.call_args.args[0]
+        self.assertIn("1. 題材0", prompt)
+        self.assertNotIn("題材29", prompt)
 
 
 if __name__ == "__main__":

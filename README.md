@@ -40,6 +40,7 @@ channels/<id>/channel.toml
 run_daily（単一 / 全チャンネル逐次）
   ├─ 共通生成パイプライン: ai_text → voicevox → assets → compose
   ├─ チャンネル別履歴: output/<id>/history.jsonl
+  ├─ 全チャネル共通題材台帳: output/topic_ledger.jsonl
   └─ チャンネル別投稿資格情報: secrets/<id>/
 ```
 
@@ -178,7 +179,7 @@ token = "secrets/sample/youtube_token.json"
 |---|---|
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
-| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `title_pattern_check`, `plan_topic_retries` |
+| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `title_pattern_check`, `plan_topic_retries`, `max_uploads_per_day` |
 | `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio` |
 | `style.thumbnail` | `font_family`, `title_color` |
 | `style.chart` | `palette`, `font` |
@@ -187,7 +188,7 @@ token = "secrets/sample/youtube_token.json"
 | `style.credits` | `template` |
 | `publish` | `platforms` |
 | `publish.youtube` | `privacy`, `client_secret`, `token`, `review` |
-| `publish.youtube.review` | `enabled`, `repository`, `publish_label`, `hold_label`, `keep_unlisted_label` |
+| `publish.youtube.review` | `enabled`, `require_approval`, `repository`, `publish_label`, `hold_label`, `keep_unlisted_label` |
 | `publish.tiktok` | `token`, `privacy` |
 | `publish.instagram` | `user_id`, `access_token_env` |
 
@@ -199,7 +200,15 @@ token = "secrets/sample/youtube_token.json"
 チャンネルのプロンプトは従来どおりとなる。
 `pipeline.topic_cooldown_days` は公開済み・キュー済みの近似題材を再利用しない期間で、
 既定は30日、`0`で無効化する。重複runは動画生成・投稿前に正常スキップされ、理由が
-チャンネル別 `history.jsonl` に記録される。
+チャンネル別 `history.jsonl` に記録される。加えて、全チャネル共通の
+`output/topic_ledger.jsonl` をファイルロック付きで照合し、別チャネルで直近に扱った
+同一大テーマの言い換えも、動画生成前に停止する。既存のチャネル別履歴は書き換えず、
+共通台帳の照合時に読み取る。続編・反対視点・別視聴者向けは、元題材・新しい切り口・
+違いをresearchが構造化して明示した場合だけ再利用できる。単なるタイトル・形式変更は
+許可しない。制作前の `queued` 予約は既定24時間のリースで、異常終了したrunを無期限に
+ブロックしない。外部投稿開始後の `publishing` は結果不明でも安全側に保持し、手動確認が
+完了するまで再利用しない。続編の親は公開済み行の video/reservation ID に内部照合する。
+`PUBLISH_DRY_RUN=1` では題材予約を追記せず照合だけを行う。
 research無し（`ideology`等）のコーナーは、執筆前の構成プラン段（起承転結の実質テーマ＝
 `plan.topic`）でこのcooldownを照合する。タイトルは煽り文句で言い換えられやすく重複検出を
 すり抜けやすいため、内容そのものに近いこの段階で判定し、重複と判定されても即スキップにせず
@@ -212,6 +221,25 @@ research無し（`ideology`等）のコーナーは、執筆前の構成プラ�
 `pipeline.title_pattern_check = true`（既定OFF、`youtube-growth`で有効）は、題材が違っても
 タイトルの修辞パターン（固有名詞・問題語・疑問形/煽り構文）が使い回されていないかをLLMで
 検出し、`script._title_pattern_check`へ記録する（検出のみで公開判断は変えない）。
+`pipeline.max_uploads_per_day` を設定したチャンネルは、JST暦日ごとの実投稿枠を
+ファイルロック下で原子的に予約する。`--no-upload` と `PUBLISH_DRY_RUN=1` は枠を消費せず、
+制作失敗時は解放、投稿成功または結果不明時は安全側に保持する。日付をまたいだ
+`queued`／`publishing`も結果確定まで次の枠を使わない。
+プロセス停止などで結果不明の `publishing` が残った場合は、自動解除せず、外部側の結果を
+運用者が確認してから次で明示的に終端化する。未投稿を確認した場合は `cancelled`、投稿済み
+動画を確認した場合は `published` と動画IDを指定する。共通台帳と該当チャネル履歴を同時に
+復旧し、操作理由を記録する。
+
+```bash
+# 外部投稿が発生していないことを確認した後
+python -m doci.run_daily --recover-publishing <reservation-id> \
+  --recovery-status cancelled --recovery-reason "YouTube Studioで投稿なしを確認"
+
+# 投稿済み動画を確認した場合
+python -m doci.run_daily --recover-publishing <reservation-id> \
+  --recovery-status published --recovery-video-id <video-id> \
+  --recovery-reason "YouTube Studioで投稿済みを確認"
+```
 `pipeline.performance_feedback = true` は投稿履歴の動画をYouTube Data APIで
 read-only同期し、十分な比較標本がある場合だけ相対的な形式仮説を次回promptへ渡す。
 retention等のAnalytics指標には、OAuthクライアントのGoogle Cloud projectで
@@ -224,12 +252,14 @@ YouTube投稿成功1本へ適用する。その動画が評価閾値に届くま
 
 ### YouTube攻略Ch の主題確認
 
-`youtube-growth` は、企画に次の3点が明記され、主題適合も `clear` の場合だけ自動で
-`public` 投稿する。
-この運用を有効にするチャンネルの `publish.youtube.privacy` は、確認待ちの安全な
-基準値として `unlisted` を必須とし、未指定時もグローバル設定に関係なく `unlisted` になる。
-最終状態はこの基準値を暗黙上書きするのではなく、
-上記判定による `public` または `unlisted` のどちらかとして明示的に決まる。
+`youtube-growth` は `max_uploads_per_day = 1` とし、JSTで1日1本だけ実投稿する。
+各動画は原則 `unlisted` で登録し、企画の主題確認が明確でも自動公開しない。
+適用結果を確認できたタイミングで確認Issueへ `公開承認` ラベルを付けた場合だけ、既存の
+安全な再取得・動画ID照合を経て `public` へ変更する。
+`publish.youtube.review.require_approval = true` はこの手動承認モードを表す。
+
+通常の確認モードでは、企画に次の3点が明記され、主題適合も `clear` の場合だけ自動で
+`public` 投稿できる。手動承認モードではこの自動公開を行わず、明確な企画も必ずIssueへ送る。
 
 - 対象者がYouTube制作者
 - 解決する具体的なYouTube上の課題または指標
@@ -300,6 +330,7 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/compose.py` ffmpeg 合成（9:16・字幕焼込み）
 - `doci/youtube.py` アップロード・公開設定更新
 - `doci/youtube_review.py` 主題ガード・限定公開Issue確認
+- `doci/topic_ledger.py` 全チャネル共通の題材照合・予約
 - `channels/<id>/` チャンネル定義・ペルソナ・声・BGM
 - `doci/prompts/output_rules.md` 全チャンネル共通の出力規則
 - `doci/run_daily.py` オーケストレータ
