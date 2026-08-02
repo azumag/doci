@@ -87,6 +87,31 @@ class OutputCleanupTest(unittest.TestCase):
         self.assertTrue(video.exists())
         self.assertFalse((workdir / output_cleanup.RECOVERY_MANIFEST).exists())
 
+    def test_preview_ignores_media_removed_after_listing(self) -> None:
+        workdir = self._workdir()
+        video = workdir / "video.mp4"
+        video.write_bytes(b"video")
+
+        def list_then_remove(_workdir):
+            video.unlink()
+            return [video]
+
+        with patch.object(
+            output_cleanup,
+            "_media_files",
+            side_effect=list_then_remove,
+        ):
+            result = output_cleanup.cleanup_workdir(
+                self.output_dir,
+                workdir,
+                apply=False,
+            )
+
+        self.assertEqual(result.status, "preview")
+        self.assertEqual(result.files, 0)
+        self.assertEqual(result.bytes, 0)
+        self.assertFalse((workdir / output_cleanup.RECOVERY_MANIFEST).exists())
+
     def test_cleanup_rejects_a_directory_outside_channel_output(self) -> None:
         outside = self.root / "outside"
         outside.mkdir()
@@ -109,6 +134,34 @@ class OutputCleanupTest(unittest.TestCase):
         (workdir / "script.json").unlink()
 
         with self.assertRaises(ValueError):
+            output_cleanup.cleanup_workdir(
+                self.output_dir,
+                workdir,
+                apply=True,
+            )
+
+        self.assertTrue(video.exists())
+        self.assertFalse((workdir / output_cleanup.RECOVERY_MANIFEST).exists())
+
+    def test_cleanup_retains_media_if_script_disappears_after_validation(self) -> None:
+        workdir = self._workdir()
+        video = workdir / "video.mp4"
+        video.write_bytes(b"video")
+        original_validate = output_cleanup._validated_script
+
+        def validate_then_remove(target):
+            script = original_validate(target)
+            (target / "script.json").unlink()
+            return script
+
+        with (
+            patch.object(
+                output_cleanup,
+                "_validated_script",
+                side_effect=validate_then_remove,
+            ),
+            self.assertRaises(ValueError),
+        ):
             output_cleanup.cleanup_workdir(
                 self.output_dir,
                 workdir,

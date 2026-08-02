@@ -157,6 +157,17 @@ def _media_files(workdir: Path) -> list[Path]:
     )
 
 
+def _media_inventory(paths: Iterable[Path]) -> dict[Path, int]:
+    """列挙後に消えた媒体は、並行cleanupが完了済みとして無視する。"""
+    inventory: dict[Path, int] = {}
+    for path in paths:
+        try:
+            inventory[path] = path.lstat().st_size
+        except FileNotFoundError:
+            continue
+    return inventory
+
+
 def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     # 同一processの複数threadや古いtmp残骸とも衝突しない名前にする。
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
@@ -217,9 +228,13 @@ def cleanup_workdir(
     if not apply:
         # previewではlock fileも作らず、完全に読み取り専用にする。
         _validated_script(target)
-        media = _media_files(target)
-        total_bytes = sum(path.lstat().st_size for path in media)
-        return CleanupResult(str(target), "preview", len(media), total_bytes)
+        media_sizes = _media_inventory(_media_files(target))
+        return CleanupResult(
+            str(target),
+            "preview",
+            len(media_sizes),
+            sum(media_sizes.values()),
+        )
 
     # 自動整理と保守コマンドが重なってもmanifestとunlinkを競合させない。
     lock_path = target / CLEANUP_LOCK
@@ -236,23 +251,25 @@ def _cleanup_workdir_locked(
     """workdir lockを保持した状態で検証から完了記録まで実行する。"""
     # 写真を捨てても再生成できるという契約を満たせないrunでは削除しない。
     _validated_script(target)
-    media_sizes: dict[Path, int] = {}
-    for path in _media_files(target):
-        try:
-            media_sizes[path] = path.lstat().st_size
-        except FileNotFoundError:
-            # lockを無視する外部処理が先に消しても冪等に扱う。
-            continue
+    media_sizes = _media_inventory(_media_files(target))
     media = list(media_sizes)
     total_bytes = sum(media_sizes.values())
 
     # 新規run直後でもscriptの内容とdirectory entryを先に耐久化する。
-    script_fd = os.open(target / "script.json", os.O_RDONLY)
+    try:
+        script_fd = os.open(target / "script.json", os.O_RDONLY)
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"recovery input disappeared before cleanup: {target / 'script.json'}"
+        ) from exc
     try:
         os.fsync(script_fd)
     finally:
         os.close(script_fd)
-    target_fd = os.open(target, os.O_RDONLY)
+    try:
+        target_fd = os.open(target, os.O_RDONLY)
+    except FileNotFoundError as exc:
+        raise ValueError(f"cleanup target disappeared before cleanup: {target}") from exc
     try:
         os.fsync(target_fd)
     finally:
