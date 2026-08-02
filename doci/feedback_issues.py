@@ -27,12 +27,15 @@ from typing import Iterator
 
 from . import channel, config, performance
 from .channel import ChannelSpec
-from .youtube_review import _current_gh_login, _run_gh
+from .youtube_review import _run_gh
 
 _FEEDBACK_MARKER_RE = re.compile(r"<!--\s*doci-feedback:([0-9a-f]{16})\s*-->")
 _LOCK_WAIT_TIMEOUT_SECONDS = 30.0
 _LOCK_RETRY_SECONDS = 0.25
 _ISSUE_LABELS = ("enhancement", "feedback")
+# gh issue list の --json body は /search/issues と異なり結果整合ラグがないREST/
+# GraphQL経由。件数がこの上限に達したら安全側で停止する(継続週3件上限なら数年分)。
+_ISSUE_LIST_LIMIT = 1000
 
 
 # --- パス ---
@@ -241,45 +244,38 @@ def _local_terminal_record(records: list[dict], fp: str) -> dict | None:
 # --- GitHub I/O（--apply 経路のみ到達） ---
 
 
-def _find_issue_by_fingerprint(
-    repository: str,
-    fp: str,
-    expected_author: str | None = None,
-) -> dict | None:
-    """open/closed両方を対象に、可視本文中のfingerprintで既存issueを検索する。"""
-    expected_author = expected_author or _current_gh_login()
-    query = f'repo:{repository} is:issue author:{expected_author} "doci-feedback:{fp}"'
+def _find_issue_by_fingerprint(repository: str, fp: str) -> dict | None:
+    """open/closed両方を対象に、可視本文中のfingerprintで既存issueを検索する。
+
+    `gh api search/issues` (Search API) は結果整合で数秒〜数分のインデックス
+    遅延があり、直前に作成が成功していても未検出になり得るため使わない。
+    `gh issue list` は通常のissue一覧取得APIを叩くため即時反映される。
+    fingerprintマーカー自体が一意な識別子なので作成者(author)では絞り込まない
+    （ローカル実行とCI/botなど実行アカウントが異なると誤って見逃すため）。
+    """
     raw = _run_gh(
         [
-            "api",
-            "search/issues",
-            "--method",
-            "GET",
-            "-f",
-            f"q={query}",
-            "-f",
-            "per_page=100",
+            "issue",
+            "list",
+            "--repo",
+            repository,
+            "--label",
+            "feedback",
+            "--state",
+            "all",
+            "--limit",
+            str(_ISSUE_LIST_LIMIT),
+            "--json",
+            "number,url,state,body",
         ]
     )
-    result = json.loads(raw or "{}")
-    if not isinstance(result, dict) or not isinstance(result.get("items"), list):
-        raise RuntimeError("GitHub Issue検索結果の形式が不正です")
-    if result.get("incomplete_results") is not False:
+    rows = json.loads(raw or "[]")
+    if not isinstance(rows, list):
+        raise RuntimeError("GitHub Issue一覧の形式が不正です")
+    if len(rows) >= _ISSUE_LIST_LIMIT:
         raise RuntimeError(
-            "GitHub Issue検索が不完全なため、重複作成を避けて処理を停止します"
-        )
-    rows = result["items"]
-    total_count = result.get("total_count")
-    if (
-        not isinstance(total_count, int)
-        or isinstance(total_count, bool)
-        or total_count < 0
-    ):
-        raise RuntimeError("GitHub Issue検索件数の形式が不正です")
-    if total_count > len(rows):
-        raise RuntimeError(
-            "fingerprintで絞ったGitHub Issue検索が100件を超えました。"
-            "重複作成を避けるため自動作成を停止します"
+            f"feedbackラベルのGitHub Issueが{_ISSUE_LIST_LIMIT}件以上あり、"
+            "一覧が切り詰められた可能性があります。重複作成を避けるため自動作成を停止します"
         )
     for row in rows:
         if not isinstance(row, dict):
@@ -288,13 +284,9 @@ def _find_issue_by_fingerprint(
         match = _FEEDBACK_MARKER_RE.search(body)
         if not match or match.group(1) != fp:
             continue
-        author = row.get("author") or row.get("user") or {}
-        author_login = str(author.get("login") or "") if isinstance(author, dict) else ""
-        if author_login.casefold() != expected_author.casefold():
-            continue
         return {
             "number": int(row["number"]),
-            "url": str(row.get("html_url") or row.get("url") or ""),
+            "url": str(row.get("url") or ""),
             "state": str(row.get("state") or "").upper(),
         }
     return None

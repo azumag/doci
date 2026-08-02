@@ -1,7 +1,10 @@
 """issue #39: Analytics decisionからfeedback issueを安全に生成するコマンドのテスト。
 
 対象: doci.feedback_issues の fingerprint/build_candidate/run。
-gh呼び出しは全て feedback_issues._run_gh / _current_gh_login をモックする。
+gh呼び出しは全て feedback_issues._run_gh をモックする。重複検索は
+`gh issue list --label feedback --state all` (即時反映) を使うため、
+`_search_response` は `gh issue list --json number,url,state,body` と同じ
+「配列」形式を返す（Search APIの `{total_count, items}` 形式ではない）。
 """
 from __future__ import annotations
 
@@ -17,18 +20,15 @@ from doci import feedback_issues, performance
 
 
 def _search_response(items: list[dict]) -> str:
-    return json.dumps(
-        {"total_count": len(items), "incomplete_results": False, "items": items}
-    )
+    return json.dumps(items)
 
 
-def _issue_row(*, number: int, body: str, state: str, login: str = "azumag") -> dict:
+def _issue_row(*, number: int, body: str, state: str) -> dict:
     return {
         "number": number,
-        "html_url": f"https://github.com/azumag/doci/issues/{number}",
+        "url": f"https://github.com/azumag/doci/issues/{number}",
         "state": state,
         "body": body,
-        "author": {"login": login},
     }
 
 
@@ -47,11 +47,6 @@ class FeedbackIssuesTest(unittest.TestCase):
                 )
             ),
         )
-        login_patcher = patch.object(
-            feedback_issues, "_current_gh_login", return_value="azumag"
-        )
-        self.addCleanup(login_patcher.stop)
-        login_patcher.start()
 
     # --- fixtures ---
 
@@ -376,9 +371,15 @@ class FeedbackIssuesTest(unittest.TestCase):
 
     def test_search_overflow_aborts_creation(self) -> None:
         self._write_active_setup()
-        with patch.object(feedback_issues, "_run_gh") as mock_run_gh:
-            mock_run_gh.return_value = json.dumps(
-                {"total_count": 150, "incomplete_results": False, "items": []}
+        with (
+            patch.object(feedback_issues, "_ISSUE_LIST_LIMIT", 2),
+            patch.object(feedback_issues, "_run_gh") as mock_run_gh,
+        ):
+            mock_run_gh.return_value = _search_response(
+                [
+                    _issue_row(number=1, body="関係ない issue", state="OPEN"),
+                    _issue_row(number=2, body="別の issue", state="CLOSED"),
+                ]
             )
             with self.assertRaises(RuntimeError):
                 feedback_issues.run(self.spec, apply=True)
