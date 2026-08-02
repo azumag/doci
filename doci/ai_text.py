@@ -792,10 +792,12 @@ def _validate(script: dict) -> dict:
         s.setdefault("act", "")
     if isinstance(script["tags"], str):
         script["tags"] = [t.strip() for t in script["tags"].split(",") if t.strip()]
-    # 冒頭チェックは括弧除去「前」の原文に対して行う。「突然」ですが等、鉤括弧に
-    # 挟まれた語が除去後に隣接文字と結合して禁止フレーズを誤検出するのを防ぐため。
-    _check_cold_open(script.get("narration", ""))
+    # 冒頭チェックは括弧除去「後」の、実際にTTSで読み上げられる最終テキストに対して
+    # 行う。「突然」ですが等、鉤括弧除去によって隣接語が禁止フレーズへ結合する場合、
+    # それは配信物として本物の冒頭違反になるため検出すべき（除去前の原文を見ると
+    # 素通りしてしまう）。
     script["narration"] = _strip_bracket_quotes(script.get("narration", ""))
+    _check_cold_open(script["narration"])
     return script
 
 

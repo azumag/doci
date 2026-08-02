@@ -52,15 +52,16 @@ class ValidateStripsBracketQuotesTest(unittest.TestCase):
         script = ai_text._validate(self._script(narration))
         self.assertEqual(script["narration"], narration)
 
-    def test_bracket_adjacent_to_forbidden_phrase_is_not_falsely_flagged(self) -> None:
-        # 「突然」ですが → 括弧除去後は「突然ですが」と結合するが、原文には
-        # 禁止フレーズが存在しないため cold-open 違反として弾かれてはならない。
-        script = ai_text._validate(
-            self._script("「突然」ですが、この話には裏があります。")
-        )
-        self.assertEqual(script["narration"], "突然ですが、この話には裏があります。")
+    def test_cold_open_check_runs_against_the_final_bracket_stripped_text(self) -> None:
+        # 「突然」ですが → 括弧除去後は実際に「突然ですが」で始まる配信物になる。
+        # TTSが読み上げる最終テキストが禁止フレーズで始まる以上、除去前の原文が
+        # セーフに見えても本物の冒頭違反として弾かれなければならない。
+        with self.assertRaises(ValueError):
+            ai_text._validate(
+                self._script("「突然」ですが、この話には裏があります。")
+            )
 
-    def test_cold_open_violation_in_raw_narration_still_raises(self) -> None:
+    def test_cold_open_violation_without_brackets_still_raises(self) -> None:
         with self.assertRaises(ValueError):
             ai_text._validate(self._script("突然ですが、この話には裏があります。"))
 
