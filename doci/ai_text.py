@@ -927,7 +927,27 @@ def generate(
                 1,
                 int(spec.pipeline_get("plan_topic_retries", config.PLAN_TOPIC_RETRIES)),
             )
+            plan_topic_started = _monotonic()
+            plan_topic_total_timeout = (
+                config.PLAN_TOPIC_TOTAL_TIMEOUT
+                if config.PLAN_TOPIC_TOTAL_TIMEOUT > 0
+                else None
+            )
             for attempt in range(1, max_attempts + 1):
+                if (
+                    attempt > 1
+                    and plan_topic_total_timeout is not None
+                    and _monotonic() - plan_topic_started >= plan_topic_total_timeout
+                ):
+                    # 他段(SCRIPT_DRAFT_TOTAL_TIMEOUT等)と同様、再設計ループ全体の予算切れは
+                    # backend不調日に試行回数分の待ち時間が積み重なるのを防ぐための保険。
+                    # プラン無しにフォールバックし、後段のタイトルベース照合に委ねる。
+                    _log(
+                        "構成プラン再設計が時間上限に達しました"
+                        f"({attempt - 1}/{max_attempts}試行)→プラン無しで続行"
+                    )
+                    plan = None
+                    break
                 try:
                     plan = plan_mod.make_plan(corner, research, avoid_topics=avoid_topics)
                 except Exception as e:  # noqa: BLE001

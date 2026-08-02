@@ -653,6 +653,82 @@ plan_topic_retries = 2
         self.assertEqual(make_plan_mock.call_count, 2)  # plan_topic_retries上限で打ち切り
         dispatch_mock.assert_not_called()  # 執筆(script draft)までは進まない
 
+    def test_plan_topic_retry_loop_gives_up_after_total_budget_and_falls_back(
+        self,
+    ) -> None:
+        """backend不調で候補生成のたびに重複と判定され続ける最悪日でも、再設計ループ
+        全体はPLAN_TOPIC_TOTAL_TIMEOUTで打ち切られ、プラン無しの後段フォールバック
+        (タイトルベースのcooldown照合)へ抜ける。試行回数分の待ち時間が積み重ならない
+        ことを、試行3回まで許すが1回目で予算切れになるよう仕込んで確認する。"""
+        spec = self._make_spec(
+            "ideology-like-budget",
+            pipeline="""\
+[pipeline]
+research = false
+plan = true
+factcheck = false
+plan_topic_retries = 3
+""",
+        )
+        raw_script = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        plan_candidate = {
+            "topic": "重複する題材",
+            "beats": [
+                {"role": "起", "gist": "a"},
+                {"role": "承", "gist": "b"},
+                {"role": "転", "gist": "c"},
+                {"role": "結", "gist": "d"},
+            ],
+            "charts": [],
+        }
+
+        def fake_topic_guard(topic: str) -> None:
+            # プラン段の候補だけが常に重複する。後段フォールバック(タイトル+概要)は通す。
+            if topic == "重複する題材":
+                raise history.TopicCooldownSkip(
+                    topic,
+                    history.TopicMatch(
+                        topic=topic, ts="", similarity=0.9, source="LLM判定"
+                    ),
+                    30,
+                )
+
+        clock = [100.0]
+
+        def fake_monotonic() -> float:
+            current = clock[0]
+            clock[0] += 2.0  # 予算(1秒)をはるかに超える速さで進める
+            return current
+
+        with (
+            patch.object(config, "SCRIPT_PLAN", True),
+            patch.object(config, "PLAN_TOPIC_TOTAL_TIMEOUT", 1),
+            patch.object(ai_text, "_monotonic", side_effect=fake_monotonic),
+            patch("doci.plan.make_plan", return_value=plan_candidate) as make_plan_mock,
+            patch.object(ai_text, "_dispatch", return_value=raw_script),
+        ):
+            script = ai_text.generate(
+                spec,
+                spec.corners["a"],
+                "2026-07-16",
+                [],
+                topic_guard=fake_topic_guard,
+            )
+
+        # 1回目の試行だけ使い、2回目に入る前に予算切れでプランを諦める
+        # (plan_topic_retries=3まで許しているのに3回消費していない)。
+        self.assertEqual(make_plan_mock.call_count, 1)
+        # プラン無しにフォールバックしても、後段のタイトルベース照合で生成は完了する。
+        self.assertEqual(script["title"], "Title")
+
     def test_generate_preserves_theme_review_research_fields(self) -> None:
         spec = self._make_spec(
             "review-research",
