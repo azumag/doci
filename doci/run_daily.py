@@ -406,6 +406,29 @@ def _run_once(
                 )
         except history.TopicCooldownSkip as exc:
             _log(f"題材スキップ: {exc.reason}")
+            if topic_ledger_reservation_id:
+                # topic_ledger.reserve()は照合を行わずqueued行を無条件に書くため、
+                # 直後のhistory.reserve_topic()がチャンネル内重複でスキップした場合、
+                # ここで取り消さないと日次投稿枠を消費したまま残る。呼び出し元
+                # (ai_text.pyの構成プラン再設計ループ)はこの例外を最終試行以外
+                # 再送出しないため、外側run()の例外時クリーンアップに頼れない。
+                try:
+                    topic_ledger.cancel(
+                        spec,
+                        corner.key,
+                        selected_topic,
+                        topic_ledger_reservation_id,
+                        f"チャネル内題材重複によりスキップ: {exc.reason}",
+                        metadata=selected_topic_metadata,
+                    )
+                except Exception as cleanup_exc:  # noqa: BLE001 元のスキップ判定を隠さない
+                    _log(f"共通題材台帳の取消失敗: {cleanup_exc}")
+                reservation_state.pop("topic_ledger_spec", None)
+                reservation_state.pop("topic_ledger_corner", None)
+                reservation_state.pop("topic_ledger_topic", None)
+                reservation_state.pop("topic_ledger_metadata", None)
+                reservation_state.pop("topic_ledger_reservation_id", None)
+                topic_ledger_reservation_id = None
             raise
         if cooldown_days > 0:
             mode = "キュー予約" if real_publish else "dry-run照合"
