@@ -176,6 +176,8 @@ _PIPELINE_KEYS = {
     "topic_cooldown_days",
     "performance_feedback",
     "title_pattern_check",
+    "narration_opening_guard",
+    "narration_pattern_check",
     "plan_topic_retries",
     "max_uploads_per_day",
 }
@@ -662,6 +664,16 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     title_pattern_check = pipeline.get("title_pattern_check")
     if title_pattern_check is not None and not isinstance(title_pattern_check, bool):
         raise ChannelConfigError("pipeline.title_pattern_check must be a boolean")
+    narration_opening_guard = pipeline.get("narration_opening_guard")
+    if narration_opening_guard is not None and not isinstance(
+        narration_opening_guard, bool
+    ):
+        raise ChannelConfigError("pipeline.narration_opening_guard must be a boolean")
+    narration_pattern_check = pipeline.get("narration_pattern_check")
+    if narration_pattern_check is not None and not isinstance(
+        narration_pattern_check, bool
+    ):
+        raise ChannelConfigError("pipeline.narration_pattern_check must be a boolean")
     plan_topic_retries = pipeline.get("plan_topic_retries")
     if plan_topic_retries is not None and (
         isinstance(plan_topic_retries, bool)

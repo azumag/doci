@@ -32,6 +32,7 @@ def build_prompt(
     research: dict | None = None,
     plan: dict | None = None,
     performance_guidance: str = "",
+    recent_openings: list[str] | None = None,
 ) -> str:
     """persona / 出力規則 / チャンネル追加規則 / corner を結合する。"""
     persona = corner.persona_path.read_text(encoding="utf-8")
@@ -46,6 +47,15 @@ def build_prompt(
     else:
         # 追加規則がないチャンネルでは従来のプロンプトを1バイトも変えない。
         prompt = f"{persona}\n\n{rules}\n\n{corner_body}\n"
+    if recent_openings:
+        # issue #70: 書き出しの型が動画をまたいで同型化するのを防ぐため、直近の書き出しを
+        # 明示して避けさせる。recent_openings が空/Noneのチャンネルでは出力を1バイトも変えない。
+        numbered = "\n".join(f"- {o}" for o in recent_openings)
+        prompt += (
+            "\n## 直近の書き出し（これらと同じ型で始めない）\n"
+            f"{numbered}\n"
+            "上記と同じ修辞の型（反語疑問・定型的な前置き等）を連続させないこと。\n"
+        )
     if performance_guidance:
         prompt += (
             "\n## このチャンネル自身の実績から得た形式仮説\n"

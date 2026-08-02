@@ -27,3 +27,7 @@ platforms = ["youtube"]
 privacy = "public"
 client_secret = "secrets/ideology/client_secret.json"
 token = "secrets/ideology/youtube_token.json"
+
+[pipeline]
+narration_opening_guard = true
+narration_pattern_check = true

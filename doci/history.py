@@ -1097,6 +1097,61 @@ def recent_topics(spec: ChannelSpec, limit: int = 30) -> list[str]:
     return topics[-limit:]
 
 
+def _narration_opening(workdir: object, max_chars: int) -> str | None:
+    """workdir配下のscript.jsonからnarration冒頭文を取り出す。読めない/無ければNone。"""
+    if not workdir:
+        return None
+    try:
+        path = Path(str(workdir)) / "script.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    narration = str(data.get("narration") or "").strip()
+    if not narration:
+        return None
+    head = re.split(r"[。？！]", narration, maxsplit=1)[0]
+    return head[:max_chars].strip() or None
+
+
+def recent_narration_openings(
+    spec: ChannelSpec,
+    corner_key: str | None = None,
+    *,
+    limit: int = 12,
+    max_chars: int = 200,
+) -> list[str]:
+    """narration冒頭の言い回し重複判定用に、直近の書き出し文を返す（issue #70）。
+
+    script.json は output_cleanup.py により削除対象から除外され永続保持される
+    ため、新規の保存先を持たず history.jsonl の workdir から都度読み出す。
+    corner_key を渡すと同一コーナーの行だけに絞る（ペルソナ/声が異なるため、
+    タイトル重複判定と異なり書き出しはコーナー単位で比較する）。
+
+    max_chars=200はai_text._opening_sentenceと揃えている。ai_text._OPENING_FAMILIES
+    のrhetorical_whyは文末アンカー（$）必須のため、切り詰めが短すぎると「でしょうか」が
+    欠けて過去の違反を見落とす（issue #70レビュー指摘）。
+
+    新しい順に走査しlimit件集まった時点で打ち切る。script.jsonは永続保持される
+    ため、投稿本数の多いチャンネルで全完了行ぶんファイルを読んでから末尾limit件
+    だけ使うのは無駄なI/Oになる（issue #70レビュー指摘）。
+    """
+    if limit <= 0:
+        return []
+    openings: list[str] = []
+    for row in reversed(_completed_rows(spec)):
+        if corner_key and row.get("corner") != corner_key:
+            continue
+        opening = _narration_opening(row.get("workdir"), max_chars)
+        if opening:
+            openings.append(opening)
+            if len(openings) >= limit:
+                break
+    openings.reverse()
+    return openings
+
+
 def recent_titles(
     spec: ChannelSpec,
     limit: int = 30,
