@@ -962,6 +962,12 @@ factcheck = false
             result["youtube_review_issue"],
             "https://github.com/owner/repo/issues/42",
         )
+        workdir = Path(result["workdir"])
+        self.assertFalse((workdir / "video.mp4").exists())
+        self.assertTrue((workdir / "script.json").exists())
+        self.assertTrue((workdir / "recovery.json").exists())
+        self.assertFalse(result["video_retained"])
+        self.assertEqual(result["media_cleanup"]["status"], "cleaned")
 
     def test_run_daily_routes_complete_theme_fields_directly_to_public(self) -> None:
         spec = self._review_spec("review-public")
@@ -1055,6 +1061,9 @@ factcheck = false
         self.assertNotIn("queued", [row.get("status") for row in rows])
         self.assertNotIn("publishing", [row.get("status") for row in rows])
         self.assertEqual(result["video_id"], None)
+        self.assertTrue(Path(result["video"]).exists())
+        self.assertTrue(result["video_retained"])
+        self.assertEqual(result["media_cleanup"]["status"], "retained")
 
     def test_unknown_publish_keeps_topic_in_publishing_state(self) -> None:
         spec = self._review_spec("review-unknown")
@@ -1093,6 +1102,9 @@ factcheck = false
             ledger_rows[-1]["reservation_id"],
             history_rows[-1]["topic_ledger_reservation_id"],
         )
+        self.assertTrue(Path(result["video"]).exists())
+        self.assertTrue(result["video_retained"])
+        self.assertEqual(result["media_cleanup"]["status"], "retained")
 
     def test_mixed_publish_results_keep_topic_in_publishing_state(self) -> None:
         spec = self._review_spec("review-mixed-results")
@@ -1136,6 +1148,9 @@ factcheck = false
             [item["status"] for item in ledger_rows[-1]["publish_results"]],
             ["ok", "unknown"],
         )
+        self.assertTrue(Path(result["video"]).exists())
+        self.assertTrue(result["video_retained"])
+        self.assertEqual(result["media_cleanup"]["status"], "retained")
 
     def test_run_daily_scopes_workdir_voice_and_history_to_channel(self) -> None:
         spec = self._make_spec("alpha")

@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from doci import config, history, topic_ledger
+from doci import config, history, output_cleanup, topic_ledger
 
 
 class TopicLedgerTest(unittest.TestCase):
@@ -430,6 +430,7 @@ class TopicLedgerTest(unittest.TestCase):
     ) -> tuple[SimpleNamespace, str, str]:
         local_spec = SimpleNamespace(
             id="alpha",
+            output_dir=self.output / "alpha",
             history_file=self.output / "alpha" / "history.jsonl",
         )
         ledger_reservation = topic_ledger.reserve(
@@ -449,12 +450,30 @@ class TopicLedgerTest(unittest.TestCase):
             topic_ledger_reservation_id=ledger_reservation,
         )
         assert local_reservation is not None
+        workdir = local_spec.output_dir / "2026-08-02_video_120000"
+        workdir.mkdir(parents=True, exist_ok=True)
+        (workdir / "script.json").write_text(
+            json.dumps(
+                {
+                    "title": "復旧対象",
+                    "description": "description",
+                    "tags": [],
+                    "narration": "復元できるナレーション",
+                    "scenes": [{"visual_prompt": "new image"}],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (workdir / "video.mp4").write_bytes(b"video")
         history.mark_topic_publishing(
             local_spec,
             "video",
             topic,
             local_reservation,
             topic_ledger_reservation_id=ledger_reservation,
+            workdir=workdir,
         )
         topic_ledger.mark_publishing(
             self.alpha,
@@ -500,6 +519,7 @@ class TopicLedgerTest(unittest.TestCase):
         local_spec, ledger_reservation, _local_reservation = (
             self._prepare_publishing_reservation(topic)
         )
+        workdir = local_spec.output_dir / "2026-08-02_video_120000"
 
         with patch.object(
             topic_ledger.channel,
@@ -524,6 +544,11 @@ class TopicLedgerTest(unittest.TestCase):
         local_rows = history._read_path(local_spec.history_file)
         self.assertEqual(local_rows[-1]["status"], "published")
         self.assertEqual(local_rows[-1]["video_id"], "confirmed-video")
+        self.assertEqual(local_rows[-1]["workdir"], str(workdir))
+        cleanup = output_cleanup.cleanup_uploaded_outputs(local_spec, apply=True)
+        self.assertEqual(cleanup["workdirs"], 1)
+        self.assertFalse((workdir / "video.mp4").exists())
+        self.assertTrue((workdir / "script.json").exists())
 
     def test_recover_publishing_is_idempotent_and_rejects_conflicts(self) -> None:
         topic = "同じ外部投稿確認を二重実行しない復旧"

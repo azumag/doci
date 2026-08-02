@@ -133,6 +133,23 @@ python -m doci.run_daily --list-channels
 `--all-channels` は1チャンネルが失敗しても残りを続行し、全滅時だけ非0で終了する。結果JSONに
 各チャンネルの成否が入る。
 
+### outputの保存ポリシー
+
+`output/<channel>/<日時>_<コーナー>_<時刻>` はアップロード完了までの一時領域として扱う。
+少なくとも1投稿が成功し、ほかの投稿結果に `error` / `unknown` がない場合、完成動画、
+シーン動画、ナレーション音声、写真、サムネイルは履歴の耐久保存後に自動削除する。
+`script.json`、図表仕様JSON、復元時の音声・レンダー設定を記録した `recovery.json` は残る。
+`--no-upload`、dry-run、投稿失敗、結果不明の場合は再送用に媒体を保持する。
+
+既存成果物は、履歴でアップロード成功を確認できたworkdirだけを次のコマンドで整理できる。
+既定は読み取り専用previewで、`--apply`を付けた場合だけ削除する。
+
+```bash
+python -m doci.output_cleanup
+python -m doci.output_cleanup --apply
+python -m doci.output_cleanup --channel ideology --apply
+```
+
 ## 新しいチャンネルを追加する
 
 1. `channels/<id>/` に `channel.toml`、`prompts/`、`voices.json`、必要なら `bgm/` を作る。
