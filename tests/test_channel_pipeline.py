@@ -564,10 +564,13 @@ factcheck = false
         def fake_topic_guard(topic: str) -> None:
             guarded_calls.append(topic)
             if topic == "重複する題材":
+                # matched_topic(過去の類似題材)とcandidate_topic(今回却下された題材)を
+                # あえて別文字列にする。同一文字列だと[a, b] == [b, a]の順序バグを
+                # テストが検知できなくなる。
                 raise history.TopicCooldownSkip(
                     topic,
                     history.TopicMatch(
-                        topic=topic, ts="", similarity=0.9, source="LLM判定"
+                        topic="過去の類似題材", ts="", similarity=0.9, source="LLM判定"
                     ),
                     30,
                 )
@@ -597,8 +600,9 @@ factcheck = false
         # 後段フォールバックは呼ばれない(3回目が無い)。
         self.assertEqual(guarded_calls, ["重複する題材", "新しい題材"])
         second_call_avoid = make_plan_mock.call_args_list[1].kwargs["avoid_topics"]
-        # 今回の却下分が履歴の種より前(先頭)にある: 20件に切り詰められても必ず伝わる。
-        self.assertEqual(second_call_avoid[:2], ["重複する題材", "重複する題材"])
+        # 今回の却下分(matched→candidateの順)が履歴の種より前(先頭)にある:
+        # 20件に切り詰められても必ず伝わる。
+        self.assertEqual(second_call_avoid[:2], ["過去の類似題材", "重複する題材"])
         self.assertEqual(second_call_avoid[2:], seeded_history)
 
     def test_generate_gives_up_and_skips_after_plan_topic_retries_exhausted(
