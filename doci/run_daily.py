@@ -254,6 +254,41 @@ def _apply_title_pattern_check(
         )
 
 
+def _apply_narration_pattern_check(
+    spec: ChannelSpec,
+    script: dict,
+    recent_openings: list[str],
+) -> None:
+    """生成済みnarrationの書き出し修辞パターン重複を検出し、scriptへ記録する(issue #70)。
+
+    ai_text.generate()内のLayer2(正規表現ファミリー)が拾えない未知の重複パターンを
+    検出・記録するためだけのもので、公開判断は変えない
+    （_apply_title_pattern_checkと同じ検出・記録のみの運用）。
+    """
+    if not (spec.pipeline_get("narration_pattern_check", False) and recent_openings):
+        return
+    opening = ai_text._opening_sentence(str(script.get("narration", "")))
+    try:
+        opening_pattern_match = ai_text.check_narration_opening_pattern_duplicate(
+            opening, recent_openings
+        )
+    except Exception as exc:  # noqa: BLE001 判定不調で生成全体を止めない
+        _log(f"書き出しパターン判定に失敗→記録なしで継続: {str(exc)[:160]}")
+        opening_pattern_match = None
+    script["_narration_opening_check"] = {
+        "checked": True,
+        "match": opening_pattern_match,
+    }
+    if opening_pattern_match is not None:
+        axes = "/".join(opening_pattern_match["overlapping_axes"]) or "型"
+        _log(
+            "書き出し修辞パターン重複の疑い: "
+            f"「{opening}」≈「{opening_pattern_match['matched_opening']}」"
+            f"（{axes}／確信度{opening_pattern_match['confidence']:.2f}）: "
+            f"{opening_pattern_match['reason']}"
+        )
+
+
 def _run_once(
     spec: ChannelSpec,
     day: str,
@@ -435,6 +470,7 @@ def _run_once(
             _log(f"題材cooldown: {cooldown_days}日 / {mode}「{selected_topic}」")
 
     recent_titles_for_prompt = history.recent_titles(spec, cooldown_days=cooldown_days)
+    recent_openings_for_prompt = history.recent_narration_openings(spec, corner.key)
     script = ai_text.generate(
         spec,
         corner,
@@ -443,10 +479,12 @@ def _run_once(
         topic_guard=reserve_selected_topic,
         topic_metadata_guard=capture_topic_metadata,
         performance_decision=performance_decision,
+        recent_openings=recent_openings_for_prompt,
     )
     _apply_title_pattern_check(
         spec, script, recent_titles_for_prompt, cooldown_days
     )
+    _apply_narration_pattern_check(spec, script, recent_openings_for_prompt)
     from . import youtube_review
 
     youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)

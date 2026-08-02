@@ -779,6 +779,90 @@ def check_title_pattern_duplicate(
     }
 
 
+_NARRATION_OPENING_PATTERN_DUPLICATE_PROMPT = """\
+あなたはナレーション台本の書き出し重複審査担当です。「新しい書き出し案」が「直近の書き出し一覧」の
+いずれかと、次の観点で同じ型の使い回しに見えないかを判定してください。
+
+- opening_syntax: 文の構文構造の重複（同じ疑問文型・同じ命令文型など、文の骨格が同じ）
+- subject_frame: 主語・視点の枠組みの重複（同じ主語（人類/私たち等）や同じ対象への呼びかけ方）
+- rhetorical_move: 修辞的な仕掛けの重複（反語、逆説、対比、結論先出しなど、同じ仕掛けを使っている）
+
+上記3観点のうち2つ以上が同じ直近の書き出しと重なる場合だけ重複と判定してください。
+1つだけ重なる場合は重複ではありません。話題・具体的な内容が明確に異なる場合も重複ではありません。
+
+新しい書き出し案: {candidate}
+
+直近の書き出し一覧:
+{numbered}
+
+出力は有効なJSONオブジェクトのみ（説明・コードフェンス禁止）:
+{{"duplicate": true または false, "matched_index": 一致した番号（1始まり。無ければnull）,
+  "overlapping_axes": ["opening_syntax","subject_frame","rhetorical_move"]のうち該当するものの配列,
+  "confidence": 0から1の確信度, "reason": "判定理由（1文）"}}
+"""
+
+
+def check_narration_opening_pattern_duplicate(
+    candidate_opening: str,
+    recent_openings: list[str],
+    *,
+    limit: int = 12,
+    text_limit: int = 80,
+) -> dict | None:
+    """narration書き出しの修辞パターン重複(構文・主語枠・修辞技法)をLLMに判定させる(issue #70)。
+
+    Layer 2の正規表現ファミリー(_OPENING_FAMILIES)が拾えない未知の重複パターンを
+    検出・記録するためだけのもので、生成をブロックしない
+    （check_title_pattern_duplicateと同じ検出・記録のみの運用）。通信・応答不良時は
+    誤検出より見逃しを優先しNoneを返す（生成を止めない）。
+    """
+    candidate_opening = candidate_opening.strip()
+    candidates = [o.strip()[:text_limit] for o in recent_openings if o.strip()][-limit:]
+    if not candidate_opening or not candidates:
+        return None
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(candidates))
+    prompt = _NARRATION_OPENING_PATTERN_DUPLICATE_PROMPT.format(
+        candidate=candidate_opening[:text_limit], numbered=numbered
+    )
+    try:
+        data = _extract_json(_dispatch(prompt, timeout=60))
+    except (
+        ValueError,
+        TimeoutError,
+        subprocess.TimeoutExpired,
+        RuntimeError,
+        OSError,
+    ):
+        return None
+    if not isinstance(data, dict) or not data.get("duplicate"):
+        return None
+    idx = data.get("matched_index")
+    matched = (
+        candidates[idx - 1]
+        if isinstance(idx, int)
+        and not isinstance(idx, bool)
+        and 1 <= idx <= len(candidates)
+        else candidates[0]
+    )
+    confidence = data.get("confidence")
+    score = (
+        confidence
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+        else 1.0
+    )
+    axes = data.get("overlapping_axes")
+    overlapping_axes = (
+        [a for a in axes if isinstance(a, str)] if isinstance(axes, list) else []
+    )
+    reason = data.get("reason")
+    return {
+        "matched_opening": matched,
+        "confidence": max(0.0, min(1.0, float(score))),
+        "overlapping_axes": overlapping_axes,
+        "reason": str(reason)[:300] if isinstance(reason, str) else "",
+    }
+
+
 def _validate(script: dict) -> dict:
     for k in REQUIRED_KEYS:
         if k not in script:
@@ -816,6 +900,64 @@ def _check_cold_open(narration: str) -> None:
     hit = next((p for p in _COLD_OPEN_PATTERNS if p in head), None)
     if hit:
         raise ValueError(f"冒頭が「いきなり本編」ルール違反（禁止フレーズ「{hit}」を検出）: {head!r}")
+
+
+# issue #70: narrationの書き出しが動画をまたいで同じ修辞の型に偏る事故（実測でideology
+# チャンネルの反語疑問「〜はなぜ…でしょうか」がほぼ100%）を検出するための定型パターン。
+# cold-openの固定文字列と違い主語のバリエーションを吸収する必要があるため正規表現にする。
+_OPENING_FAMILIES: tuple[tuple[str, re.Pattern], ...] = (
+    # 文末アンカー必須: 「なぜ〜のかを」「なぜ〜のか特定できていません」等、
+    # のか/でしょうかが文中の活用として現れる通常の説明文を誤検出しないため
+    # （反語疑問の型は必ず文末がでしょうか/のかで終わる）。
+    ("rhetorical_why", re.compile(r"なぜ.+(でしょうか|のか)$")),
+    ("next_video_directive", re.compile(r"次の(ショート)?動画では")),
+    ("conclusion_first", re.compile(r"^結論(から言うと|を伝えます)")),
+)
+
+
+def _opening_sentence(narration: str, max_chars: int = 60) -> str:
+    """narration冒頭の一文（最初の句読点まで）を切り出す。history.recent_narration_openings
+    と同じ抽出規則（句点/疑問符/感嘆符で区切り、max_chars文字まで）に揃える。"""
+    head = re.split(r"[。？！]", narration or "", maxsplit=1)[0]
+    return head[:max_chars].strip()
+
+
+def _opening_family(opening: str) -> str | None:
+    """書き出し文がどの定型パターンに属するかを返す（該当なしはNone）。"""
+    for name, pattern in _OPENING_FAMILIES:
+        if pattern.search(opening):
+            return name
+    return None
+
+
+def _check_opening_pattern(
+    narration: str,
+    recent_openings: list[str],
+    *,
+    window: int = 6,
+    max_family_share: int = 2,
+) -> None:
+    """直近の書き出しと同じ修辞パターンへ偏っていないかを検証する（issue #70）。
+
+    直前と全く同じ型、または直近window件中でmax_family_share件を超える場合は
+    ValueErrorを送出し、呼び出し側(generate())でプロンプトに回避指示を足して
+    再生成させる。未分類の書き出し・履歴なしは常に許可する（誤検出より見逃しを
+    優先し、cold-openと違って統計的な偏りの検出なので致命的エラーにはしない）。
+    """
+    family = _opening_family(_opening_sentence(narration))
+    if family is None or not recent_openings:
+        return
+    recent_families = [_opening_family(o) for o in recent_openings[-window:]]
+    if recent_families and recent_families[-1] == family:
+        raise ValueError(
+            f"書き出しの型「{family}」が直前の動画と同じです: {narration[:60]!r}"
+        )
+    share = recent_families.count(family)
+    if share >= max_family_share:
+        raise ValueError(
+            f"書き出しの型「{family}」が直近{window}件中{share}件と偏っています: "
+            f"{narration[:60]!r}"
+        )
 
 
 # 図表は本来 scenes 側の要素として置く設計だが、執筆モデルが稀に図表マーカー
@@ -882,6 +1024,7 @@ def generate(
     topic_guard: Callable[[str], None] | None = None,
     topic_metadata_guard: Callable[[dict], None] | None = None,
     performance_decision: dict | None = None,
+    recent_openings: list[str] | None = None,
 ) -> dict:
     performance_guidance = str(
         (performance_decision or {}).get("guidance") or ""
@@ -1005,6 +1148,14 @@ def generate(
         if plan:
             _log(f"構成: 起承転結{len(plan.get('beats', []))}ビート / 図表 {len(plan.get('charts', []))}個")
 
+    # issue #70: 書き出しの型が動画をまたいで同型化する事故（実測でideologyの反語疑問が
+    # ほぼ100%）を防ぐ。opt-inチャンネルだけ、直近の書き出しをプロンプトへ注入(Layer1)し、
+    # ドラフトretryループでも検証する(Layer2)。フラグ未設定のチャンネルはrecent_openingsが
+    # 渡されていてもプロンプト・挙動を一切変えない。
+    opening_guard_enabled = bool(recent_openings) and spec.pipeline_get(
+        "narration_opening_guard", False
+    )
+
     # 2) 執筆（qwen3.7-plus 等）。リサーチの具体＋プランの構成/図表に沿わせる。
     #    稀に不完全JSONを返すため再生成で吸収。
     prompt = corners.build_prompt(
@@ -1015,6 +1166,7 @@ def generate(
         research=research,
         plan=plan,
         performance_guidance=performance_guidance,
+        recent_openings=recent_openings if opening_guard_enabled else None,
     )
     script = None
     last_err: Exception | None = None
@@ -1024,6 +1176,11 @@ def generate(
         if config.SCRIPT_DRAFT_TOTAL_TIMEOUT > 0
         else None
     )
+    # このパターンはモデルの最頻出力であり、cold-openの禁止語句と違って致命的raiseにすると
+    # 再生成を使い切って動画が丸ごと落ちるリスクがあるため、リトライを使い切った場合は
+    # 違反ありのまま採用しfallback_scriptで記録する（soft-enforce）。
+    fallback_script: dict | None = None
+    fallback_reason: str | None = None
     for attempt in range(1, config.SCRIPT_DRAFT_RETRIES + 1):
         attempt_timeout = None
         if draft_total_timeout is not None:
@@ -1038,6 +1195,10 @@ def generate(
                 last_err = TimeoutError(
                     f"執筆段全体の時間上限に達しました{detail}"
                 )
+                # fallback_scriptが既にあれば(=書き出しパターン違反だけの理由で
+                # 直前の試行を却下していた場合)、時間切れでも致命的raiseにはせず
+                # その違反ありドラフトを採用する。有効な原稿が既にあるのに時間予算
+                # だけを理由に動画全体を落とすのは本末転倒なため(loop末尾で処理)。
                 break
             per_attempt_timeout = _whole_write_timeout()
             attempt_timeout = (
@@ -1046,8 +1207,7 @@ def generate(
                 else remaining_budget
             )
         try:
-            script = _validate(_extract_json(_dispatch(prompt, timeout=attempt_timeout)))
-            break
+            candidate = _validate(_extract_json(_dispatch(prompt, timeout=attempt_timeout)))
         except (ValueError, TimeoutError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
             # JSON不良/必須キー不足（ValueError）だけでなく、執筆バックエンドのタイムアウト
             # (TimeoutExpired)・異常終了(RuntimeError)・ネットワーク失敗(OSError)も一過性とみなし
@@ -1058,6 +1218,36 @@ def generate(
                 f"執筆失敗(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})→再生成: "
                 f"{type(e).__name__}: {str(e)[:160]}"
             )
+            continue
+        if not opening_guard_enabled:
+            script = candidate
+            break
+        try:
+            _check_opening_pattern(candidate["narration"], recent_openings or [])
+        except ValueError as e:
+            fallback_script, fallback_reason = candidate, str(e)
+            last_err = e
+            if attempt == config.SCRIPT_DRAFT_RETRIES:
+                break
+            _log(
+                f"書き出しパターン重複の疑い(試行{attempt}/{config.SCRIPT_DRAFT_RETRIES})"
+                f"→避けて再生成: {e}"
+            )
+            prompt += (
+                "\n## 直前の書き出しは使用禁止\n"
+                f"直前の生成「{_opening_sentence(candidate['narration'])}」は"
+                "直近の動画と同じ修辞の型のため、別の型で書き直してください。\n"
+            )
+            continue
+        candidate["_opening_guard"] = {"accepted_with_violation": False}
+        script = candidate
+        break
+    if script is None and fallback_script is not None:
+        fallback_script["_opening_guard"] = {
+            "accepted_with_violation": True,
+            "reason": fallback_reason,
+        }
+        script = fallback_script
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
     if not research and not plan_topic_reserved and topic_guard:
