@@ -8,6 +8,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -618,7 +619,7 @@ def reserve(
             # 時刻・候補を更新して再判定し、最後まで変化する場合はfail-closedにする。
             for semantic_attempt in range(3):
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                wait_started = datetime.now(timezone.utc)
+                wait_started_monotonic = time.monotonic()
                 try:
                     semantic_match = semantic_check(topic, semantic_topics)
                 finally:
@@ -628,7 +629,12 @@ def reserve(
                 # 将来のバックフィル)から実時計へ一気に飛んでしまい、その飛び幅が
                 # TOPIC_RESERVATION_TTL_HOURSを超えるとqueued予約が突然「期限切れ」に
                 # 見えて再判定の母集団から消え、fail-closedのはずが素通りしてしまう。
-                current = current + (datetime.now(timezone.utc) - wait_started)
+                # 経過時間はtime.monotonic()の差分で測る(datetime.now()同士の差分だと、
+                # semantic_check中のNTP補正等でシステム時計が後退した場合にcurrentまで
+                # 逆行し、直後に書かれたterminal行が「未来の行」としてガードへ弾かれ得る)。
+                current = current + timedelta(
+                    seconds=max(0.0, time.monotonic() - wait_started_monotonic)
+                )
                 rows, candidates, topic_data, best = read_and_match(
                     advance_clock=True
                 )
