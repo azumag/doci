@@ -35,6 +35,24 @@ class OpeningFamilyTest(unittest.TestCase):
             with self.subTest(sample=sample):
                 self.assertEqual(ai_text._opening_family(sample), "rhetorical_why")
 
+    def test_opening_sentence_default_max_chars_does_not_truncate_before_ending(
+        self,
+    ) -> None:
+        # 独立レビュー指摘: rhetorical_whyは文末アンカー($)必須のため、
+        # _opening_sentenceのmax_chars既定値が短すぎると「でしょうか」が
+        # 切り詰められ検出漏れになる。63文字（旧上限60を超える）の反語疑問が
+        # 引き続き検出できることを確認する。
+        long_opening = (
+            "人類はなぜ、何度も何度も同じ過ちを繰り返しながら、"
+            "それでもなお希望を捨てきれずに新しい理想の世界を夢見続けてしまうのでしょうか"
+        )
+        self.assertGreater(len(long_opening), 60)
+        narration = long_opening + "。詳細な内容がここに続きます。"
+        self.assertEqual(
+            ai_text._opening_family(ai_text._opening_sentence(narration)),
+            "rhetorical_why",
+        )
+
     def test_next_video_directive_family(self) -> None:
         self.assertEqual(
             ai_text._opening_family("次のショート動画では「装飾」を一つ削ぎ落とします"),

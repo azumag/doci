@@ -470,7 +470,16 @@ def _run_once(
             _log(f"題材cooldown: {cooldown_days}日 / {mode}「{selected_topic}」")
 
     recent_titles_for_prompt = history.recent_titles(spec, cooldown_days=cooldown_days)
-    recent_openings_for_prompt = history.recent_narration_openings(spec, corner.key)
+    # issue #70レビュー指摘: 両フラグ無効のチャンネルでも毎回history全完了行の
+    # script.jsonを読み込むのは無駄なI/Oのため、どちらか有効な場合だけ取得する。
+    narration_opening_features_enabled = spec.pipeline_get(
+        "narration_opening_guard", False
+    ) or spec.pipeline_get("narration_pattern_check", False)
+    recent_openings_for_prompt = (
+        history.recent_narration_openings(spec, corner.key)
+        if narration_opening_features_enabled
+        else []
+    )
     script = ai_text.generate(
         spec,
         corner,

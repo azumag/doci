@@ -915,9 +915,13 @@ _OPENING_FAMILIES: tuple[tuple[str, re.Pattern], ...] = (
 )
 
 
-def _opening_sentence(narration: str, max_chars: int = 60) -> str:
+def _opening_sentence(narration: str, max_chars: int = 200) -> str:
     """narration冒頭の一文（最初の句読点まで）を切り出す。history.recent_narration_openings
-    と同じ抽出規則（句点/疑問符/感嘆符で区切り、max_chars文字まで）に揃える。"""
+    と同じ抽出規則（句点/疑問符/感嘆符で区切り、max_chars文字まで）に揃える。
+
+    max_charsは_OPENING_FAMILIESの文末アンカー（$）が一文全体を見られるよう、
+    実測の書き出し文（最長55字程度）に十分な余裕を持たせている（issue #70
+    レビュー指摘: 60字だと反語疑問の「でしょうか」が切り詰めで欠けて検出漏れになる）。"""
     head = re.split(r"[。？！]", narration or "", maxsplit=1)[0]
     return head[:max_chars].strip()
 

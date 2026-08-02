@@ -1120,7 +1120,7 @@ def recent_narration_openings(
     corner_key: str | None = None,
     *,
     limit: int = 12,
-    max_chars: int = 60,
+    max_chars: int = 200,
 ) -> list[str]:
     """narration冒頭の言い回し重複判定用に、直近の書き出し文を返す（issue #70）。
 
@@ -1128,6 +1128,10 @@ def recent_narration_openings(
     ため、新規の保存先を持たず history.jsonl の workdir から都度読み出す。
     corner_key を渡すと同一コーナーの行だけに絞る（ペルソナ/声が異なるため、
     タイトル重複判定と異なり書き出しはコーナー単位で比較する）。
+
+    max_chars=200はai_text._opening_sentenceと揃えている。ai_text._OPENING_FAMILIES
+    のrhetorical_whyは文末アンカー（$）必須のため、切り詰めが短すぎると「でしょうか」が
+    欠けて過去の違反を見落とす（issue #70レビュー指摘）。
     """
     openings: list[str] = []
     for row in _completed_rows(spec):
