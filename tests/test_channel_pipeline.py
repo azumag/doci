@@ -856,7 +856,6 @@ factcheck = false
             patch("doci.thumbnail.render", side_effect=fake_thumbnail),
             patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail),
             patch("doci.publish.publish", return_value=result_rows) as publish_mock,
-            patch.object(topic_ledger, "recent_topics", return_value=[]),
             patch.object(topic_ledger, "reserve", wraps=topic_ledger.reserve) as ledger_reserve_mock,
             patch.object(history, "reserve_topic", wraps=history.reserve_topic) as history_reserve_mock,
             patch.object(youtube_review, "queue_pending") as queue_mock,
@@ -934,6 +933,7 @@ keep_unlisted_label = "限定公開で保持"
 research = false
 plan = false
 factcheck = false
+max_uploads_per_day = 1
 """,
         )
 

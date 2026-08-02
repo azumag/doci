@@ -362,15 +362,14 @@ def _run_once(
         nonlocal reservation_id, selected_topic, topic_ledger_reservation_id
         selected_topic = topic.strip()
         try:
+            # topic_ledgerはpipeline.max_uploads_per_dayのJST日次実投稿枠だけを見る
+            # (チャンネル間でテーマは十分に異なるため、題材の跨ぎ照合は行わない設計)。
+            # 題材内容の重複判定は、この後のhistory.reserve_topic()がチャンネル別に行う。
             topic_ledger_reservation_id = topic_ledger.reserve(
                 spec,
                 corner.key,
                 selected_topic,
-                cooldown_days=cooldown_days,
                 metadata=selected_topic_metadata,
-                semantic_check=(
-                    semantic_duplicate_check if cooldown_days > 0 else None
-                ),
                 reserve=real_publish,
             )
             if topic_ledger_reservation_id:
@@ -391,6 +390,9 @@ def _run_once(
                 reserve=real_publish,
                 metadata=selected_topic_metadata,
                 topic_ledger_reservation_id=topic_ledger_reservation_id,
+                semantic_check=(
+                    semantic_duplicate_check if cooldown_days > 0 else None
+                ),
             )
             if reservation_id:
                 reservation_state.update(
@@ -410,13 +412,6 @@ def _run_once(
             _log(f"題材cooldown: {cooldown_days}日 / {mode}「{selected_topic}」")
 
     recent_titles_for_prompt = history.recent_titles(spec, cooldown_days=cooldown_days)
-    for shared_topic in topic_ledger.recent_topics(
-        limit=20,
-        cooldown_days=cooldown_days,
-    ):
-        if shared_topic not in recent_titles_for_prompt:
-            recent_titles_for_prompt.append(shared_topic)
-    recent_titles_for_prompt = recent_titles_for_prompt[-30:]
     script = ai_text.generate(
         spec,
         corner,
