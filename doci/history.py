@@ -1132,15 +1132,24 @@ def recent_narration_openings(
     max_chars=200はai_text._opening_sentenceと揃えている。ai_text._OPENING_FAMILIES
     のrhetorical_whyは文末アンカー（$）必須のため、切り詰めが短すぎると「でしょうか」が
     欠けて過去の違反を見落とす（issue #70レビュー指摘）。
+
+    新しい順に走査しlimit件集まった時点で打ち切る。script.jsonは永続保持される
+    ため、投稿本数の多いチャンネルで全完了行ぶんファイルを読んでから末尾limit件
+    だけ使うのは無駄なI/Oになる（issue #70レビュー指摘）。
     """
+    if limit <= 0:
+        return []
     openings: list[str] = []
-    for row in _completed_rows(spec):
+    for row in reversed(_completed_rows(spec)):
         if corner_key and row.get("corner") != corner_key:
             continue
         opening = _narration_opening(row.get("workdir"), max_chars)
         if opening:
             openings.append(opening)
-    return openings[-limit:]
+            if len(openings) >= limit:
+                break
+    openings.reverse()
+    return openings
 
 
 def recent_titles(

@@ -390,6 +390,20 @@ class RecentNarrationOpeningsTest(unittest.TestCase):
         result = history.recent_narration_openings(self.spec, "a", limit=2)
         self.assertEqual(result, ["書き出しその3です", "書き出しその4です"])
 
+    def test_stops_reading_script_json_once_limit_is_reached(self) -> None:
+        # issue #70レビュー指摘: 新しい順に走査しlimit件集まった時点で打ち切ることで、
+        # 投稿本数の多いチャンネルで不要なscript.json読み込みが起きないことを確認する。
+        for i in range(5):
+            wd = self.root / f"wd{i}"
+            self._write_script(wd, f"書き出しその{i}です。詳細")
+            self._append({"status": "published", "corner": "a", "workdir": str(wd)})
+        with mock.patch.object(
+            history, "_narration_opening", wraps=history._narration_opening
+        ) as opening_mock:
+            result = history.recent_narration_openings(self.spec, "a", limit=2)
+        self.assertEqual(result, ["書き出しその3です", "書き出しその4です"])
+        self.assertEqual(opening_mock.call_count, 2)
+
     def test_unpublished_rows_are_ignored(self) -> None:
         wd = self.root / "wd0"
         self._write_script(wd, "スキップされる書き出しです。詳細")
