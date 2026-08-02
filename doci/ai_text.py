@@ -792,7 +792,10 @@ def _validate(script: dict) -> dict:
         s.setdefault("act", "")
     if isinstance(script["tags"], str):
         script["tags"] = [t.strip() for t in script["tags"].split(",") if t.strip()]
+    # 冒頭チェックは括弧除去「前」の原文に対して行う。「突然」ですが等、鉤括弧に
+    # 挟まれた語が除去後に隣接文字と結合して禁止フレーズを誤検出するのを防ぐため。
     _check_cold_open(script.get("narration", ""))
+    script["narration"] = _strip_bracket_quotes(script.get("narration", ""))
     return script
 
 
@@ -825,6 +828,12 @@ def _strip_chart_markers(text: str) -> str:
     """本文中に紛れた図表マーカー JSON を除去し、余分な改行を整える。"""
     cleaned = _INLINE_CHART.sub("", text or "")
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _strip_bracket_quotes(text: str) -> str:
+    """narration 中の「」を除去する（issue #58: 多用するとTTSのテンポが悪くなるため）。
+    括弧で囲まれた語自体は残し、記号のみ落とす。"""
+    return (text or "").replace("「", "").replace("」", "")
 
 
 def _recover_inline_charts(script: dict) -> int:
@@ -1123,7 +1132,9 @@ def generate(
                 issues = fc.get("issues") or []
                 if fc.get("changed") and issues:
                     _log(f"ファクトチェック: {len(issues)}件修正")
-                script["narration"] = _strip_chart_markers(fc["narration"])
+                script["narration"] = _strip_bracket_quotes(
+                    _strip_chart_markers(fc["narration"])
+                )
                 script["_factcheck"] = issues
         except factcheck.FactcheckSourcesUnavailableError:
             _log("ファクトチェック資料がないため失敗として扱います")
