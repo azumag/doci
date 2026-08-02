@@ -524,6 +524,125 @@ factcheck = false
         self.assertEqual(guarded_topics, ["既存と重複する題材"])
         dispatch_mock.assert_not_called()
 
+    def test_generate_regenerates_plan_when_topic_duplicates_and_reserves_once(
+        self,
+    ) -> None:
+        """research無しコーナー(ideology等)は、plan.topic(起承転結の実質テーマ)で
+        cooldown照合する。1回目の候補が重複と判定されても即スキップにせず、避けるべき
+        題材を積んで再設計し、通った候補だけを実予約する（issue: 直近でも同じ内容の
+        動画ばかりになる、への対処）。"""
+        spec = self._make_spec(
+            "ideology-like",
+            pipeline="""\
+[pipeline]
+research = false
+plan = true
+factcheck = false
+""",
+        )
+        raw_script = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        beats = [
+            {"role": "起", "gist": "a"},
+            {"role": "承", "gist": "b"},
+            {"role": "転", "gist": "c"},
+            {"role": "結", "gist": "d"},
+        ]
+        plan_candidates = [
+            {"topic": "重複する題材", "beats": beats, "charts": []},
+            {"topic": "新しい題材", "beats": beats, "charts": []},
+        ]
+        probe_calls: list[tuple[str, bool]] = []
+
+        def fake_topic_guard(topic: str, probe: bool = False) -> None:
+            probe_calls.append((topic, probe))
+            if topic == "重複する題材":
+                raise history.TopicCooldownSkip(
+                    topic,
+                    history.TopicMatch(
+                        topic=topic, ts="", similarity=0.9, source="LLM判定"
+                    ),
+                    30,
+                )
+
+        with (
+            patch.object(config, "SCRIPT_PLAN", True),
+            patch("doci.plan.make_plan", side_effect=plan_candidates) as make_plan_mock,
+            patch.object(ai_text, "_dispatch", return_value=raw_script),
+        ):
+            script = ai_text.generate(
+                spec,
+                spec.corners["a"],
+                "2026-07-16",
+                [],
+                topic_guard=fake_topic_guard,
+            )
+
+        self.assertEqual(script["title"], "Title")
+        # 1回目はprobeで重複検出→避けて再設計、2回目はprobeで通過→実予約で確定。
+        # タイトルベースの後段フォールバックは呼ばれない(4回目が無い)。
+        self.assertEqual(
+            probe_calls,
+            [("重複する題材", True), ("新しい題材", True), ("新しい題材", False)],
+        )
+        second_call_avoid = make_plan_mock.call_args_list[1].kwargs["avoid_topics"]
+        self.assertIn("重複する題材", second_call_avoid)
+
+    def test_generate_gives_up_and_skips_after_plan_topic_retries_exhausted(
+        self,
+    ) -> None:
+        spec = self._make_spec(
+            "ideology-like-exhausted",
+            pipeline="""\
+[pipeline]
+research = false
+plan = true
+factcheck = false
+plan_topic_retries = 2
+""",
+        )
+        plan_candidate = {
+            "topic": "ずっと重複する題材",
+            "beats": [
+                {"role": "起", "gist": "a"},
+                {"role": "承", "gist": "b"},
+                {"role": "転", "gist": "c"},
+                {"role": "結", "gist": "d"},
+            ],
+            "charts": [],
+        }
+
+        def always_reject(topic: str, probe: bool = False) -> None:
+            raise history.TopicCooldownSkip(
+                topic,
+                history.TopicMatch(topic=topic, ts="", similarity=0.9, source="LLM判定"),
+                30,
+            )
+
+        with (
+            patch.object(config, "SCRIPT_PLAN", True),
+            patch("doci.plan.make_plan", return_value=plan_candidate) as make_plan_mock,
+            patch.object(ai_text, "_dispatch") as dispatch_mock,
+        ):
+            with self.assertRaises(history.TopicCooldownSkip):
+                ai_text.generate(
+                    spec,
+                    spec.corners["a"],
+                    "2026-07-16",
+                    [],
+                    topic_guard=always_reject,
+                )
+
+        self.assertEqual(make_plan_mock.call_count, 2)  # plan_topic_retries上限で打ち切り
+        dispatch_mock.assert_not_called()  # 執筆(script draft)までは進まない
+
     def test_generate_preserves_theme_review_research_fields(self) -> None:
         spec = self._make_spec(
             "review-research",

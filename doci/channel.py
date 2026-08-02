@@ -174,6 +174,8 @@ _PIPELINE_KEYS = {
     "asset_media",
     "topic_cooldown_days",
     "performance_feedback",
+    "title_pattern_check",
+    "plan_topic_retries",
 }
 _STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
@@ -644,6 +646,13 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     performance_feedback = pipeline.get("performance_feedback")
     if performance_feedback is not None and not isinstance(performance_feedback, bool):
         raise ChannelConfigError("pipeline.performance_feedback must be a boolean")
+    plan_topic_retries = pipeline.get("plan_topic_retries")
+    if plan_topic_retries is not None and (
+        isinstance(plan_topic_retries, bool)
+        or not isinstance(plan_topic_retries, int)
+        or plan_topic_retries < 1
+    ):
+        raise ChannelConfigError("pipeline.plan_topic_retries must be a positive integer")
     style = data.get("style", {})
     publish = data.get("publish", {})
     if not isinstance(style, dict):

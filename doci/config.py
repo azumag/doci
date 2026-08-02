@@ -279,6 +279,10 @@ SCRIPT_FACTCHECK_TOTAL_TIMEOUT = get_int(
 # --- 構成プラン: 起承転結＋図表策定（issue #2）。minimax が設計し qwen が執筆 ---
 SCRIPT_PLAN = get_bool("SCRIPT_PLAN", True)
 PLAN_MODEL = get("PLAN_MODEL", "opencode-go/minimax-m3")
+# research無しコーナー(ideology等)向け: plan.topic(起承転結の実質テーマ)でcooldown照合し、
+# 重複時にavoidリストへ積んで再設計させる上限回数。タイトルの言い換えでは見逃す重複を、
+# 内容そのものに近い段階で弾く。既定は3回、超過時は最終試行の結果でスキップへフォールバックする。
+PLAN_TOPIC_RETRIES = get_int("PLAN_TOPIC_RETRIES", 3)
 
 # --- 画像/動画バックエンド選択 ---
 # IMAGE_BACKEND: gemini (既定) | openrouter | minimax  ← 素材が無い時のAI生成フォールバック

@@ -178,7 +178,7 @@ token = "secrets/sample/youtube_token.json"
 |---|---|
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
-| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback` |
+| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `title_pattern_check`, `plan_topic_retries` |
 | `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio` |
 | `style.thumbnail` | `font_family`, `title_color` |
 | `style.chart` | `palette`, `font` |
@@ -200,6 +200,14 @@ token = "secrets/sample/youtube_token.json"
 `pipeline.topic_cooldown_days` は公開済み・キュー済みの近似題材を再利用しない期間で、
 既定は30日、`0`で無効化する。重複runは動画生成・投稿前に正常スキップされ、理由が
 チャンネル別 `history.jsonl` に記録される。
+research無し（`ideology`等）のコーナーは、執筆前の構成プラン段（起承転結の実質テーマ＝
+`plan.topic`）でこのcooldownを照合する。タイトルは煽り文句で言い換えられやすく重複検出を
+すり抜けやすいため、内容そのものに近いこの段階で判定し、重複と判定されても即スキップにせず
+直近題材を避けて既定`pipeline.plan_topic_retries`（既定3回）まで構成を設計し直す。すべて
+重複のまま試行を使い切った場合だけ、その回を通常どおりスキップする。
+`pipeline.title_pattern_check = true`（既定OFF、`youtube-growth`で有効）は、題材が違っても
+タイトルの修辞パターン（固有名詞・問題語・疑問形/煽り構文）が使い回されていないかをLLMで
+検出し、`script._title_pattern_check`へ記録する（検出のみで公開判断は変えない）。
 `pipeline.performance_feedback = true` は投稿履歴の動画をYouTube Data APIで
 read-only同期し、十分な比較標本がある場合だけ相対的な形式仮説を次回promptへ渡す。
 retention等のAnalytics指標には、OAuthクライアントのGoogle Cloud projectで

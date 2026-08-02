@@ -168,6 +168,26 @@ performance_feedback = "yes"
         ):
             channel.load("sample", channels_dir=self.channels_dir)
 
+    def test_rejects_invalid_plan_topic_retries(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+plan_topic_retries = 0
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "plan_topic_retries"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\
 [channel]

@@ -94,6 +94,48 @@ class MakePlanCodexBackendTest(unittest.TestCase):
 
         self.assertEqual(run_codex_mock.call_count, 2)
 
+    def test_avoid_topics_are_included_in_prompt_when_given(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "テスト題材",
+                "beats": [
+                    {"role": "起", "gist": "a"},
+                    {"role": "承", "gist": "b"},
+                    {"role": "転", "gist": "c"},
+                    {"role": "結", "gist": "d"},
+                ],
+                "charts": [],
+            }
+        )
+        with mock.patch.object(plan.llm, "run_codex", return_value=raw) as run_codex_mock:
+            plan.make_plan(
+                _CORNER, None, avoid_topics=["見えざる手の寓話", "成長という名の神様"]
+            )
+
+        prompt = run_codex_mock.call_args.args[0]
+        self.assertIn("見えざる手の寓話", prompt)
+        self.assertIn("成長という名の神様", prompt)
+        self.assertIn("最近すでに扱った題材", prompt)
+
+    def test_no_avoid_topics_leaves_prompt_unchanged(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "テスト題材",
+                "beats": [
+                    {"role": "起", "gist": "a"},
+                    {"role": "承", "gist": "b"},
+                    {"role": "転", "gist": "c"},
+                    {"role": "結", "gist": "d"},
+                ],
+                "charts": [],
+            }
+        )
+        with mock.patch.object(plan.llm, "run_codex", return_value=raw) as run_codex_mock:
+            plan.make_plan(_CORNER, None)
+
+        prompt = run_codex_mock.call_args.args[0]
+        self.assertNotIn("最近すでに扱った題材", prompt)
+
 
 class MakePlanOpenCodeGoBackendTest(unittest.TestCase):
     def test_opencode_go_model_uses_direct_api_without_cli_state(self) -> None:

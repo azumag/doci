@@ -23,7 +23,7 @@ import urllib.request
 from datetime import date as _date
 from pathlib import Path
 
-from . import channel, config, corners, llm
+from . import channel, config, corners, history, llm
 from .channel import ChannelSpec, CornerSpec
 
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
@@ -867,7 +867,7 @@ def generate(
     corner: CornerSpec,
     day: str,
     past_topics: list[str],
-    topic_guard: Callable[[str], None] | None = None,
+    topic_guard: Callable[..., None] | None = None,
     performance_decision: dict | None = None,
 ) -> dict:
     performance_guidance = str(
@@ -900,17 +900,65 @@ def generate(
 
     # 1.5) 構成プラン（issue #2）: minimax で起承転結＋図表を設計。失敗してもプラン無しで続行。
     plan = None
+    plan_topic_reserved = False
     if spec.pipeline_get("plan", config.SCRIPT_PLAN):
         from . import plan as plan_mod
 
         _log(f"構成プラン (minimax) …")
-        try:
-            plan = plan_mod.make_plan(corner, research)
-            if plan:
-                _log(f"構成: 起承転結{len(plan.get('beats', []))}ビート / 図表 {len(plan.get('charts', []))}個")
-        except Exception as e:  # noqa: BLE001
-            _log(f"プラン失敗→プラン無しで続行: {e}")
-            plan = None
+        if not research and topic_guard:
+            # researchが無いコーナー(ideology等)は、plan.topic(起承転結の実質テーマ)を
+            # 執筆前にcooldown照合する。タイトルは煽り文句で言い換えられやすく文字列/意味
+            # 照合をすり抜けやすいため、内容そのものに近いこの段階で判定する（issue: 直近でも
+            # 同じ内容の動画ばかりになる）。重複時は即スキップにせず、避けるべき題材を
+            # avoidリストへ積んで既定PLAN_TOPIC_RETRIES回まで設計をやり直させる。
+            cooldown_days = int(
+                spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
+            )
+            avoid_topics = (
+                history.cooldown_window_topics(spec, cooldown_days=cooldown_days)
+                if cooldown_days > 0
+                else []
+            )
+            max_attempts = max(
+                1,
+                int(spec.pipeline_get("plan_topic_retries", config.PLAN_TOPIC_RETRIES)),
+            )
+            candidate_topic = ""
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    plan = plan_mod.make_plan(corner, research, avoid_topics=avoid_topics)
+                except Exception as e:  # noqa: BLE001
+                    _log(f"プラン失敗→プラン無しで続行: {e}")
+                    plan = None
+                    break
+                candidate_topic = str((plan or {}).get("topic") or "").strip()
+                if not candidate_topic:
+                    break
+                try:
+                    topic_guard(candidate_topic, probe=True)
+                except history.TopicCooldownSkip as exc:
+                    if attempt == max_attempts:
+                        break
+                    _log(
+                        "構成プランの題材が重複"
+                        f"(試行{attempt}/{max_attempts})→避けて再設計: {exc.match.topic}"
+                    )
+                    avoid_topics = avoid_topics + [exc.match.topic, candidate_topic]
+                    continue
+                break
+            if plan and candidate_topic:
+                # 実予約。ここまでの判定と同じ結果になるはずだが、なお重複ならここでraiseし
+                # skip行として記録する（試行を使い切って重複のまま抜けた場合を含む）。
+                topic_guard(candidate_topic)
+                plan_topic_reserved = True
+        else:
+            try:
+                plan = plan_mod.make_plan(corner, research)
+            except Exception as e:  # noqa: BLE001
+                _log(f"プラン失敗→プラン無しで続行: {e}")
+                plan = None
+        if plan:
+            _log(f"構成: 起承転結{len(plan.get('beats', []))}ビート / 図表 {len(plan.get('charts', []))}個")
 
     # 2) 執筆（qwen3.7-plus 等）。リサーチの具体＋プランの構成/図表に沿わせる。
     #    稀に不完全JSONを返すため再生成で吸収。
@@ -967,9 +1015,10 @@ def generate(
             )
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
-    if not research and topic_guard:
-        # リサーチがフォールバックしたrunでも、動画生成・投稿へ進む前に
-        # タイトルと概要の先頭行を題材としてcooldownを適用する。
+    if not research and not plan_topic_reserved and topic_guard:
+        # プラン段のtopicで既に予約済みならここは呼ばない（二重予約を避ける）。
+        # プランが無効/失敗した場合の後方互換フォールバックとして、動画生成・投稿へ
+        # 進む前にタイトルと概要の先頭行を題材としてcooldownを適用する。
         topic_guard(
             f"{script.get('title', '')} "
             f"{str(script.get('description') or '').splitlines()[0] if script.get('description') else ''}"
