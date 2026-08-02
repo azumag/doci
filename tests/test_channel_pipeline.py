@@ -562,6 +562,7 @@ factcheck = false
             {"topic": "新しい題材", "beats": beats, "charts": []},
         ]
         guarded_calls: list[str] = []
+        metadata_guard_calls: list[dict] = []
 
         def fake_topic_guard(topic: str) -> None:
             guarded_calls.append(topic)
@@ -595,12 +596,17 @@ factcheck = false
                 "2026-07-16",
                 [],
                 topic_guard=fake_topic_guard,
+                topic_metadata_guard=metadata_guard_calls.append,
             )
 
         self.assertEqual(script["title"], "Title")
         # 1回目は重複検出→避けて再設計、2回目で通過して確定。タイトルベースの
         # 後段フォールバックは呼ばれない(3回目が無い)。
         self.assertEqual(guarded_calls, ["重複する題材", "新しい題材"])
+        # research無しのため実質は空辞書だが、topic_guardの前に必ずtopic_metadata_guard
+        # を呼ぶという他経路(research分岐・タイトルフォールバック分岐)と同じ呼び出し順を
+        # このplanベースの経路でも維持する(候補ごと=試行ごとに1回)。
+        self.assertEqual(metadata_guard_calls, [{}, {}])
         second_call_avoid = make_plan_mock.call_args_list[1].kwargs["avoid_topics"]
         # 今回の却下分(matched→candidateの順)が履歴の種より前(先頭)にある:
         # 20件に切り詰められても必ず伝わる。

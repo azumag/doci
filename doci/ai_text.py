@@ -962,6 +962,13 @@ def generate(
                 candidate_topic = str((plan or {}).get("topic") or "").strip()
                 if not candidate_topic:
                     break
+                if topic_metadata_guard:
+                    # researchが無いのでresearch由来のstructured novelty(canonical_theme
+                    # 等)は無く、実質{}にしかならないが、topic_guardの前に必ず
+                    # topic_metadata_guardを呼ぶという他経路と同じ呼び出し順を維持する。
+                    # 将来ideology等にも構造化メタデータを持たせる場合、ここに差し込むだけで
+                    # 共通台帳へ伝わるようにしておく。
+                    topic_metadata_guard({})
                 try:
                     topic_guard(candidate_topic)
                 except history.TopicCooldownSkip as exc:
