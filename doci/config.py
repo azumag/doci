@@ -273,6 +273,13 @@ TOPIC_COOLDOWN_DAYS = get_int("TOPIC_COOLDOWN_DAYS", 30)
 # 制作プロセスが異常終了したキュー予約を題材cooldownから外すまでの時間。
 # 0以下なら予約を期限なしで有効とする。
 TOPIC_RESERVATION_TTL_HOURS = get_int("TOPIC_RESERVATION_TTL_HOURS", 24)
+# doci.feedback_issues（issue #39）: Analytics decisionから作成するfeedback issueの上限。
+FEEDBACK_ISSUES_MAX_PER_RUN = get_int("FEEDBACK_ISSUES_MAX_PER_RUN", 1)
+FEEDBACK_ISSUES_MAX_PER_WEEK = get_int("FEEDBACK_ISSUES_MAX_PER_WEEK", 3)
+# 同一仮説(corner+metric+traits)を再度issue化するまでの最短間隔。
+FEEDBACK_ISSUES_HYPOTHESIS_COOLDOWN_DAYS = get_int(
+    "FEEDBACK_ISSUES_HYPOTHESIS_COOLDOWN_DAYS", 30
+)
 # ファクトチェックの再試行回数。MiniMax等が長い日本語JSONのエスケープを崩すことがあるため再試行する。
 SCRIPT_FACTCHECK_RETRIES = get_int("SCRIPT_FACTCHECK_RETRIES", 2)
 # MiniMax監査とQwen文章修正の全試行を合わせた総時間上限。0は無制限。
