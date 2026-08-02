@@ -98,11 +98,17 @@ def fingerprint(decision: dict) -> str:
 
 
 def _hypothesis_key(decision: dict) -> str:
+    # fingerprint() 同様 channel を含める。同一repositoryを複数channelで共有
+    # する構成で、他channelの同名corner/metric/traitsとcooldownが衝突しない
+    # ようにするため。
     traits = sorted(
         (decision.get("positive_traits") or [])
         + (decision.get("negative_traits") or [])
     )
-    return f"{decision.get('corner')}|{decision.get('metric')}|{','.join(traits)}"
+    return (
+        f"{decision.get('channel')}|{decision.get('corner')}|"
+        f"{decision.get('metric')}|{','.join(traits)}"
+    )
 
 
 def _hypothesis_hash(hypothesis_key: str) -> str:
@@ -313,6 +319,10 @@ def _find_duplicate(
             "一覧が切り詰められた可能性があります。重複作成を避けるため自動作成を停止します"
         )
 
+    # 週次上限は repository 単位の共有スロットル（安全側のペース制御）として
+    # 意図的に設計しており、channel別には分離しない。複数channelが同一
+    # repositoryを使う場合、週次件数は全channel合算で消費される。
+    # (仮説cooldownの誤ブロック防止は _hypothesis_key の channel包含で対応済み)
     weekly_threshold = now - timedelta(days=7)
     remote_weekly_count = 0
     for row in rows:

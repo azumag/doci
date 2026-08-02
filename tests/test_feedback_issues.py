@@ -384,6 +384,19 @@ class FeedbackIssuesTest(unittest.TestCase):
             feedback_issues.fingerprint(different_trait),
         )
 
+    def test_hypothesis_key_differs_across_channels(self) -> None:
+        # 複数channelが同一review repositoryを共有する構成で、他channelの
+        # 同名corner/metric/traitsとcooldownが衝突しないことを保証する。
+        a = self._decision(channel="youtube-growth")
+        b = self._decision(channel="another-channel")
+        self.assertNotEqual(
+            feedback_issues._hypothesis_key(a), feedback_issues._hypothesis_key(b)
+        )
+        self.assertNotEqual(
+            feedback_issues._hypothesis_hash(feedback_issues._hypothesis_key(a)),
+            feedback_issues._hypothesis_hash(feedback_issues._hypothesis_key(b)),
+        )
+
     # 12. decisionとperformance.jsonlの鮮度不一致でskip
 
     def test_stale_decision_skipped(self) -> None:
