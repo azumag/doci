@@ -329,40 +329,32 @@ def _run_once(
             topic=matched_topic, ts="", similarity=confidence, source="LLM判定"
         )
 
-    def reserve_selected_topic(topic: str, probe: bool = False) -> None:
-        """題材のcooldown照合。probe=Trueは候補の当たり判定だけで、履歴に一切書き込まない
-        （ai_text側の構成プラン再設計ループが、確定前の候補を何度でも試せるようにするため）。
-        重複ならどちらのモードでも history.TopicCooldownSkip を送出する。"""
+    def reserve_selected_topic(topic: str) -> None:
         nonlocal reservation_id, selected_topic
-        topic = topic.strip()
+        selected_topic = topic.strip()
         try:
-            result = history.reserve_topic(
+            reservation_id = history.reserve_topic(
                 spec,
                 corner.key,
-                topic,
+                selected_topic,
                 cooldown_days=cooldown_days,
-                reserve=(do_upload and not probe),
+                reserve=do_upload,
                 semantic_check=(
                     semantic_duplicate_check if cooldown_days > 0 else None
                 ),
             )
+            if reservation_id:
+                reservation_state.update(
+                    {
+                        "spec": spec,
+                        "corner": corner.key,
+                        "topic": selected_topic,
+                        "reservation_id": reservation_id,
+                    }
+                )
         except history.TopicCooldownSkip as exc:
-            if not probe:
-                _log(f"題材スキップ: {exc.reason}")
+            _log(f"題材スキップ: {exc.reason}")
             raise
-        if probe:
-            return
-        selected_topic = topic
-        reservation_id = result
-        if reservation_id:
-            reservation_state.update(
-                {
-                    "spec": spec,
-                    "corner": corner.key,
-                    "topic": selected_topic,
-                    "reservation_id": reservation_id,
-                }
-            )
         if cooldown_days > 0:
             mode = "キュー予約" if do_upload else "dry-run照合"
             _log(f"題材cooldown: {cooldown_days}日 / {mode}「{selected_topic}」")

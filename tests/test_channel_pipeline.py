@@ -559,10 +559,10 @@ factcheck = false
             {"topic": "重複する題材", "beats": beats, "charts": []},
             {"topic": "新しい題材", "beats": beats, "charts": []},
         ]
-        probe_calls: list[tuple[str, bool]] = []
+        guarded_calls: list[str] = []
 
-        def fake_topic_guard(topic: str, probe: bool = False) -> None:
-            probe_calls.append((topic, probe))
+        def fake_topic_guard(topic: str) -> None:
+            guarded_calls.append(topic)
             if topic == "重複する題材":
                 raise history.TopicCooldownSkip(
                     topic,
@@ -586,12 +586,9 @@ factcheck = false
             )
 
         self.assertEqual(script["title"], "Title")
-        # 1回目はprobeで重複検出→避けて再設計、2回目はprobeで通過→実予約で確定。
-        # タイトルベースの後段フォールバックは呼ばれない(4回目が無い)。
-        self.assertEqual(
-            probe_calls,
-            [("重複する題材", True), ("新しい題材", True), ("新しい題材", False)],
-        )
+        # 1回目は重複検出→避けて再設計、2回目で通過して確定。タイトルベースの
+        # 後段フォールバックは呼ばれない(3回目が無い)。
+        self.assertEqual(guarded_calls, ["重複する題材", "新しい題材"])
         second_call_avoid = make_plan_mock.call_args_list[1].kwargs["avoid_topics"]
         self.assertIn("重複する題材", second_call_avoid)
 
@@ -619,7 +616,7 @@ plan_topic_retries = 2
             "charts": [],
         }
 
-        def always_reject(topic: str, probe: bool = False) -> None:
+        def always_reject(topic: str) -> None:
             raise history.TopicCooldownSkip(
                 topic,
                 history.TopicMatch(topic=topic, ts="", similarity=0.9, source="LLM判定"),

@@ -867,7 +867,7 @@ def generate(
     corner: CornerSpec,
     day: str,
     past_topics: list[str],
-    topic_guard: Callable[..., None] | None = None,
+    topic_guard: Callable[[str], None] | None = None,
     performance_decision: dict | None = None,
 ) -> dict:
     performance_guidance = str(
@@ -911,6 +911,10 @@ def generate(
             # 照合をすり抜けやすいため、内容そのものに近いこの段階で判定する（issue: 直近でも
             # 同じ内容の動画ばかりになる）。重複時は即スキップにせず、避けるべき題材を
             # avoidリストへ積んで既定PLAN_TOPIC_RETRIES回まで設計をやり直させる。
+            # 候補ごとに毎回「実予約」を試す(プローブ用の別モードは持たない): 却下された
+            # 候補はhistoryへskip行が残るだけで、公開済み/キュー済み判定にも次回以降の
+            # プロンプトにも一切使われないため無害。試行を分けるとcooldown照合(LLMによる
+            # 意味的重複チェックを含む)が候補ごとに二重に走ってしまうため、こちらが安い。
             cooldown_days = int(
                 spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
             )
@@ -923,7 +927,6 @@ def generate(
                 1,
                 int(spec.pipeline_get("plan_topic_retries", config.PLAN_TOPIC_RETRIES)),
             )
-            candidate_topic = ""
             for attempt in range(1, max_attempts + 1):
                 try:
                     plan = plan_mod.make_plan(corner, research, avoid_topics=avoid_topics)
@@ -935,22 +938,18 @@ def generate(
                 if not candidate_topic:
                     break
                 try:
-                    topic_guard(candidate_topic, probe=True)
+                    topic_guard(candidate_topic)
                 except history.TopicCooldownSkip as exc:
                     if attempt == max_attempts:
-                        break
+                        raise
                     _log(
                         "構成プランの題材が重複"
                         f"(試行{attempt}/{max_attempts})→避けて再設計: {exc.match.topic}"
                     )
                     avoid_topics = avoid_topics + [exc.match.topic, candidate_topic]
                     continue
-                break
-            if plan and candidate_topic:
-                # 実予約。ここまでの判定と同じ結果になるはずだが、なお重複ならここでraiseし
-                # skip行として記録する（試行を使い切って重複のまま抜けた場合を含む）。
-                topic_guard(candidate_topic)
                 plan_topic_reserved = True
+                break
         else:
             try:
                 plan = plan_mod.make_plan(corner, research)
