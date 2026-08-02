@@ -62,10 +62,11 @@ def _research_block(research: dict | None) -> str:
 
 
 def _avoid_block(avoid_topics: list[str] | None) -> str:
+    """avoid_topicsは新しい(=優先度が高い)順。プロンプト長を抑えるため先頭20件だけ載せる。"""
     topics = [t.strip() for t in (avoid_topics or []) if t and t.strip()]
     if not topics:
         return ""
-    joined = "、".join(topics[-20:])
+    joined = "、".join(topics[:20])
     return (
         "最近すでに扱った題材（言い換えず、比喩・具体例・結論のいずれかが"
         f"明確に異なる別の題材を選ぶこと）: {joined}"

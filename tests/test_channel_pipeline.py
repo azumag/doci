@@ -572,8 +572,15 @@ factcheck = false
                     30,
                 )
 
+        # cooldown_window_topicsは新しい順に25件返す想定(20件超のチャンネル)。
+        # 今回の却下分は、この履歴の種より優先してプロンプトへ残る必要がある。
+        seeded_history = [f"hist_{i:02d}" for i in range(1, 26)]
+
         with (
             patch.object(config, "SCRIPT_PLAN", True),
+            patch(
+                "doci.history.cooldown_window_topics", return_value=seeded_history
+            ),
             patch("doci.plan.make_plan", side_effect=plan_candidates) as make_plan_mock,
             patch.object(ai_text, "_dispatch", return_value=raw_script),
         ):
@@ -590,7 +597,9 @@ factcheck = false
         # 後段フォールバックは呼ばれない(3回目が無い)。
         self.assertEqual(guarded_calls, ["重複する題材", "新しい題材"])
         second_call_avoid = make_plan_mock.call_args_list[1].kwargs["avoid_topics"]
-        self.assertIn("重複する題材", second_call_avoid)
+        # 今回の却下分が履歴の種より前(先頭)にある: 20件に切り詰められても必ず伝わる。
+        self.assertEqual(second_call_avoid[:2], ["重複する題材", "重複する題材"])
+        self.assertEqual(second_call_avoid[2:], seeded_history)
 
     def test_generate_gives_up_and_skips_after_plan_topic_retries_exhausted(
         self,

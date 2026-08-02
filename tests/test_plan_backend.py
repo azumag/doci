@@ -166,5 +166,24 @@ class MakePlanOpenCodeGoBackendTest(unittest.TestCase):
         self.assertEqual(result["topic"], "テスト題材")
 
 
+class AvoidBlockOrderingTest(unittest.TestCase):
+    """avoid_topicsは新しい(=優先度が高い)順で渡される契約(history.cooldown_window_topics参照)。
+    先頭20件を残すのが正しく、末尾20件を残すと最新の題材が真っ先に落ちてしまう。"""
+
+    def test_keeps_first_twenty_not_last_twenty(self) -> None:
+        topics = [f"topic_{i:02d}" for i in range(1, 26)]  # 01=最新 ... 25=最古
+
+        block = plan._avoid_block(topics)
+
+        self.assertIn("topic_01", block)
+        self.assertIn("topic_20", block)
+        self.assertNotIn("topic_21", block)
+        self.assertNotIn("topic_25", block)
+
+    def test_no_topics_returns_empty_string(self) -> None:
+        self.assertEqual(plan._avoid_block([]), "")
+        self.assertEqual(plan._avoid_block(None), "")
+
+
 if __name__ == "__main__":
     unittest.main()

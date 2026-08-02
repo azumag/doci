@@ -946,7 +946,10 @@ def generate(
                         "構成プランの題材が重複"
                         f"(試行{attempt}/{max_attempts})→避けて再設計: {exc.match.topic}"
                     )
-                    avoid_topics = avoid_topics + [exc.match.topic, candidate_topic]
+                    # 今回の却下分を先頭に積む: avoid_topics/_avoid_blockは新しい(=優先度
+                    # が高い)順の前提で先頭から20件だけプロンプトへ載せるため、末尾に足すと
+                    # 履歴の種が多いチャンネルで今回の却下自体が弾かれず伝わらなくなる。
+                    avoid_topics = [exc.match.topic, candidate_topic] + avoid_topics
                     continue
                 plan_topic_reserved = True
                 break
