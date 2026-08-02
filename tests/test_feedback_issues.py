@@ -476,6 +476,63 @@ class FeedbackIssuesTest(unittest.TestCase):
             result = feedback_issues.run(self.spec, apply=True)
         self.assertIsNotNone(result["created"])
 
+    # 16. ローカル履歴が空(ephemeralなCI等)でも、remote側のcreatedAtだけで
+    #     週次上限を検出できる
+
+    def test_weekly_limit_enforced_remotely_without_local_history(self) -> None:
+        self._write_active_setup()
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        remote_rows = [
+            _issue_row(
+                number=100 + i,
+                body=f"<!-- doci-feedback:{'c' * 15}{i} -->\n本文",
+                state="OPEN",
+                created_at=recent,
+            )
+            for i in range(config.FEEDBACK_ISSUES_MAX_PER_WEEK)
+        ]
+        with patch.object(feedback_issues, "_run_gh") as mock_run_gh:
+            mock_run_gh.side_effect = [_search_response(remote_rows)]
+            result = feedback_issues.run(self.spec, apply=True)
+        self.assertEqual(result["skip_reason"], "weekly_limit_reached")
+        self.assertEqual(mock_run_gh.call_count, 1)
+
+    # 17. duplicate_hypothesis_remoteによるローカル記録は恒久ブロックにならない
+
+    def test_hypothesis_remote_duplicate_does_not_permanently_block_locally(self) -> None:
+        decision = self._write_active_setup()
+        hypothesis_hash = feedback_issues._hypothesis_hash(
+            feedback_issues._hypothesis_key(decision)
+        )
+        other_body = (
+            "<!-- doci-feedback:bbbbbbbbbbbbbbbb -->\n"
+            f"<!-- doci-feedback-hypothesis:{hypothesis_hash} -->\n本文"
+        )
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        with patch.object(feedback_issues, "_run_gh") as mock_run_gh:
+            mock_run_gh.side_effect = [
+                _search_response(
+                    [_issue_row(number=90, body=other_body, state="OPEN", created_at=recent)]
+                )
+            ]
+            first = feedback_issues.run(self.spec, apply=True)
+        self.assertEqual(first["skip_reason"], "duplicate_hypothesis_remote")
+
+        records = feedback_issues._read_records(self.spec)
+        self.assertEqual(records[-1]["status"], "duplicate_hypothesis")
+
+        # "duplicate_hypothesis" は _local_terminal_record の対象
+        # ("created"/"duplicate") に含まれないため、次回実行は再度remoteを
+        # 確認できる(cooldown経過を想定しremoteが空を返すケース)。
+        with patch.object(feedback_issues, "_run_gh") as mock_run_gh2:
+            mock_run_gh2.side_effect = [
+                _search_response([]),
+                "https://github.com/azumag/doci/issues/903",
+            ]
+            second = feedback_issues.run(self.spec, apply=True)
+        self.assertIsNotNone(second["created"])
+        self.assertEqual(mock_run_gh2.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -270,12 +270,13 @@ def _find_duplicate(
     *,
     cooldown_days: int,
     now: datetime,
-) -> tuple[str | None, dict | None]:
+) -> tuple[str | None, dict | None, int]:
     """open/closed両方を対象に、本文中のfingerprint/hypothesisマーカーで
-    既存issueを検索する。("kind", issue) を返す。kindは
+    既存issueを検索する。("kind", issue, remote_weekly_count) を返す。kindは
     "duplicate_remote"（fingerprint完全一致）/
     "duplicate_hypothesis_remote"（同一仮説がcooldown内に作成済み）/
-    None（重複なし）。
+    None（重複なし）。remote_weekly_countは直近7日にこのツールが作成した
+    （＝doci-feedbackマーカーを持つ）issue件数。
 
     `gh api search/issues` (Search API) は結果整合で数秒〜数分のインデックス
     遅延があり、直前に作成が成功していても未検出になり得るため使わない。
@@ -285,7 +286,7 @@ def _find_duplicate(
 
     ローカルJSONL履歴（feedback_issues.jsonl）が永続しない実行環境（ephemeral
     なCI等）では週次上限・仮説cooldownのローカル判定が常に無効になるため、
-    このリモート一覧取得を仮説cooldownの正本として使う。
+    このリモート一覧取得を週次上限・仮説cooldown両方の正本として使う。
     """
     raw = _run_gh(
         [
@@ -311,13 +312,34 @@ def _find_duplicate(
             f"feedbackラベルのGitHub Issueが{_ISSUE_LIST_LIMIT}件以上あり、"
             "一覧が切り詰められた可能性があります。重複作成を避けるため自動作成を停止します"
         )
+
+    weekly_threshold = now - timedelta(days=7)
+    remote_weekly_count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        body = str(row.get("body") or "")
+        # feedbackラベルは人手作成issue(#36-#38等)にも付くため、このツール由来
+        # (fingerprintマーカーを持つ)issueだけを週次カウント対象にする。
+        if not _FEEDBACK_MARKER_RE.search(body):
+            continue
+        try:
+            created_at = datetime.fromisoformat(
+                str(row.get("createdAt")).replace("Z", "+00:00")
+            )
+            is_recent = created_at >= weekly_threshold
+        except (ValueError, TypeError):
+            continue
+        if is_recent:
+            remote_weekly_count += 1
+
     for row in rows:
         if not isinstance(row, dict):
             continue
         body = str(row.get("body") or "")
         match = _FEEDBACK_MARKER_RE.search(body)
         if match and match.group(1) == fp:
-            return "duplicate_remote", _issue_summary(row)
+            return "duplicate_remote", _issue_summary(row), remote_weekly_count
 
     threshold = now - timedelta(days=cooldown_days)
     for row in rows:
@@ -335,8 +357,8 @@ def _find_duplicate(
         except (ValueError, TypeError):
             continue
         if is_recent:
-            return "duplicate_hypothesis_remote", _issue_summary(row)
-    return None, None
+            return "duplicate_hypothesis_remote", _issue_summary(row), remote_weekly_count
+    return None, None, remote_weekly_count
 
 
 def _create_issue(repository: str, title: str, body: str) -> tuple[int, str]:
@@ -467,7 +489,8 @@ def run(
                 "skip_reason": f"local_{local_hit['status']}",
             }
 
-        if _weekly_created_count(records, now) >= config.FEEDBACK_ISSUES_MAX_PER_WEEK:
+        local_weekly_count = _weekly_created_count(records, now)
+        if local_weekly_count >= config.FEEDBACK_ISSUES_MAX_PER_WEEK:
             return {
                 "mode": "apply",
                 "channel": spec.id,
@@ -485,7 +508,7 @@ def run(
                 "skip_reason": "duplicate_hypothesis",
             }
 
-        kind, existing = _find_duplicate(
+        kind, existing, remote_weekly_count = _find_duplicate(
             repository,
             candidate["fingerprint"],
             _hypothesis_hash(candidate["hypothesis_key"]),
@@ -493,11 +516,16 @@ def run(
             now=now,
         )
         if kind is not None:
+            # duplicate_remote(fingerprint完全一致)は恒久的に同じ結論になるため
+            # ローカルでも永続ブロックしてよいが、duplicate_hypothesis_remoteは
+            # cooldown経過後に許可されるべきなので _local_terminal_record の
+            # 対象("created"/"duplicate")に含めない別statusで記録する。
+            record_status = "duplicate" if kind == "duplicate_remote" else "duplicate_hypothesis"
             _append_record(
                 spec,
                 _record_row(
                     candidate,
-                    status="duplicate",
+                    status=record_status,
                     reason=f"{kind}: existing issue #{existing['number']}",
                     issue=existing,
                 ),
@@ -509,6 +537,15 @@ def run(
                 "created": None,
                 "skip_reason": kind,
                 "existing_issue": existing,
+            }
+
+        if max(local_weekly_count, remote_weekly_count) >= config.FEEDBACK_ISSUES_MAX_PER_WEEK:
+            return {
+                "mode": "apply",
+                "channel": spec.id,
+                "candidate": candidate,
+                "created": None,
+                "skip_reason": "weekly_limit_reached",
             }
 
         _append_record(
