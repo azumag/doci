@@ -967,8 +967,11 @@ def _check_opening_pattern(
 # 図表は本来 scenes 側の要素として置く設計だが、執筆モデルが稀に図表マーカー
 # {"chart_id":N,"caption":"…"} を narration 本文へインラインしてしまう。放置すると
 # (1) TTS が JSON をそのまま読み上げ (2) scene 側に chart_id が無く図表が出ない、の二重事故になる。
+# issue #59: caption キー無しの {"chart_id": N} 単体形式も実測で混入し、本文に生JSONが
+# 残ったまま TTS・字幕に露出する事故（「文字化け」報告）を起こしたため caption はオプショナルにする。
+# group(1)=chart_id、group(2)=caption（無ければ None）。
 _INLINE_CHART = re.compile(
-    r'\s*\{\s*"chart_id"\s*:\s*(\d+)\s*,\s*"caption"\s*:\s*"([^"]*)"\s*\}'
+    r'\s*\{\s*"chart_id"\s*:\s*(\d+)\s*(?:,\s*"caption"\s*:\s*"([^"]*)"\s*)?\}'
 )
 
 
