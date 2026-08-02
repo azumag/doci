@@ -41,6 +41,10 @@ _WRITABLE_VIDEO_STATUS_KEYS = {
 }
 
 
+class UploadPreflightError(RuntimeError):
+    """動画データ受理前に確定したローカル・認証・投稿前要求エラー。"""
+
+
 def _build_service(credentials):
     """YouTube service構築を、依存未導入のfixtureテストから差し替え可能にする。"""
     import httplib2
@@ -440,34 +444,66 @@ def upload(
     token_file: Path | None = None,
     client_secret_file: Path | None = None,
 ) -> str:
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
-
     privacy = privacy or config.YOUTUBE_PRIVACY
-    creds = _load_credentials(
-        interactive=False,
-        token_file=token_file,
-        client_secret_file=client_secret_file,
-    )
-    youtube = build("youtube", "v3", credentials=creds)
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
 
-    body = {
-        "snippet": {
-            "title": title[:100],
-            "description": description,
-            "tags": tags[:30],
-            "categoryId": "24",  # Entertainment
-        },
-        "status": {
-            "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": False,
-        },
-    }
-    media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True, mimetype="video/mp4")
-    req = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        creds = _load_credentials(
+            interactive=False,
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+        )
+        youtube = build("youtube", "v3", credentials=creds)
+
+        body = {
+            "snippet": {
+                "title": title[:100],
+                "description": description,
+                "tags": tags[:30],
+                "categoryId": "24",  # Entertainment
+            },
+            "status": {
+                "privacyStatus": privacy,
+                "selfDeclaredMadeForKids": False,
+            },
+        }
+        media = MediaFileUpload(
+            str(video_path),
+            chunksize=-1,
+            resumable=True,
+            mimetype="video/mp4",
+        )
+        req = youtube.videos().insert(
+            part="snippet,status",
+            body=body,
+            media_body=media,
+        )
+    except Exception as exc:
+        raise UploadPreflightError(str(exc)[:240]) from exc
+    # resumable uploadの最初のnext_chunk()は、セッション開始POSTだけでなく
+    # メディア本体のPUTまで送る実装がある。URI未設定のセッション開始4xxだけを
+    # 投稿前検証とし、URI設定後のメディア4xxは外部状態不明のまま返す。
     resp = None
     while resp is None:
-        status, resp = req.next_chunk()
+        try:
+            status, resp = req.next_chunk()
+        except Exception as exc:  # noqa: BLE001 - 受理後の失敗はunknownのまま
+            response = getattr(exc, "resp", None)
+            http_status = getattr(exc, "status_code", None) or getattr(
+                response, "status", None
+            )
+            resumable_uri = getattr(req, "resumable_uri", object())
+            if (
+                isinstance(http_status, int)
+                and 400 <= http_status < 500
+                and resumable_uri is None
+            ):
+                raise UploadPreflightError(
+                    "YouTube投稿セッション開始が受理されませんでした "
+                    f"(HTTP {http_status})"
+                ) from exc
+            raise
         if status:
             print(f"upload {int(status.progress() * 100)}%")
     video_id = resp["id"]

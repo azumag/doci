@@ -77,6 +77,57 @@ class _Service:
 
 
 class YouTubeSearchTest(unittest.TestCase):
+    def test_upload_only_classifies_session_start_4xx_as_preflight(self) -> None:
+        class FakeHttpError(Exception):
+            def __init__(self) -> None:
+                super().__init__("HTTP 400")
+                self.resp = SimpleNamespace(status=400)
+
+        class Request:
+            def __init__(self, resumable_uri) -> None:
+                self.resumable_uri = resumable_uri
+
+            def next_chunk(self):
+                raise FakeHttpError()
+
+        class Videos:
+            def __init__(self, resumable_uri) -> None:
+                self.resumable_uri = resumable_uri
+
+            def insert(self, **_kwargs):
+                return Request(self.resumable_uri)
+
+        class Service:
+            def __init__(self, resumable_uri) -> None:
+                self.resource = Videos(resumable_uri)
+
+            def videos(self):
+                return self.resource
+
+        for resumable_uri, expected in (
+            (None, youtube.UploadPreflightError),
+            ("https://upload.example/session", FakeHttpError),
+        ):
+            with self.subTest(resumable_uri=resumable_uri):
+                with (
+                    mock.patch.object(youtube, "_load_credentials", return_value=object()),
+                    mock.patch(
+                        "googleapiclient.discovery.build",
+                        return_value=Service(resumable_uri),
+                    ),
+                    mock.patch(
+                        "googleapiclient.http.MediaFileUpload",
+                        return_value=object(),
+                    ),
+                ):
+                    with self.assertRaises(expected):
+                        youtube.upload(
+                            Path("/tmp/video.mp4"),
+                            "Title",
+                            "Description",
+                            [],
+                        )
+
     def test_search_public_videos_returns_real_video_metadata(self) -> None:
         service = _Service()
         with (

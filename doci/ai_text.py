@@ -660,7 +660,8 @@ def check_semantic_duplicate(
     誤スキップより見逃しを優先し None を返す（生成を止めない）。
     """
     candidate_topic = candidate_topic.strip()
-    candidates = [t.strip()[:text_limit] for t in recent_topics if t.strip()][-limit:]
+    source_candidates = [t.strip() for t in recent_topics if t.strip()]
+    candidates = [t[:text_limit] for t in source_candidates[:limit]]
     if not candidate_topic or not candidates:
         return None
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(candidates))
@@ -681,11 +682,11 @@ def check_semantic_duplicate(
         return None
     idx = data.get("matched_index")
     matched = (
-        candidates[idx - 1]
+        source_candidates[idx - 1]
         if isinstance(idx, int)
         and not isinstance(idx, bool)
         and 1 <= idx <= len(candidates)
-        else candidates[0]
+        else source_candidates[0]
     )
     confidence = data.get("confidence")
     score = confidence if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) else 1.0
@@ -868,6 +869,7 @@ def generate(
     day: str,
     past_topics: list[str],
     topic_guard: Callable[[str], None] | None = None,
+    topic_metadata_guard: Callable[[dict], None] | None = None,
     performance_decision: dict | None = None,
 ) -> dict:
     performance_guidance = str(
@@ -887,6 +889,7 @@ def generate(
                 past_topics,
                 spec,
                 performance_guidance=performance_guidance,
+                require_structured_novelty=True,
             )
             if research:
                 _log(f"題材: {research.get('topic', '')} / 裏取り事実 {len(research.get('facts', []))}件")
@@ -896,6 +899,8 @@ def generate(
     if research and topic_guard:
         # リサーチで題材が確定した時点で予約する。構成・執筆・音声・映像より前なので、
         # 重複候補に制作コストを使わず、並行runも同じ題材を選べない。
+        if topic_metadata_guard:
+            topic_metadata_guard(research)
         topic_guard(str(research.get("topic") or ""))
 
     # 1.5) 構成プラン（issue #2）: minimax で起承転結＋図表を設計。失敗してもプラン無しで続行。
@@ -970,6 +975,11 @@ def generate(
     if not research and topic_guard:
         # リサーチがフォールバックしたrunでも、動画生成・投稿へ進む前に
         # タイトルと概要の先頭行を題材としてcooldownを適用する。
+        if topic_metadata_guard:
+            script_research = script.get("_research")
+            topic_metadata_guard(
+                script_research if isinstance(script_research, dict) else {}
+            )
         topic_guard(
             f"{script.get('title', '')} "
             f"{str(script.get('description') or '').splitlines()[0] if script.get('description') else ''}"
