@@ -206,9 +206,10 @@ def _weekly_created_count(records: list[dict], now: datetime) -> int:
             continue
         try:
             ts = datetime.fromisoformat(str(row.get("ts")))
-        except ValueError:
+            is_recent = ts >= threshold
+        except (ValueError, TypeError):
             continue
-        if ts >= threshold:
+        if is_recent:
             count += 1
     return count
 
@@ -224,9 +225,10 @@ def _recent_same_hypothesis(
             continue
         try:
             ts = datetime.fromisoformat(str(row.get("ts")))
-        except ValueError:
+            is_recent = ts >= threshold
+        except (ValueError, TypeError):
             continue
-        if ts >= threshold:
+        if is_recent:
             return True
     return False
 

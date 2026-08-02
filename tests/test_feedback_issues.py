@@ -274,6 +274,23 @@ class FeedbackIssuesTest(unittest.TestCase):
             result = feedback_issues.run(self.spec, apply=True)
         self.assertIsNotNone(result["created"])
 
+    def test_naive_timestamp_in_history_does_not_crash(self) -> None:
+        # tzオフセットの無いISO文字列はfromisoformatの解析自体は成功するため、
+        # 比較時のTypeErrorも安全にskipされ、apply全体がクラッシュしないことを確認する。
+        self._write_history_row(
+            fingerprint="cccccccccccccccc",
+            hypothesis_key="other|metric|trait",
+            ts="2026-08-01T12:00:00",
+        )
+        self._write_active_setup()
+        with patch.object(feedback_issues, "_run_gh") as mock_run_gh:
+            mock_run_gh.side_effect = [
+                _search_response([]),
+                "https://github.com/azumag/doci/issues/901",
+            ]
+            result = feedback_issues.run(self.spec, apply=True)
+        self.assertIsNotNone(result["created"])
+
     # 8. 実行あたり上限
 
     def test_apply_respects_per_run_limit(self) -> None:
