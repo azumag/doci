@@ -40,7 +40,7 @@ channels/<id>/channel.toml
 run_daily（単一 / 全チャンネル逐次）
   ├─ 共通生成パイプライン: ai_text → voicevox → assets → compose
   ├─ チャンネル別履歴: output/<id>/history.jsonl
-  ├─ 全チャネル共通題材台帳: output/topic_ledger.jsonl
+  ├─ 全チャネル共通の日次投稿枠・投稿状態台帳: output/topic_ledger.jsonl
   └─ チャンネル別投稿資格情報: secrets/<id>/
 ```
 
@@ -217,15 +217,13 @@ token = "secrets/sample/youtube_token.json"
 チャンネルのプロンプトは従来どおりとなる。
 `pipeline.topic_cooldown_days` は公開済み・キュー済みの近似題材を再利用しない期間で、
 既定は30日、`0`で無効化する。重複runは動画生成・投稿前に正常スキップされ、理由が
-チャンネル別 `history.jsonl` に記録される。加えて、全チャネル共通の
-`output/topic_ledger.jsonl` をファイルロック付きで照合し、別チャネルで直近に扱った
-同一大テーマの言い換えも、動画生成前に停止する。既存のチャネル別履歴は書き換えず、
-共通台帳の照合時に読み取る。続編・反対視点・別視聴者向けは、元題材・新しい切り口・
-違いをresearchが構造化して明示した場合だけ再利用できる。単なるタイトル・形式変更は
-許可しない。制作前の `queued` 予約は既定24時間のリースで、異常終了したrunを無期限に
-ブロックしない。外部投稿開始後の `publishing` は結果不明でも安全側に保持し、手動確認が
-完了するまで再利用しない。続編の親は公開済み行の video/reservation ID に内部照合する。
-`PUBLISH_DRY_RUN=1` では題材予約を追記せず照合だけを行う。
+チャンネル別 `history.jsonl` に記録される。この題材照合はチャンネル単位で完結し、
+別チャンネルとの跨ぎ照合は行わない（チャンネル間で扱うテーマは十分に異なるため）。
+続編・反対視点・別視聴者向けは、元題材・新しい切り口・違いをresearchが構造化して
+明示した場合だけ同一チャンネル内で再利用できる。単なるタイトル・形式変更は許可しない。
+制作前の `queued` 予約は既定24時間のリースで、異常終了したrunを無期限にブロックしない。
+外部投稿開始後の `publishing` は結果不明でも安全側に保持し、手動確認が完了するまで
+再利用しない。
 research無し（`ideology`等）のコーナーは、執筆前の構成プラン段（起承転結の実質テーマ＝
 `plan.topic`）でこのcooldownを照合する。タイトルは煽り文句で言い換えられやすく重複検出を
 すり抜けやすいため、内容そのものに近いこの段階で判定し、重複と判定されても即スキップにせず
@@ -238,10 +236,12 @@ research無し（`ideology`等）のコーナーは、執筆前の構成プラ�
 `pipeline.title_pattern_check = true`（既定OFF、`youtube-growth`で有効）は、題材が違っても
 タイトルの修辞パターン（固有名詞・問題語・疑問形/煽り構文）が使い回されていないかをLLMで
 検出し、`script._title_pattern_check`へ記録する（検出のみで公開判断は変えない）。
-`pipeline.max_uploads_per_day` を設定したチャンネルは、JST暦日ごとの実投稿枠を
-ファイルロック下で原子的に予約する。`--no-upload` と `PUBLISH_DRY_RUN=1` は枠を消費せず、
-制作失敗時は解放、投稿成功または結果不明時は安全側に保持する。日付をまたいだ
-`queued`／`publishing`も結果確定まで次の枠を使わない。
+`pipeline.max_uploads_per_day` を設定したチャンネルは、JST暦日ごとの実投稿枠を、
+全チャンネル共通の `output/topic_ledger.jsonl` をファイルロック下で使って原子的に
+予約する（この台帳は日次枠と投稿状態の安全な管理だけに使い、題材内容の跨ぎ照合は
+行わない）。`--no-upload` と `PUBLISH_DRY_RUN=1` は枠を消費せず、制作失敗時は解放、
+投稿成功または結果不明時は安全側に保持する。日付をまたいだ `queued`／`publishing`も
+結果確定まで次の枠を使わない。
 プロセス停止などで結果不明の `publishing` が残った場合は、自動解除せず、外部側の結果を
 運用者が確認してから次で明示的に終端化する。未投稿を確認した場合は `cancelled`、投稿済み
 動画を確認した場合は `published` と動画IDを指定する。共通台帳と該当チャネル履歴を同時に
@@ -347,7 +347,7 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/compose.py` ffmpeg 合成（9:16・字幕焼込み）
 - `doci/youtube.py` アップロード・公開設定更新
 - `doci/youtube_review.py` 主題ガード・限定公開Issue確認
-- `doci/topic_ledger.py` 全チャネル共通の題材照合・予約
+- `doci/topic_ledger.py` 全チャネル共通の日次投稿枠・投稿状態管理（題材の跨ぎ照合はしない）
 - `channels/<id>/` チャンネル定義・ペルソナ・声・BGM
 - `doci/prompts/output_rules.md` 全チャンネル共通の出力規則
 - `doci/run_daily.py` オーケストレータ

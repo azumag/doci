@@ -1,33 +1,27 @@
-"""全チャネル共通の題材台帳。
+"""チャネル別の実投稿枠と、投稿結果不明時のfail-closed状態を全チャネル共通で管理する台帳。
 
-チャネル別 history.jsonl を置き換えず、公開済み・キュー済み題材を横断して
-照合する。新しい予約だけを追記し、既存履歴は読み取り時に統合する。
+題材内容そのものの重複判定はチャネル別 history.reserve_topic() が担う。チャネル間で
+扱うテーマは十分に異なるため、この台帳は題材の跨ぎ照合は行わない。ここでは
+pipeline.max_uploads_per_day のJST日次実投稿枠と、外部投稿結果が確定するまでの
+安全な状態遷移（queued→publishing→published/cancelled）だけを、ファイルロックで
+原子的に扱う。
 """
 from __future__ import annotations
 
 import fcntl
 import json
 import os
-import time
 import uuid
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import channel, config, history
 
 
-@dataclass(frozen=True)
-class LedgerCandidate:
-    row: dict
-    topic: str
-    source: str
-
-
 class TopicLedgerCorruptError(RuntimeError):
-    """台帳のJSONLが壊れており、重複判定を安全に続けられない。"""
+    """台帳のJSONLが壊れており、日次枠・投稿状態の判定を安全に続けられない。"""
 
 
 class DailyUploadLimitSkip(RuntimeError):
@@ -77,116 +71,6 @@ def _read_rows(path: Path) -> list[dict]:
             )
         rows.append(row)
     return rows
-
-
-def _ledger_candidates(
-    rows: list[dict], *, now: datetime, cooldown_days: int
-) -> list[LedgerCandidate]:
-    cutoff = now - timedelta(days=cooldown_days)
-    latest_reservations = history._latest_reservation_rows(rows, now)
-    candidates: list[LedgerCandidate] = []
-    for row in rows:
-        timestamp = history._parse_ts(row.get("ts"))
-        status = str(row.get("status") or "")
-        if timestamp is None:
-            if status != "publishing":
-                continue
-        elif timestamp > now and status not in {"queued", "publishing"}:
-            continue
-        elif status != "publishing" and timestamp < cutoff:
-            continue
-        reservation_id = str(row.get("reservation_id") or "")
-        if reservation_id and latest_reservations.get(reservation_id) is not row:
-            continue
-        is_published = status == "published" or (
-            not status and bool(row.get("video_id"))
-        )
-        if status not in {"queued", "publishing"} and not is_published:
-            continue
-        if status == "queued" and not history._queued_reservation_is_active(
-            row, timestamp, now
-        ):
-            continue
-        topic = history._row_topic(row)
-        if not topic:
-            continue
-        channel_id = str(row.get("channel") or "unknown")
-        label = (
-            "公開済み"
-            if is_published
-            else "投稿処理中"
-            if status == "publishing"
-            else "キュー済み"
-        )
-        candidates.append(
-            LedgerCandidate(row, topic, f"共通台帳({channel_id}/{label})")
-        )
-    return candidates
-
-
-def _legacy_candidates(*, now: datetime, cooldown_days: int) -> list[LedgerCandidate]:
-    """既存チャネル履歴を壊さず、共通照合用の候補として読む。"""
-    candidates: list[LedgerCandidate] = []
-    for channel_id in channel.discover():
-        try:
-            spec = channel.load(channel_id)
-            rows = history._read_path(spec.history_file)
-        except (OSError, ValueError, TypeError):
-            continue
-        for row, topic, status_label in history._cooldown_candidates(
-            rows, now=now, cooldown_days=cooldown_days
-        ):
-            candidates.append(
-                LedgerCandidate(
-                    row,
-                    topic,
-                    f"既存履歴({channel_id}/{status_label})",
-                )
-            )
-    return candidates
-
-
-def recent_topics(
-    *,
-    limit: int = 20,
-    cooldown_days: int | None = None,
-    now: datetime | None = None,
-) -> list[str]:
-    """プロンプトへ渡す、全チャネルの直近題材を重複なく返す。"""
-    if limit <= 0:
-        return []
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    window = (
-        config.TOPIC_COOLDOWN_DAYS
-        if cooldown_days is None
-        else cooldown_days
-    )
-    if window <= 0:
-        return []
-    lock_path = _lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        candidates = _ledger_candidates(
-            _read_rows(ledger_path()), now=current, cooldown_days=window
-        )
-        candidates.extend(_legacy_candidates(now=current, cooldown_days=window))
-    candidates.sort(
-        key=lambda candidate: history._parse_ts(candidate.row.get("ts"))
-        or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
-    topics: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = history._normalise_topic(candidate.topic)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        topics.append(candidate.topic)
-        if len(topics) >= limit:
-            break
-    return topics
 
 
 def _append(file, row: dict) -> None:  # type: ignore[no-untyped-def]
@@ -341,135 +225,6 @@ def _daily_upload_keys_for_spec(
     return keys
 
 
-def _candidate_sort_key(candidate: LedgerCandidate) -> datetime:
-    return history._parse_ts(candidate.row.get("ts")) or datetime.min.replace(
-        tzinfo=timezone.utc
-    )
-
-
-def _collect_candidates(
-    rows: list[dict], *, now: datetime, cooldown_days: int
-) -> list[LedgerCandidate]:
-    candidates = _ledger_candidates(rows, now=now, cooldown_days=cooldown_days)
-    candidates.extend(_legacy_candidates(now=now, cooldown_days=cooldown_days))
-    candidates.sort(key=_candidate_sort_key, reverse=True)
-    return candidates
-
-
-def _resolve_topic_metadata(
-    topic: str,
-    topic_data: dict[str, str],
-    raw_metadata: dict[str, object] | None,
-    candidates: list[LedgerCandidate],
-    similarity_threshold: float,
-) -> dict[str, str]:
-    resolved_parent_id = history._resolve_parent_topic_id(
-        topic_data,
-        [
-            (candidate.row, candidate.topic, candidate.source)
-            for candidate in candidates
-        ],
-        similarity_threshold,
-    )
-    if resolved_parent_id and not topic_data["parent_topic_id"]:
-        if raw_metadata is not None:
-            raw_metadata["parent_topic_id"] = resolved_parent_id
-        return {**topic_data, "parent_topic_id": resolved_parent_id}
-    return topic_data
-
-
-def _lexical_match(
-    topic: str,
-    topic_data: Mapping[str, object],
-    candidates: list[LedgerCandidate],
-    similarity_threshold: float,
-    *,
-    metadata_cache: dict[int, dict[str, str]] | None = None,
-) -> history.TopicMatch | None:
-    cache = metadata_cache if metadata_cache is not None else {}
-    best: history.TopicMatch | None = None
-    for candidate in candidates:
-        similarity = history.topic_match_similarity(
-            topic,
-            topic_data,
-            candidate.topic,
-            candidate.row,
-            metadata_cache=cache,
-        )
-        if similarity < similarity_threshold:
-            continue
-        if history._continuation_allowed(
-            topic,
-            topic_data,
-            candidate.row,
-            candidate.topic,
-            similarity_threshold,
-            metadata_cache=cache,
-        ):
-            continue
-        match = history.TopicMatch(
-            topic=candidate.topic,
-            ts=str(candidate.row.get("ts") or ""),
-            similarity=similarity,
-            source=candidate.source,
-        )
-        if best is None or match.similarity > best.similarity:
-            best = match
-    return best
-
-
-def _recent_candidate_topics(candidates: list[LedgerCandidate]) -> list[str]:
-    topics: list[str] = []
-    seen_topics: set[str] = set()
-    for candidate in candidates:
-        key = history._normalise_topic(candidate.topic)
-        if not key or key in seen_topics:
-            continue
-        seen_topics.add(key)
-        topics.append(candidate.topic)
-    return topics
-
-
-def _semantic_match_is_blocking(
-    topic: str,
-    topic_data: Mapping[str, object],
-    match: history.TopicMatch,
-    candidates: list[LedgerCandidate],
-    similarity_threshold: float,
-    *,
-    metadata_cache: dict[int, dict[str, str]] | None = None,
-) -> bool:
-    matched_key = history._normalise_topic(match.topic)
-    matching = [
-        candidate
-        for candidate in candidates
-        if matched_key
-        and history._normalise_topic(candidate.topic) == matched_key
-    ]
-    if not matching and matched_key:
-        ranked = sorted(
-            candidates,
-            key=lambda candidate: history.topic_similarity(
-                match.topic, candidate.topic
-            ),
-            reverse=True,
-        )
-        if ranked and history.topic_similarity(match.topic, ranked[0].topic) >= 0.9:
-            matching = [ranked[0]]
-    if not matching:
-        # 意味判定のスナップショットにだけ存在した候補は、再検証後に
-        # 取消済み・期限切れになった可能性があるため採用しない。
-        return False
-    return not history._semantic_match_allows_continuation(
-        topic,
-        topic_data,
-        match,
-        [(candidate.row, candidate.topic, candidate.source) for candidate in matching],
-        similarity_threshold,
-        metadata_cache=metadata_cache,
-    )
-
-
 def _append_daily_limit_skip(
     path: Path,
     spec: channel.ChannelSpec,
@@ -529,23 +284,22 @@ def reserve(
     corner: str,
     topic: str,
     *,
-    cooldown_days: int,
     metadata: Mapping[str, object] | None = None,
     reserve: bool = True,
     now: datetime | None = None,
-    similarity_threshold: float = 0.55,
-    semantic_check: Callable[[str, list[str]], history.TopicMatch | None]
-    | None = None,
 ) -> str | None:
-    """全チャネルを照合し、実投稿runだけ共通台帳へ予約する。"""
+    """pipeline.max_uploads_per_dayのJST日次実投稿枠だけを原子的に確認・予約する。
+
+    題材内容の重複判定は行わない(チャネル別history.reserve_topic()の役割)。
+    枠設定が無いチャンネルは即Noneを返し、台帳を汚さない。
+    """
     daily_limit = _max_uploads_per_day(spec)
-    if cooldown_days <= 0 and daily_limit <= 0:
+    if daily_limit <= 0:
         return None
     topic = topic.strip()
     if not topic:
-        raise ValueError("共通題材台帳の照合対象が空です")
+        raise ValueError("共通題材台帳の予約対象が空です")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    raw_metadata = metadata if isinstance(metadata, dict) else None
     topic_data = history.topic_metadata(topic, metadata)
     path = ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -553,138 +307,15 @@ def reserve(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        metadata_cache: dict[int, dict[str, str]] = {}
-        def read_and_match(*, advance_clock: bool = False) -> tuple[
-            list[dict], list[LedgerCandidate], dict[str, str], history.TopicMatch | None
-        ]:
-            nonlocal current
+        if reserve:
             rows = _read_rows(path)
-            if advance_clock:
-                active_timestamps = [
-                    timestamp
-                    for row in rows
-                    if str(row.get("status") or "") in {"queued", "publishing"}
-                    for timestamp in [history._parse_ts(row.get("ts"))]
-                    if timestamp is not None
-                ]
-                if active_timestamps:
-                    current = max(current, max(active_timestamps))
-            if reserve and daily_limit > 0:
-                used_keys = _daily_upload_keys_for_spec(
-                    rows,
-                    spec,
-                    current=current,
+            used_keys = _daily_upload_keys_for_spec(rows, spec, current=current)
+            if len(used_keys) >= daily_limit:
+                raise _append_daily_limit_skip(
+                    path, spec, corner, topic, topic_data, current, daily_limit
                 )
-                if len(used_keys) >= daily_limit:
-                    raise _append_daily_limit_skip(
-                        path,
-                        spec,
-                        corner,
-                        topic,
-                        topic_data,
-                        current,
-                        daily_limit,
-                    )
-            candidates = _collect_candidates(
-                rows,
-                now=current,
-                cooldown_days=cooldown_days,
-            )
-            current_topic_data = _resolve_topic_metadata(
-                topic,
-                topic_data,
-                raw_metadata,
-                candidates,
-                similarity_threshold,
-            )
-            # semantic再判定で台帳を読み直すと行dictも作り直される。古い
-            # id(row)キャッシュを残すと、CPythonのID再利用で別行のメタデータを
-            # 誤って参照し得るため、読込単位でだけキャッシュを有効にする。
-            metadata_cache.clear()
-            best = _lexical_match(
-                topic,
-                current_topic_data,
-                candidates,
-                similarity_threshold,
-                metadata_cache=metadata_cache,
-            )
-            return rows, candidates, current_topic_data, best
-
-        rows, candidates, topic_data, best = read_and_match()
-        semantic_match: history.TopicMatch | None = None
-        if best is None and semantic_check is not None:
-            semantic_topics = _recent_candidate_topics(candidates)
-            # LLM判定は最大60秒かかるため、共通台帳の排他ロックを
-            # 保持したまま実行しない。候補が並行追加された場合は最大3回まで
-            # 時刻・候補を更新して再判定し、最後まで変化する場合はfail-closedにする。
-            for semantic_attempt in range(3):
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                wait_started_monotonic = time.monotonic()
-                try:
-                    semantic_match = semantic_check(topic, semantic_topics)
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                # LLM呼び出しに実際にかかった経過時間だけcurrentを進める。
-                # datetime.now()へ直接max()すると、注入されたnow(テストの仮想時計や
-                # 将来のバックフィル)から実時計へ一気に飛んでしまい、その飛び幅が
-                # TOPIC_RESERVATION_TTL_HOURSを超えるとqueued予約が突然「期限切れ」に
-                # 見えて再判定の母集団から消え、fail-closedのはずが素通りしてしまう。
-                # 経過時間はtime.monotonic()の差分で測る(datetime.now()同士の差分だと、
-                # semantic_check中のNTP補正等でシステム時計が後退した場合にcurrentまで
-                # 逆行し、直後に書かれたterminal行が「未来の行」としてガードへ弾かれ得る)。
-                current = current + timedelta(
-                    seconds=max(0.0, time.monotonic() - wait_started_monotonic)
-                )
-                rows, candidates, topic_data, best = read_and_match(
-                    advance_clock=True
-                )
-                fresh_topics = _recent_candidate_topics(candidates)
-                if best is not None:
-                    break
-                if fresh_topics != semantic_topics and semantic_attempt < 2:
-                    semantic_topics = fresh_topics
-                    continue
-                if fresh_topics != semantic_topics:
-                    if fresh_topics:
-                        best = history.TopicMatch(
-                            topic=fresh_topics[0],
-                            ts="",
-                            similarity=similarity_threshold,
-                            source="共通台帳(並行予約のため再確認不能)",
-                        )
-                    break
-                if semantic_match is not None and _semantic_match_is_blocking(
-                    topic,
-                    topic_data,
-                    semantic_match,
-                    candidates,
-                    similarity_threshold,
-                    metadata_cache=metadata_cache,
-                ):
-                    best = semantic_match
-                break
-        if best is not None:
-            exc = history.TopicCooldownSkip(topic, best, cooldown_days)
-            if reserve:
-                with path.open("a", encoding="utf-8") as file:
-                    _append(
-                        file,
-                        {
-                            "ts": current.isoformat(),
-                            "channel": spec.id,
-                            "corner": corner,
-                            "topic": topic,
-                            "status": "skipped",
-                            "topic_metadata": topic_data,
-                            **topic_data,
-                            "skip_reason": exc.reason,
-                            "matched_topic": best.topic,
-                            "matched_ts": best.ts,
-                            "matched_source": best.source,
-                            "similarity": round(best.similarity, 4),
-                        },
-                    )
-            raise exc
+        else:
+            _read_rows(path)  # 台帳破損はdry-run照合でも検出する。
         if not reserve:
             return None
         reservation_id = uuid.uuid4().hex
@@ -698,12 +329,8 @@ def reserve(
                     "topic": topic,
                     "status": "queued",
                     "reservation_id": reservation_id,
-                    "daily_upload_limit": daily_limit or None,
-                    "daily_upload_day": (
-                        current.astimezone(_JST).date().isoformat()
-                        if daily_limit > 0
-                        else None
-                    ),
+                    "daily_upload_limit": daily_limit,
+                    "daily_upload_day": current.astimezone(_JST).date().isoformat(),
                     "topic_metadata": topic_data,
                     **topic_data,
                 },

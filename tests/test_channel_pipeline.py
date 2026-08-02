@@ -856,7 +856,6 @@ factcheck = false
             patch("doci.thumbnail.render", side_effect=fake_thumbnail),
             patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail),
             patch("doci.publish.publish", return_value=result_rows) as publish_mock,
-            patch.object(topic_ledger, "recent_topics", return_value=[]),
             patch.object(topic_ledger, "reserve", wraps=topic_ledger.reserve) as ledger_reserve_mock,
             patch.object(history, "reserve_topic", wraps=history.reserve_topic) as history_reserve_mock,
             patch.object(youtube_review, "queue_pending") as queue_mock,
@@ -910,6 +909,7 @@ factcheck = false
         channel_id: str,
         *,
         require_approval: bool = False,
+        max_uploads_per_day: int = 1,
     ) -> channel.ChannelSpec:
         approval_line = "require_approval = true\n" if require_approval else ""
         return self._make_spec(
@@ -934,6 +934,7 @@ keep_unlisted_label = "限定公開で保持"
 research = false
 plan = false
 factcheck = false
+max_uploads_per_day = {max_uploads_per_day}
 """,
         )
 
@@ -1151,6 +1152,74 @@ factcheck = false
         self.assertTrue(Path(result["video"]).exists())
         self.assertTrue(result["video_retained"])
         self.assertEqual(result["media_cleanup"]["status"], "retained")
+
+    def test_plan_topic_duplicate_skip_releases_daily_slot_for_next_candidate(
+        self,
+    ) -> None:
+        """topic_ledger.reserve()は照合をせずqueued行を無条件に書くため、直後の
+        history.reserve_topic()がチャネル内重複でスキップした候補のqueued行を
+        取り消さないと、その日のqueued/published分と合わせて日次枠
+        (max_uploads_per_day)を余分に消費したままになる(構成プラン再設計ループは
+        この例外を最終試行以外は再送出しないため、run()側の例外時クリーンアップに
+        頼れない)。日次枠2本のうち1本を既存publishedで消費した状態で、同日中に
+        1回目の候補が重複スキップ→2回目の候補で確定、という流れが「取消済み分は
+        消費しない」前提のもと2本目の枠に収まることを検証する。"""
+        spec = self._review_spec(
+            "review-duplicate-releases-slot", max_uploads_per_day=2
+        )
+        duplicate_topic = "重複する題材"
+        new_topic = "新しい題材"
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+
+        def generate_and_guard_first(*_args, **kwargs):
+            kwargs["topic_metadata_guard"]({})
+            kwargs["topic_guard"](duplicate_topic)
+            return script
+
+        first_result, *_ = self._run_review_pipeline(
+            spec,
+            script,
+            "published-first",
+            generate_side_effect=generate_and_guard_first,
+        )
+        self.assertEqual(first_result["video_id"], "published-first")
+
+        def generate_and_guard_second(*_args, **kwargs):
+            kwargs["topic_metadata_guard"]({})
+            try:
+                kwargs["topic_guard"](duplicate_topic)
+            except history.TopicCooldownSkip:
+                pass
+            kwargs["topic_metadata_guard"]({})
+            kwargs["topic_guard"](new_topic)
+            return script
+
+        second_result, *_ = self._run_review_pipeline(
+            spec,
+            script,
+            "released123",
+            generate_side_effect=generate_and_guard_second,
+        )
+
+        with patch.object(config, "OUTPUT", self.output_dir):
+            ledger_rows = [
+                json.loads(line)
+                for line in (self.output_dir / "topic_ledger.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertEqual(second_result["video_id"], "released123")
+        duplicate_statuses = [
+            row["status"] for row in ledger_rows if row["topic"] == duplicate_topic
+        ]
+        self.assertIn("cancelled", duplicate_statuses)
+        new_statuses = [
+            row["status"] for row in ledger_rows if row["topic"] == new_topic
+        ]
+        self.assertTrue(new_statuses)
 
     def test_run_daily_scopes_workdir_voice_and_history_to_channel(self) -> None:
         spec = self._make_spec("alpha")
