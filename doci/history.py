@@ -884,6 +884,7 @@ def mark_topic_publishing(
     reservation_id: str,
     metadata: Mapping[str, object] | None = None,
     topic_ledger_reservation_id: str | None = None,
+    workdir: Path | str | None = None,
 ) -> None:
     """外部投稿を開始する前に、結果不明でも題材をfail-closedにする。"""
     if not reservation_id:
@@ -900,6 +901,7 @@ def mark_topic_publishing(
             **topic_metadata(topic, metadata),
             "reservation_id": reservation_id,
             "topic_ledger_reservation_id": topic_ledger_reservation_id,
+            "workdir": str(workdir) if workdir is not None else None,
         },
     )
 

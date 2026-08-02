@@ -595,9 +595,10 @@ def _run_once(
     # 4) 合成（2.5で決めた向き・サイズで）
     _log("合成 (ffmpeg)…")
     out_mp4 = workdir / "video.mp4"
+    bgm_path = channel.bgm_path(spec, corner, day)
     compose.compose(
         scene_objs, tts.wav_path, tts.duration, out_mp4,
-        bgm=channel.bgm_path(spec, corner, day), segments=tts.segments,
+        bgm=bgm_path, segments=tts.segments,
         width=out_w, height=out_h,
         style=spec.style,
     )
@@ -671,6 +672,7 @@ def _run_once(
                     reservation_id,
                     metadata=selected_topic_metadata,
                     topic_ledger_reservation_id=topic_ledger_reservation_id,
+                    workdir=workdir,
                 )
             reservation_state["topic_stage"] = "publishing"
         from . import publish
@@ -811,6 +813,81 @@ def _run_once(
             "youtube_review_issue_error": review_issue_error,
         },
     )
+    media_cleanup: dict[str, object]
+    from . import output_cleanup
+
+    if output_cleanup.publish_results_complete(pub_results):
+        recovery = {
+            "script": "script.json",
+            "channel": spec.id,
+            "corner": corner.key,
+            "date": day,
+            "title": script["title"],
+            "video_id": video_id,
+            "voice": {
+                "key": corner.voice_key,
+                "speaker": v.speaker,
+                "speed": v.speed,
+                "pitch": v.pitch,
+                "intonation": v.intonation,
+                "intonation_vary": v.intonation_vary,
+                "volume": v.volume,
+                "label": v.label,
+            },
+            "render": {
+                "duration_sec": round(tts.duration, 1),
+                "tier": route.tier,
+                "platforms": route.platforms,
+                "orientation": orientation,
+                "width": out_w,
+                "height": out_h,
+                "video_scenes": video_scenes,
+                "seconds_per_image": seconds_per_image,
+                "max_images": max_images,
+                "asset_media": asset_media,
+                "image_backend": config.IMAGE_BACKEND,
+                "video_backend": config.VIDEO_BACKEND,
+                "bgm": str(bgm_path) if bgm_path else None,
+            },
+            "publish": publish_summary,
+        }
+        try:
+            cleanup_result = output_cleanup.cleanup_workdir(
+                spec.output_dir,
+                workdir,
+                apply=True,
+                recovery=recovery,
+            )
+        except Exception as exc:  # 投稿成功をcleanup失敗で失敗扱いにしない
+            media_cleanup = {
+                "status": "error",
+                "files": 0,
+                "bytes": 0,
+                "error": str(exc)[:240],
+            }
+            _log(
+                "アップロード後の媒体整理を完了確認できません"
+                f"（workdirを要確認）: {str(exc)[:240]}"
+            )
+        else:
+            media_cleanup = cleanup_result.to_dict()
+            _log(
+                "アップロード後の媒体削除: "
+                f"{cleanup_result.files} files / {cleanup_result.bytes} bytes"
+            )
+    else:
+        statuses = [str(result.status) for result in pub_results]
+        media_cleanup = {
+            "status": "retained",
+            "files": 0,
+            "bytes": 0,
+            "reason": (
+                "upload results require retry or confirmation"
+                if statuses
+                else "no completed upload"
+            ),
+            "publish_statuses": statuses,
+        }
     reservation_state["finalized"] = True
     return {
         "channel": spec.id,
@@ -824,6 +901,9 @@ def _run_once(
         "publish": [{"platform": r.platform, "status": r.status} for r in pub_results],
         "youtube_privacy": youtube_privacy if video_id else None,
         "youtube_review_issue": review_issue_url,
+        "workdir": str(workdir),
+        "video_retained": out_mp4.exists(),
+        "media_cleanup": media_cleanup,
     }
 
 

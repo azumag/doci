@@ -953,6 +953,18 @@ def recover_publishing(
                         "topic_ledger_reservation_id": reservation_id,
                         "recovery_reason": reason[:500],
                         "publish_results": active_publish_results,
+                        **{
+                            key: local_active[key]
+                            for key in (
+                                "workdir",
+                                "description",
+                                "duration_sec",
+                                "tier",
+                                "platforms",
+                                "youtube_privacy",
+                            )
+                            if local_active.get(key) is not None
+                        },
                     },
                 )
             local_recovered = True
