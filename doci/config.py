@@ -280,8 +280,9 @@ SCRIPT_FACTCHECK_TOTAL_TIMEOUT = get_int(
 SCRIPT_PLAN = get_bool("SCRIPT_PLAN", True)
 PLAN_MODEL = get("PLAN_MODEL", "opencode-go/minimax-m3")
 # research無しコーナー(ideology等)向け: plan.topic(起承転結の実質テーマ)でcooldown照合し、
-# 重複時にavoidリストへ積んで再設計させる上限回数。タイトルの言い換えでは見逃す重複を、
-# 内容そのものに近い段階で弾く。既定は3回、超過時は最終試行の結果でスキップへフォールバックする。
+# 重複時にavoidリストへ積んで再設計させる、初回を含めた総試行回数の上限
+# (「再設計の回数」ではない。既定3=初回1回+重複時の再設計最大2回)。タイトルの言い換えでは
+# 見逃す重複を、内容そのものに近い段階で弾く。超過時は最終試行の結果でスキップへフォールバックする。
 PLAN_TOPIC_RETRIES = get_int("PLAN_TOPIC_RETRIES", 3)
 # 上記の再設計ループ全体(全試行合計)の時間上限。個別試行はbackend側のタイムアウトに
 # 委ねているため、重複検出のたびに再設計するこのループには他段(SCRIPT_DRAFT_TOTAL_TIMEOUT等)

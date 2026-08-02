@@ -168,6 +168,26 @@ performance_feedback = "yes"
         ):
             channel.load("sample", channels_dir=self.channels_dir)
 
+    def test_rejects_invalid_title_pattern_check_switch(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+title_pattern_check = "yes"
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "title_pattern_check"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
     def test_rejects_invalid_plan_topic_retries(self) -> None:
         self._write_channel(
             toml="""\

@@ -646,6 +646,9 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     performance_feedback = pipeline.get("performance_feedback")
     if performance_feedback is not None and not isinstance(performance_feedback, bool):
         raise ChannelConfigError("pipeline.performance_feedback must be a boolean")
+    title_pattern_check = pipeline.get("title_pattern_check")
+    if title_pattern_check is not None and not isinstance(title_pattern_check, bool):
+        raise ChannelConfigError("pipeline.title_pattern_check must be a boolean")
     plan_topic_retries = pipeline.get("plan_topic_retries")
     if plan_topic_retries is not None and (
         isinstance(plan_topic_retries, bool)
