@@ -3,8 +3,8 @@
 対象: doci.feedback_issues の fingerprint/build_candidate/run。
 gh呼び出しは全て feedback_issues._run_gh をモックする。重複検索は
 `gh issue list --label feedback --state all` (即時反映) を使うため、
-`_search_response` は `gh issue list --json number,url,state,body` と同じ
-「配列」形式を返す（Search APIの `{total_count, items}` 形式ではない）。
+`_search_response` は `gh issue list --json number,url,state,body,createdAt` と
+同じ「配列」形式を返す（Search APIの `{total_count, items}` 形式ではない）。
 """
 from __future__ import annotations
 
@@ -16,19 +16,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from doci import feedback_issues, performance
+from doci import config, feedback_issues, performance
 
 
 def _search_response(items: list[dict]) -> str:
     return json.dumps(items)
 
 
-def _issue_row(*, number: int, body: str, state: str) -> dict:
+def _issue_row(
+    *, number: int, body: str, state: str, created_at: str | None = None
+) -> dict:
     return {
         "number": number,
         "url": f"https://github.com/azumag/doci/issues/{number}",
         "state": state,
         "body": body,
+        "createdAt": created_at or datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -350,6 +353,13 @@ class FeedbackIssuesTest(unittest.TestCase):
         self.assertIn(decision["decision_id"], body)
         self.assertIn(fp, body)  # 可視テキストにも記載(GitHub検索対象)
 
+        hyp_match = feedback_issues._HYPOTHESIS_MARKER_RE.search(body)
+        self.assertIsNotNone(hyp_match)
+        self.assertEqual(
+            hyp_match.group(1),
+            feedback_issues._hypothesis_hash(feedback_issues._hypothesis_key(decision)),
+        )
+
     # 11. fingerprintの感度
 
     def test_fingerprint_sensitivity(self) -> None:
@@ -416,6 +426,55 @@ class FeedbackIssuesTest(unittest.TestCase):
             result = feedback_issues.run(self.spec, apply=True)
         mock_run_gh.assert_not_called()
         self.assertEqual(result["skip_reason"], "duplicate_hypothesis")
+
+    # 15. ローカル履歴が空(ephemeralなCI等を想定)でも、同一仮説のissueが
+    #     cooldown内にremoteへ存在すれば重複作成しない
+
+    def test_duplicate_hypothesis_detected_remotely_without_local_history(self) -> None:
+        decision = self._write_active_setup()
+        hypothesis_hash = feedback_issues._hypothesis_hash(
+            feedback_issues._hypothesis_key(decision)
+        )
+        # fingerprintは対象動画集合が変わるため一致しないが、仮説(hypothesis)は同じ、
+        # というシナリオ(週次snapshot更新でtop/bottom video groupが入れ替わった想定)。
+        body = (
+            "<!-- doci-feedback:aaaaaaaaaaaaaaaa -->\n"
+            f"<!-- doci-feedback-hypothesis:{hypothesis_hash} -->\n本文"
+        )
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        with patch.object(feedback_issues, "_run_gh") as mock_run_gh:
+            mock_run_gh.side_effect = [
+                _search_response(
+                    [_issue_row(number=88, body=body, state="OPEN", created_at=recent)]
+                )
+            ]
+            result = feedback_issues.run(self.spec, apply=True)
+        self.assertEqual(result["skip_reason"], "duplicate_hypothesis_remote")
+        self.assertEqual(result["existing_issue"]["number"], 88)
+        self.assertEqual(mock_run_gh.call_count, 1)
+
+    def test_hypothesis_marker_older_than_cooldown_does_not_block_creation(self) -> None:
+        decision = self._write_active_setup()
+        hypothesis_hash = feedback_issues._hypothesis_hash(
+            feedback_issues._hypothesis_key(decision)
+        )
+        body = (
+            "<!-- doci-feedback:aaaaaaaaaaaaaaaa -->\n"
+            f"<!-- doci-feedback-hypothesis:{hypothesis_hash} -->\n本文"
+        )
+        old = (
+            datetime.now(timezone.utc)
+            - timedelta(days=config.FEEDBACK_ISSUES_HYPOTHESIS_COOLDOWN_DAYS + 10)
+        ).isoformat()
+        with patch.object(feedback_issues, "_run_gh") as mock_run_gh:
+            mock_run_gh.side_effect = [
+                _search_response(
+                    [_issue_row(number=89, body=body, state="CLOSED", created_at=old)]
+                ),
+                "https://github.com/azumag/doci/issues/902",
+            ]
+            result = feedback_issues.run(self.spec, apply=True)
+        self.assertIsNotNone(result["created"])
 
 
 if __name__ == "__main__":

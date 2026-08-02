@@ -30,6 +30,9 @@ from .channel import ChannelSpec
 from .youtube_review import _run_gh
 
 _FEEDBACK_MARKER_RE = re.compile(r"<!--\s*doci-feedback:([0-9a-f]{16})\s*-->")
+_HYPOTHESIS_MARKER_RE = re.compile(
+    r"<!--\s*doci-feedback-hypothesis:([0-9a-f]{16})\s*-->"
+)
 _LOCK_WAIT_TIMEOUT_SECONDS = 30.0
 _LOCK_RETRY_SECONDS = 0.25
 _ISSUE_LABELS = ("enhancement", "feedback")
@@ -102,6 +105,10 @@ def _hypothesis_key(decision: dict) -> str:
     return f"{decision.get('corner')}|{decision.get('metric')}|{','.join(traits)}"
 
 
+def _hypothesis_hash(hypothesis_key: str) -> str:
+    return hashlib.sha256(hypothesis_key.encode("utf-8")).hexdigest()[:16]
+
+
 def _primary_trait(decision: dict) -> str:
     positive = decision.get("positive_traits") or []
     negative = decision.get("negative_traits") or []
@@ -121,8 +128,10 @@ def _issue_body(decision: dict, fp: str) -> str:
     negative = ", ".join(decision.get("negative_traits") or []) or "なし"
     trait = _primary_trait(decision) or "(不明)"
     eligible = decision.get("eligible_video_ids") or []
+    hypothesis_hash = _hypothesis_hash(_hypothesis_key(decision))
     return f"""\
 <!-- doci-feedback:{fp} -->
+<!-- doci-feedback-hypothesis:{hypothesis_hash} -->
 ## 観測
 
 {decision.get('corner')} cornerの同一cohort（{decision.get('format_cohort')}）内で、\
@@ -246,14 +255,37 @@ def _local_terminal_record(records: list[dict], fp: str) -> dict | None:
 # --- GitHub I/O（--apply 経路のみ到達） ---
 
 
-def _find_issue_by_fingerprint(repository: str, fp: str) -> dict | None:
-    """open/closed両方を対象に、可視本文中のfingerprintで既存issueを検索する。
+def _issue_summary(row: dict) -> dict:
+    return {
+        "number": int(row["number"]),
+        "url": str(row.get("url") or ""),
+        "state": str(row.get("state") or "").upper(),
+    }
+
+
+def _find_duplicate(
+    repository: str,
+    fp: str,
+    hypothesis_hash: str,
+    *,
+    cooldown_days: int,
+    now: datetime,
+) -> tuple[str | None, dict | None]:
+    """open/closed両方を対象に、本文中のfingerprint/hypothesisマーカーで
+    既存issueを検索する。("kind", issue) を返す。kindは
+    "duplicate_remote"（fingerprint完全一致）/
+    "duplicate_hypothesis_remote"（同一仮説がcooldown内に作成済み）/
+    None（重複なし）。
 
     `gh api search/issues` (Search API) は結果整合で数秒〜数分のインデックス
     遅延があり、直前に作成が成功していても未検出になり得るため使わない。
     `gh issue list` は通常のissue一覧取得APIを叩くため即時反映される。
     fingerprintマーカー自体が一意な識別子なので作成者(author)では絞り込まない
     （ローカル実行とCI/botなど実行アカウントが異なると誤って見逃すため）。
+
+    ローカルJSONL履歴（feedback_issues.jsonl）が永続しない実行環境（ephemeral
+    なCI等）では週次上限・仮説cooldownのローカル判定が常に無効になるため、
+    このリモート一覧取得を仮説cooldownの正本として使う。
     """
     raw = _run_gh(
         [
@@ -268,7 +300,7 @@ def _find_issue_by_fingerprint(repository: str, fp: str) -> dict | None:
             "--limit",
             str(_ISSUE_LIST_LIMIT),
             "--json",
-            "number,url,state,body",
+            "number,url,state,body,createdAt",
         ]
     )
     rows = json.loads(raw or "[]")
@@ -284,14 +316,27 @@ def _find_issue_by_fingerprint(repository: str, fp: str) -> dict | None:
             continue
         body = str(row.get("body") or "")
         match = _FEEDBACK_MARKER_RE.search(body)
-        if not match or match.group(1) != fp:
+        if match and match.group(1) == fp:
+            return "duplicate_remote", _issue_summary(row)
+
+    threshold = now - timedelta(days=cooldown_days)
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        return {
-            "number": int(row["number"]),
-            "url": str(row.get("url") or ""),
-            "state": str(row.get("state") or "").upper(),
-        }
-    return None
+        body = str(row.get("body") or "")
+        match = _HYPOTHESIS_MARKER_RE.search(body)
+        if not match or match.group(1) != hypothesis_hash:
+            continue
+        try:
+            created_at = datetime.fromisoformat(
+                str(row.get("createdAt")).replace("Z", "+00:00")
+            )
+            is_recent = created_at >= threshold
+        except (ValueError, TypeError):
+            continue
+        if is_recent:
+            return "duplicate_hypothesis_remote", _issue_summary(row)
+    return None, None
 
 
 def _create_issue(repository: str, title: str, body: str) -> tuple[int, str]:
@@ -440,14 +485,20 @@ def run(
                 "skip_reason": "duplicate_hypothesis",
             }
 
-        existing = _find_issue_by_fingerprint(repository, candidate["fingerprint"])
-        if existing is not None:
+        kind, existing = _find_duplicate(
+            repository,
+            candidate["fingerprint"],
+            _hypothesis_hash(candidate["hypothesis_key"]),
+            cooldown_days=config.FEEDBACK_ISSUES_HYPOTHESIS_COOLDOWN_DAYS,
+            now=now,
+        )
+        if kind is not None:
             _append_record(
                 spec,
                 _record_row(
                     candidate,
                     status="duplicate",
-                    reason=f"existing issue #{existing['number']}",
+                    reason=f"{kind}: existing issue #{existing['number']}",
                     issue=existing,
                 ),
             )
@@ -456,7 +507,7 @@ def run(
                 "channel": spec.id,
                 "candidate": candidate,
                 "created": None,
-                "skip_reason": "duplicate_remote",
+                "skip_reason": kind,
                 "existing_issue": existing,
             }
 
