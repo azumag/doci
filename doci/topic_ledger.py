@@ -8,6 +8,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -618,11 +619,22 @@ def reserve(
             # 時刻・候補を更新して再判定し、最後まで変化する場合はfail-closedにする。
             for semantic_attempt in range(3):
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                wait_started_monotonic = time.monotonic()
                 try:
                     semantic_match = semantic_check(topic, semantic_topics)
                 finally:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                current = max(current, datetime.now(timezone.utc))
+                # LLM呼び出しに実際にかかった経過時間だけcurrentを進める。
+                # datetime.now()へ直接max()すると、注入されたnow(テストの仮想時計や
+                # 将来のバックフィル)から実時計へ一気に飛んでしまい、その飛び幅が
+                # TOPIC_RESERVATION_TTL_HOURSを超えるとqueued予約が突然「期限切れ」に
+                # 見えて再判定の母集団から消え、fail-closedのはずが素通りしてしまう。
+                # 経過時間はtime.monotonic()の差分で測る(datetime.now()同士の差分だと、
+                # semantic_check中のNTP補正等でシステム時計が後退した場合にcurrentまで
+                # 逆行し、直後に書かれたterminal行が「未来の行」としてガードへ弾かれ得る)。
+                current = current + timedelta(
+                    seconds=max(0.0, time.monotonic() - wait_started_monotonic)
+                )
                 rows, candidates, topic_data, best = read_and_match(
                     advance_clock=True
                 )
@@ -710,6 +722,7 @@ def _append_event(
     video_id: str | None = None,
     cancel_reason: str | None = None,
     publish_results: list[Mapping[str, object]] | None = None,
+    now: datetime | None = None,
 ) -> None:
     if not reservation_id:
         return
@@ -720,7 +733,11 @@ def _append_event(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        event_ts = datetime.now(timezone.utc)
+        # 呼び出し元のreserve()/ensure_daily_capacity()と同じ時計を使う。実時計に固定すると、
+        # テストや将来のバックフィルで注入したnowより後の「未来」timestampとして扱われ、
+        # _latest_reservation_rowsの「未来のterminal行は無視する」ガードに弾かれて、この
+        # cancelled/published行がqueued予約を上書きできず、古いqueuedが有効のまま残る。
+        event_ts = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         row = {
             "ts": event_ts.isoformat(),
             "channel": spec.id,
@@ -764,6 +781,7 @@ def mark_publishing(
     *,
     metadata: Mapping[str, object] | None = None,
     publish_results: list[Mapping[str, object]] | None = None,
+    now: datetime | None = None,
 ) -> None:
     """外部投稿開始前に、結果不明でも題材をfail-closedにする。"""
     _append_event(
@@ -774,6 +792,7 @@ def mark_publishing(
         "publishing",
         metadata=metadata,
         publish_results=publish_results,
+        now=now,
     )
 
 
@@ -787,6 +806,7 @@ def complete(
     metadata: Mapping[str, object] | None = None,
     video_id: str | None = None,
     publish_results: list[Mapping[str, object]] | None = None,
+    now: datetime | None = None,
 ) -> None:
     """予約を最終状態へ進める。generatedは次回の重複候補にしない。"""
     if status not in {"published", "generated"}:
@@ -800,6 +820,7 @@ def complete(
         metadata=metadata,
         video_id=video_id,
         publish_results=publish_results,
+        now=now,
     )
 
 
@@ -811,6 +832,7 @@ def cancel(
     reason: str,
     *,
     metadata: Mapping[str, object] | None = None,
+    now: datetime | None = None,
 ) -> None:
     """制作失敗時に共通予約を再利用可能へ戻す。"""
     _append_event(
@@ -821,6 +843,7 @@ def cancel(
         "cancelled",
         metadata=metadata,
         cancel_reason=reason,
+        now=now,
     )
 
 

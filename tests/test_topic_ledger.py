@@ -228,6 +228,7 @@ class TopicLedgerTest(unittest.TestCase):
             status="published",
             metadata=original_metadata,
             video_id="video-1",
+            now=self.now + timedelta(seconds=30),
         )
 
         continuation_metadata = {
@@ -278,6 +279,7 @@ class TopicLedgerTest(unittest.TestCase):
             status="published",
             metadata=metadata,
             video_id="video-1",
+            now=self.now + timedelta(seconds=30),
         )
 
         with self.assertRaises(history.TopicCooldownSkip):
@@ -325,6 +327,7 @@ class TopicLedgerTest(unittest.TestCase):
             reservation,
             "制作失敗",
             metadata={"canonical_theme": "具体的なテーマ"},
+            now=self.now + timedelta(seconds=30),
         )
         rows = [
             json.loads(line)
@@ -751,6 +754,7 @@ class TopicLedgerTest(unittest.TestCase):
             "当日の一つ目の実投稿",
             first,
             "制作失敗",
+            now=self.now + timedelta(hours=2),
         )
         next_day = topic_ledger.reserve(
             limited,
@@ -787,6 +791,7 @@ class TopicLedgerTest(unittest.TestCase):
             "日付変更前から継続する投稿",
             first,
             "制作失敗",
+            now=after_midnight,
         )
         topic_ledger.ensure_daily_capacity(limited, now=after_midnight)
 

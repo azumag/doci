@@ -176,6 +176,7 @@ _PIPELINE_KEYS = {
     "topic_cooldown_days",
     "performance_feedback",
     "title_pattern_check",
+    "plan_topic_retries",
     "max_uploads_per_day",
 }
 _STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
@@ -658,6 +659,16 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     performance_feedback = pipeline.get("performance_feedback")
     if performance_feedback is not None and not isinstance(performance_feedback, bool):
         raise ChannelConfigError("pipeline.performance_feedback must be a boolean")
+    title_pattern_check = pipeline.get("title_pattern_check")
+    if title_pattern_check is not None and not isinstance(title_pattern_check, bool):
+        raise ChannelConfigError("pipeline.title_pattern_check must be a boolean")
+    plan_topic_retries = pipeline.get("plan_topic_retries")
+    if plan_topic_retries is not None and (
+        isinstance(plan_topic_retries, bool)
+        or not isinstance(plan_topic_retries, int)
+        or plan_topic_retries < 1
+    ):
+        raise ChannelConfigError("pipeline.plan_topic_retries must be a positive integer")
     max_uploads_per_day = pipeline.get("max_uploads_per_day")
     if max_uploads_per_day is not None and (
         isinstance(max_uploads_per_day, bool)

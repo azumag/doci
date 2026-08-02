@@ -526,6 +526,217 @@ factcheck = false
         self.assertTrue(research_mock.call_args.kwargs["require_structured_novelty"])
         dispatch_mock.assert_not_called()
 
+    def test_generate_regenerates_plan_when_topic_duplicates_and_reserves_once(
+        self,
+    ) -> None:
+        """research無しコーナー(ideology等)は、plan.topic(起承転結の実質テーマ)で
+        cooldown照合する。1回目の候補が重複と判定されても即スキップにせず、避けるべき
+        題材を積んで再設計し、通った候補だけを実予約する（issue: 直近でも同じ内容の
+        動画ばかりになる、への対処）。"""
+        spec = self._make_spec(
+            "ideology-like",
+            pipeline="""\
+[pipeline]
+research = false
+plan = true
+factcheck = false
+""",
+        )
+        raw_script = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        beats = [
+            {"role": "起", "gist": "a"},
+            {"role": "承", "gist": "b"},
+            {"role": "転", "gist": "c"},
+            {"role": "結", "gist": "d"},
+        ]
+        plan_candidates = [
+            {"topic": "重複する題材", "beats": beats, "charts": []},
+            {"topic": "新しい題材", "beats": beats, "charts": []},
+        ]
+        guarded_calls: list[str] = []
+        metadata_guard_calls: list[dict] = []
+
+        def fake_topic_guard(topic: str) -> None:
+            guarded_calls.append(topic)
+            if topic == "重複する題材":
+                # matched_topic(過去の類似題材)とcandidate_topic(今回却下された題材)を
+                # あえて別文字列にする。同一文字列だと[a, b] == [b, a]の順序バグを
+                # テストが検知できなくなる。
+                raise history.TopicCooldownSkip(
+                    topic,
+                    history.TopicMatch(
+                        topic="過去の類似題材", ts="", similarity=0.9, source="LLM判定"
+                    ),
+                    30,
+                )
+
+        # cooldown_window_topicsは新しい順に25件返す想定(20件超のチャンネル)。
+        # 今回の却下分は、この履歴の種より優先してプロンプトへ残る必要がある。
+        seeded_history = [f"hist_{i:02d}" for i in range(1, 26)]
+
+        with (
+            patch.object(config, "SCRIPT_PLAN", True),
+            patch(
+                "doci.history.cooldown_window_topics", return_value=seeded_history
+            ),
+            patch("doci.plan.make_plan", side_effect=plan_candidates) as make_plan_mock,
+            patch.object(ai_text, "_dispatch", return_value=raw_script),
+        ):
+            script = ai_text.generate(
+                spec,
+                spec.corners["a"],
+                "2026-07-16",
+                [],
+                topic_guard=fake_topic_guard,
+                topic_metadata_guard=metadata_guard_calls.append,
+            )
+
+        self.assertEqual(script["title"], "Title")
+        # 1回目は重複検出→避けて再設計、2回目で通過して確定。タイトルベースの
+        # 後段フォールバックは呼ばれない(3回目が無い)。
+        self.assertEqual(guarded_calls, ["重複する題材", "新しい題材"])
+        # research無しのため実質は空辞書だが、topic_guardの前に必ずtopic_metadata_guard
+        # を呼ぶという他経路(research分岐・タイトルフォールバック分岐)と同じ呼び出し順を
+        # このplanベースの経路でも維持する(候補ごと=試行ごとに1回)。
+        self.assertEqual(metadata_guard_calls, [{}, {}])
+        second_call_avoid = make_plan_mock.call_args_list[1].kwargs["avoid_topics"]
+        # 今回の却下分(matched→candidateの順)が履歴の種より前(先頭)にある:
+        # 20件に切り詰められても必ず伝わる。
+        self.assertEqual(second_call_avoid[:2], ["過去の類似題材", "重複する題材"])
+        self.assertEqual(second_call_avoid[2:], seeded_history)
+
+    def test_generate_gives_up_and_skips_after_plan_topic_retries_exhausted(
+        self,
+    ) -> None:
+        spec = self._make_spec(
+            "ideology-like-exhausted",
+            pipeline="""\
+[pipeline]
+research = false
+plan = true
+factcheck = false
+plan_topic_retries = 2
+""",
+        )
+        plan_candidate = {
+            "topic": "ずっと重複する題材",
+            "beats": [
+                {"role": "起", "gist": "a"},
+                {"role": "承", "gist": "b"},
+                {"role": "転", "gist": "c"},
+                {"role": "結", "gist": "d"},
+            ],
+            "charts": [],
+        }
+
+        def always_reject(topic: str) -> None:
+            raise history.TopicCooldownSkip(
+                topic,
+                history.TopicMatch(topic=topic, ts="", similarity=0.9, source="LLM判定"),
+                30,
+            )
+
+        with (
+            patch.object(config, "SCRIPT_PLAN", True),
+            patch("doci.plan.make_plan", return_value=plan_candidate) as make_plan_mock,
+            patch.object(ai_text, "_dispatch") as dispatch_mock,
+        ):
+            with self.assertRaises(history.TopicCooldownSkip):
+                ai_text.generate(
+                    spec,
+                    spec.corners["a"],
+                    "2026-07-16",
+                    [],
+                    topic_guard=always_reject,
+                )
+
+        self.assertEqual(make_plan_mock.call_count, 2)  # plan_topic_retries上限で打ち切り
+        dispatch_mock.assert_not_called()  # 執筆(script draft)までは進まない
+
+    def test_plan_topic_retry_loop_gives_up_after_total_budget_and_falls_back(
+        self,
+    ) -> None:
+        """backend不調で候補生成のたびに重複と判定され続ける最悪日でも、再設計ループ
+        全体はPLAN_TOPIC_TOTAL_TIMEOUTで打ち切られ、プラン無しの後段フォールバック
+        (タイトルベースのcooldown照合)へ抜ける。試行回数分の待ち時間が積み重ならない
+        ことを、試行3回まで許すが1回目で予算切れになるよう仕込んで確認する。"""
+        spec = self._make_spec(
+            "ideology-like-budget",
+            pipeline="""\
+[pipeline]
+research = false
+plan = true
+factcheck = false
+plan_topic_retries = 3
+""",
+        )
+        raw_script = json.dumps(
+            {
+                "title": "Title",
+                "description": "Description",
+                "tags": [],
+                "narration": "本題から始まるナレーションです。",
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            }
+        )
+        plan_candidate = {
+            "topic": "重複する題材",
+            "beats": [
+                {"role": "起", "gist": "a"},
+                {"role": "承", "gist": "b"},
+                {"role": "転", "gist": "c"},
+                {"role": "結", "gist": "d"},
+            ],
+            "charts": [],
+        }
+
+        def fake_topic_guard(topic: str) -> None:
+            # プラン段の候補だけが常に重複する。後段フォールバック(タイトル+概要)は通す。
+            if topic == "重複する題材":
+                raise history.TopicCooldownSkip(
+                    topic,
+                    history.TopicMatch(
+                        topic=topic, ts="", similarity=0.9, source="LLM判定"
+                    ),
+                    30,
+                )
+
+        clock = [100.0]
+
+        def fake_monotonic() -> float:
+            current = clock[0]
+            clock[0] += 2.0  # 予算(1秒)をはるかに超える速さで進める
+            return current
+
+        with (
+            patch.object(config, "SCRIPT_PLAN", True),
+            patch.object(config, "PLAN_TOPIC_TOTAL_TIMEOUT", 1),
+            patch.object(ai_text, "_monotonic", side_effect=fake_monotonic),
+            patch("doci.plan.make_plan", return_value=plan_candidate) as make_plan_mock,
+            patch.object(ai_text, "_dispatch", return_value=raw_script),
+        ):
+            script = ai_text.generate(
+                spec,
+                spec.corners["a"],
+                "2026-07-16",
+                [],
+                topic_guard=fake_topic_guard,
+            )
+
+        # 1回目の試行だけ使い、2回目に入る前に予算切れでプランを諦める
+        # (plan_topic_retries=3まで許しているのに3回消費していない)。
+        self.assertEqual(make_plan_mock.call_count, 1)
+        # プラン無しにフォールバックしても、後段のタイトルベース照合で生成は完了する。
+        self.assertEqual(script["title"], "Title")
+
     def test_generate_preserves_theme_review_research_fields(self) -> None:
         spec = self._make_spec(
             "review-research",

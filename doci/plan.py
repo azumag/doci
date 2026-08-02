@@ -17,7 +17,7 @@ _PROMPT = """\
 
 コーナー: {label}
 {research}
-
+{avoid_block}
 やること:
 1. 起承転結の4ビートを設計する（各1行で要点）。**起＝「つかみ」**にする——ただし年号や出来事などの
    具体的事実そのものではなく、この題材が本当に問いたい「哲学的な問い・伝えたいテーマ」を一言で示す
@@ -61,9 +61,33 @@ def _research_block(research: dict | None) -> str:
     return "\n".join(lines)
 
 
-def make_plan(corner: CornerSpec, research: dict | None) -> dict | None:
-    """構成＋図表を設計。失敗時は None（呼び出し側は構成プラン無しで続行）。"""
-    prompt = _PROMPT.format(label=corner.label, research=_research_block(research))
+def _avoid_block(avoid_topics: list[str] | None) -> str:
+    """avoid_topicsは新しい(=優先度が高い)順。プロンプト長を抑えるため先頭20件だけ載せる。"""
+    topics = [t.strip() for t in (avoid_topics or []) if t and t.strip()]
+    if not topics:
+        return ""
+    joined = "、".join(topics[:20])
+    return (
+        "最近すでに扱った題材（言い換えず、比喩・具体例・結論のいずれかが"
+        f"明確に異なる別の題材を選ぶこと）: {joined}"
+    )
+
+
+def make_plan(
+    corner: CornerSpec,
+    research: dict | None,
+    avoid_topics: list[str] | None = None,
+) -> dict | None:
+    """構成＋図表を設計。失敗時は None（呼び出し側は構成プラン無しで続行）。
+
+    avoid_topics はresearch無しコーナーのcooldown照合で重複と判定された直近題材。
+    与えると、次の設計でその題材と実質同じ結論・構成にならないよう避けさせる。
+    """
+    prompt = _PROMPT.format(
+        label=corner.label,
+        research=_research_block(research),
+        avoid_block=_avoid_block(avoid_topics),
+    )
     last_err: Exception | None = None
     for _ in range(2):
         try:

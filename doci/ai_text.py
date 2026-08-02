@@ -23,7 +23,7 @@ import urllib.request
 from datetime import date as _date
 from pathlib import Path
 
-from . import channel, config, corners, llm
+from . import channel, config, corners, history, llm
 from .channel import ChannelSpec, CornerSpec
 
 REQUIRED_KEYS = ("title", "description", "tags", "narration", "scenes")
@@ -905,17 +905,94 @@ def generate(
 
     # 1.5) 構成プラン（issue #2）: minimax で起承転結＋図表を設計。失敗してもプラン無しで続行。
     plan = None
+    plan_topic_reserved = False
     if spec.pipeline_get("plan", config.SCRIPT_PLAN):
         from . import plan as plan_mod
 
         _log(f"構成プラン (minimax) …")
-        try:
-            plan = plan_mod.make_plan(corner, research)
-            if plan:
-                _log(f"構成: 起承転結{len(plan.get('beats', []))}ビート / 図表 {len(plan.get('charts', []))}個")
-        except Exception as e:  # noqa: BLE001
-            _log(f"プラン失敗→プラン無しで続行: {e}")
-            plan = None
+        if not research and topic_guard:
+            # researchが無いコーナー(ideology等)は、plan.topic(起承転結の実質テーマ)を
+            # 執筆前にcooldown照合する。タイトルは煽り文句で言い換えられやすく文字列/意味
+            # 照合をすり抜けやすいため、内容そのものに近いこの段階で判定する（issue: 直近でも
+            # 同じ内容の動画ばかりになる）。重複時は即スキップにせず、避けるべき題材を
+            # avoidリストへ積んで既定PLAN_TOPIC_RETRIES回まで設計をやり直させる。
+            # 候補ごとに毎回「実予約」を試す(プローブ用の別モードは持たない): 却下された
+            # 候補はhistoryへskip行が残るだけで、公開済み/キュー済み判定にも次回以降の
+            # プロンプトにも一切使われないため無害。試行を分けるとcooldown照合(LLMによる
+            # 意味的重複チェックを含む)が候補ごとに二重に走ってしまうため、こちらが安い。
+            cooldown_days = int(
+                spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
+            )
+            avoid_topics = (
+                history.cooldown_window_topics(spec, cooldown_days=cooldown_days)
+                if cooldown_days > 0
+                else []
+            )
+            max_attempts = max(
+                1,
+                int(spec.pipeline_get("plan_topic_retries", config.PLAN_TOPIC_RETRIES)),
+            )
+            plan_topic_started = _monotonic()
+            plan_topic_total_timeout = (
+                config.PLAN_TOPIC_TOTAL_TIMEOUT
+                if config.PLAN_TOPIC_TOTAL_TIMEOUT > 0
+                else None
+            )
+            for attempt in range(1, max_attempts + 1):
+                if (
+                    attempt > 1
+                    and plan_topic_total_timeout is not None
+                    and _monotonic() - plan_topic_started >= plan_topic_total_timeout
+                ):
+                    # 他段(SCRIPT_DRAFT_TOTAL_TIMEOUT等)と同様、再設計ループ全体の予算切れは
+                    # backend不調日に試行回数分の待ち時間が積み重なるのを防ぐための保険。
+                    # プラン無しにフォールバックし、後段のタイトルベース照合に委ねる。
+                    _log(
+                        "構成プラン再設計が時間上限に達しました"
+                        f"({attempt - 1}/{max_attempts}試行)→プラン無しで続行"
+                    )
+                    plan = None
+                    break
+                try:
+                    plan = plan_mod.make_plan(corner, research, avoid_topics=avoid_topics)
+                except Exception as e:  # noqa: BLE001
+                    _log(f"プラン失敗→プラン無しで続行: {e}")
+                    plan = None
+                    break
+                candidate_topic = str((plan or {}).get("topic") or "").strip()
+                if not candidate_topic:
+                    break
+                if topic_metadata_guard:
+                    # researchが無いのでresearch由来のstructured novelty(canonical_theme
+                    # 等)は無く、実質{}にしかならないが、topic_guardの前に必ず
+                    # topic_metadata_guardを呼ぶという他経路と同じ呼び出し順を維持する。
+                    # 将来ideology等にも構造化メタデータを持たせる場合、ここに差し込むだけで
+                    # 共通台帳へ伝わるようにしておく。
+                    topic_metadata_guard({})
+                try:
+                    topic_guard(candidate_topic)
+                except history.TopicCooldownSkip as exc:
+                    if attempt == max_attempts:
+                        raise
+                    _log(
+                        "構成プランの題材が重複"
+                        f"(試行{attempt}/{max_attempts})→避けて再設計: {exc.match.topic}"
+                    )
+                    # 今回の却下分を先頭に積む: avoid_topics/_avoid_blockは新しい(=優先度
+                    # が高い)順の前提で先頭から20件だけプロンプトへ載せるため、末尾に足すと
+                    # 履歴の種が多いチャンネルで今回の却下自体が弾かれず伝わらなくなる。
+                    avoid_topics = [exc.match.topic, candidate_topic] + avoid_topics
+                    continue
+                plan_topic_reserved = True
+                break
+        else:
+            try:
+                plan = plan_mod.make_plan(corner, research)
+            except Exception as e:  # noqa: BLE001
+                _log(f"プラン失敗→プラン無しで続行: {e}")
+                plan = None
+        if plan:
+            _log(f"構成: 起承転結{len(plan.get('beats', []))}ビート / 図表 {len(plan.get('charts', []))}個")
 
     # 2) 執筆（qwen3.7-plus 等）。リサーチの具体＋プランの構成/図表に沿わせる。
     #    稀に不完全JSONを返すため再生成で吸収。
@@ -972,9 +1049,10 @@ def generate(
             )
     if script is None:
         raise RuntimeError(f"執筆が規定回数で揃いませんでした: {last_err}")
-    if not research and topic_guard:
-        # リサーチがフォールバックしたrunでも、動画生成・投稿へ進む前に
-        # タイトルと概要の先頭行を題材としてcooldownを適用する。
+    if not research and not plan_topic_reserved and topic_guard:
+        # プラン段のtopicで既に予約済みならここは呼ばない（二重予約を避ける）。
+        # プランが無効/失敗した場合の後方互換フォールバックとして、動画生成・投稿へ
+        # 進む前にタイトルと概要の先頭行を題材としてcooldownを適用する。
         if topic_metadata_guard:
             script_research = script.get("_research")
             topic_metadata_guard(

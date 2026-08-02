@@ -94,6 +94,48 @@ class MakePlanCodexBackendTest(unittest.TestCase):
 
         self.assertEqual(run_codex_mock.call_count, 2)
 
+    def test_avoid_topics_are_included_in_prompt_when_given(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "テスト題材",
+                "beats": [
+                    {"role": "起", "gist": "a"},
+                    {"role": "承", "gist": "b"},
+                    {"role": "転", "gist": "c"},
+                    {"role": "結", "gist": "d"},
+                ],
+                "charts": [],
+            }
+        )
+        with mock.patch.object(plan.llm, "run_codex", return_value=raw) as run_codex_mock:
+            plan.make_plan(
+                _CORNER, None, avoid_topics=["見えざる手の寓話", "成長という名の神様"]
+            )
+
+        prompt = run_codex_mock.call_args.args[0]
+        self.assertIn("見えざる手の寓話", prompt)
+        self.assertIn("成長という名の神様", prompt)
+        self.assertIn("最近すでに扱った題材", prompt)
+
+    def test_no_avoid_topics_leaves_prompt_unchanged(self) -> None:
+        raw = json.dumps(
+            {
+                "topic": "テスト題材",
+                "beats": [
+                    {"role": "起", "gist": "a"},
+                    {"role": "承", "gist": "b"},
+                    {"role": "転", "gist": "c"},
+                    {"role": "結", "gist": "d"},
+                ],
+                "charts": [],
+            }
+        )
+        with mock.patch.object(plan.llm, "run_codex", return_value=raw) as run_codex_mock:
+            plan.make_plan(_CORNER, None)
+
+        prompt = run_codex_mock.call_args.args[0]
+        self.assertNotIn("最近すでに扱った題材", prompt)
+
 
 class MakePlanOpenCodeGoBackendTest(unittest.TestCase):
     def test_opencode_go_model_uses_direct_api_without_cli_state(self) -> None:
@@ -122,6 +164,25 @@ class MakePlanOpenCodeGoBackendTest(unittest.TestCase):
         direct_mock.assert_called_once()
         cli_mock.assert_not_called()
         self.assertEqual(result["topic"], "テスト題材")
+
+
+class AvoidBlockOrderingTest(unittest.TestCase):
+    """avoid_topicsは新しい(=優先度が高い)順で渡される契約(history.cooldown_window_topics参照)。
+    先頭20件を残すのが正しく、末尾20件を残すと最新の題材が真っ先に落ちてしまう。"""
+
+    def test_keeps_first_twenty_not_last_twenty(self) -> None:
+        topics = [f"topic_{i:02d}" for i in range(1, 26)]  # 01=最新 ... 25=最古
+
+        block = plan._avoid_block(topics)
+
+        self.assertIn("topic_01", block)
+        self.assertIn("topic_20", block)
+        self.assertNotIn("topic_21", block)
+        self.assertNotIn("topic_25", block)
+
+    def test_no_topics_returns_empty_string(self) -> None:
+        self.assertEqual(plan._avoid_block([]), "")
+        self.assertEqual(plan._avoid_block(None), "")
 
 
 if __name__ == "__main__":

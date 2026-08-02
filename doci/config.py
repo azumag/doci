@@ -282,6 +282,16 @@ SCRIPT_FACTCHECK_TOTAL_TIMEOUT = get_int(
 # --- 構成プラン: 起承転結＋図表策定（issue #2）。minimax が設計し qwen が執筆 ---
 SCRIPT_PLAN = get_bool("SCRIPT_PLAN", True)
 PLAN_MODEL = get("PLAN_MODEL", "opencode-go/minimax-m3")
+# research無しコーナー(ideology等)向け: plan.topic(起承転結の実質テーマ)でcooldown照合し、
+# 重複時にavoidリストへ積んで再設計させる、初回を含めた総試行回数の上限
+# (「再設計の回数」ではない。既定3=初回1回+重複時の再設計最大2回)。タイトルの言い換えでは
+# 見逃す重複を、内容そのものに近い段階で弾く。超過時は最終試行の結果でスキップへフォールバックする。
+PLAN_TOPIC_RETRIES = get_int("PLAN_TOPIC_RETRIES", 3)
+# 上記の再設計ループ全体(全試行合計)の時間上限。個別試行はbackend側のタイムアウトに
+# 委ねているため、重複検出のたびに再設計するこのループには他段(SCRIPT_DRAFT_TOTAL_TIMEOUT等)
+# 同様の総予算が無いと、backendが不調な日に試行回数分だけ待ち時間が積み重なってしまう。
+# 超過時はプラン無しにフォールバックし、後段のタイトルベースのcooldown照合に任せる。0は無制限。
+PLAN_TOPIC_TOTAL_TIMEOUT = get_int("PLAN_TOPIC_TOTAL_TIMEOUT", 1800)
 
 # --- 画像/動画バックエンド選択 ---
 # IMAGE_BACKEND: gemini (既定) | openrouter | minimax  ← 素材が無い時のAI生成フォールバック
