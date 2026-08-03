@@ -271,6 +271,12 @@ video_id未確定のまま保留された`performance_queued`行（下記の投�
 には適用しない。保護すべき公開済み動画が存在しないうえ、適用してしまうと復旧まで
 生成自体が最長window_hours分だけ止まってしまうため。
 
+実験はcorner単位で独立しているため、`--corner`未指定の自動選択では、rotationの
+次候補が評価期間内でブロックされていても、そこで諦めずrotationの他のcornerを
+順に試す（`corners.rotation_order`）。全cornerが評価期間内のときだけ、その回を
+通常どおりスキップする。1つのcornerの評価待ちだけで、無関係な他cornerの投稿枠
+まで奪わないための挙動。
+
 YouTube投稿結果が`unknown`（タイムアウト等でAPI受理の可否が不明）の場合、実際には
 公開済みの可能性があるため実績適用（`performance_application_id`）は自動で取り消さず、
 `topic_ledger`の`publishing`予約と同様に運用者確認まで保留する。保留したままだと

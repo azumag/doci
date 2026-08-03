@@ -245,29 +245,51 @@ def _run_once(
         raise ValueError(f"unknown corner for channel {spec.id}: {corner_key}")
     if real_publish:
         topic_ledger.ensure_daily_capacity(spec)
-    corner = (
-        spec.corners[corner_key]
+    corner_candidates = (
+        [spec.corners[corner_key]]
         if corner_key
-        else corners.pick_corner(spec, history.last_corner(spec))
+        else corners.rotation_order(spec, history.last_corner(spec))
     )
-    eval_window_check = None
+    eval_window_hours = 0
     if real_publish and spec.pipeline_get("performance_feedback", False):
         eval_window_hours = int(
             spec.pipeline_get("performance_eval_window_hours", 0) or 0
         )
-        if eval_window_hours > 0:
-            try:
-                eval_window_check = history.ensure_corner_eval_capacity(
-                    spec, corner.key, eval_window_hours
-                )
-            except history.PerformanceEvalWindowSkip as exc:
-                _log(f"実験評価期間スキップ: {exc.reason}")
-                raise
-            if eval_window_check["active"] and eval_window_check["elapsed_hours"] is None:
-                _log(
-                    f"実験評価期間チェック: corner={corner.key} "
-                    f"ts不明のため経過時間を判定できず生成を継続"
-                )
+    corner = None
+    eval_window_check = None
+    last_skip_exc: history.PerformanceEvalWindowSkip | None = None
+    for candidate in corner_candidates:
+        if eval_window_hours <= 0:
+            corner = candidate
+            break
+        try:
+            eval_window_check = history.ensure_corner_eval_capacity(
+                spec, candidate.key, eval_window_hours
+            )
+        except history.PerformanceEvalWindowSkip as exc:
+            last_skip_exc = exc
+            continue
+        corner = candidate
+        break
+    if corner is None:
+        # corner_keyを明示した場合はcandidatesが1件のため単純に再送出。
+        # 自動選択の場合はrotation全corner分（各cornerは独立した実験を
+        # 持つ）を試したうえで、それでも空きが無いときだけスキップする
+        # （評価待ちの1cornerだけで他cornerの投稿枠まで奪わないため）。
+        _log(
+            f"実験評価期間スキップ: rotation全{len(corner_candidates)}corner中"
+            f"評価期間内でないcornerが無い（最後に確認: {last_skip_exc.reason}）"
+        )
+        raise last_skip_exc
+    if (
+        eval_window_check is not None
+        and eval_window_check["active"]
+        and eval_window_check["elapsed_hours"] is None
+    ):
+        _log(
+            f"実験評価期間チェック: corner={corner.key} "
+            f"ts不明のため経過時間を判定できず生成を継続"
+        )
     voice = spec.voice_for(corner)
     workdir = spec.output_dir / _workdir_name(
         day, corner.key, datetime.now().strftime("%H%M%S")

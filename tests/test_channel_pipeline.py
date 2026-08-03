@@ -101,6 +101,24 @@ voice = "voice_b"
         self.assertEqual(spec.voice_for("a").speaker, 41)
         self.assertEqual(spec.voice_for("b").speaker, 42)
 
+    def test_rotation_order_starts_at_pick_corner_and_covers_full_rotation(
+        self,
+    ) -> None:
+        spec = self._make_spec("alpha")
+
+        self.assertEqual(
+            [c.key for c in corners.rotation_order(spec, None)], ["a", "b"]
+        )
+        self.assertEqual(
+            [c.key for c in corners.rotation_order(spec, "a")], ["b", "a"]
+        )
+        self.assertEqual(
+            [c.key for c in corners.rotation_order(spec, "b")], ["a", "b"]
+        )
+        self.assertEqual(
+            [c.key for c in corners.rotation_order(spec, "unknown")], ["a", "b"]
+        )
+
     def test_build_prompt_uses_channel_prompts_and_common_rules(self) -> None:
         spec = self._make_spec("alpha")
         common_rules = (config.PROMPTS / "output_rules.md").read_text(encoding="utf-8")
@@ -799,6 +817,7 @@ factcheck = false
         script: dict,
         video_id: str,
         *,
+        corner_key: str | None = "a",
         publish_dry_run: bool = False,
         publish_unknown: bool = False,
         publish_results: list[publish.PublishResult] | None = None,
@@ -873,7 +892,7 @@ factcheck = false
             result = run_daily.run(
                 spec,
                 "2026-07-26",
-                "a",
+                corner_key,
                 do_upload=True,
                 video_scenes=0,
             )
@@ -985,6 +1004,103 @@ max_uploads_per_day = {max_uploads_per_day}
                     spec,
                     "2026-07-26",
                     "a",
+                    do_upload=True,
+                    video_scenes=0,
+                )
+
+        generate_mock.assert_not_called()
+
+    def test_run_daily_falls_back_to_next_corner_when_one_is_eval_blocked(
+        self,
+    ) -> None:
+        """review指摘: 評価期間ゲートはcorner単位の実験を独立に扱うはずが、
+        1cornerの評価期間中に自動選択が他cornerの生成まで止めていた。
+        rotationの次候補（corner b）が空いていればそちらへフォールバック
+        し、rotation全体は止まらないことを確認する。"""
+        spec = self._review_spec(
+            "eval-window-fallback", performance_eval_window_hours=72
+        )
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=200)).isoformat()
+        with patch.object(config, "OUTPUT", self.output_dir):
+            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {
+                    "ts": old_ts,
+                    "channel": spec.id,
+                    "corner": "b",
+                    "video_id": "prior-b-video",
+                    "status": "published",
+                },
+                {
+                    "ts": recent_ts,
+                    "channel": spec.id,
+                    "corner": "a",
+                    "video_id": "prior-a-video",
+                    "status": "performance_applied",
+                    "performance_decision_id": "dec-1",
+                    "performance_application_id": "app-1",
+                },
+            ]
+            with spec.history_file.open("w", encoding="utf-8") as file:
+                for row in rows:
+                    file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "fallback-video1",
+            corner_key=None,
+        )
+
+        self.assertEqual(result["corner"], "b")
+        self.assertEqual(result["video_id"], "fallback-video1")
+        publish_mock.assert_called_once()
+
+    def test_run_daily_all_corners_blocked_raises_skip(self) -> None:
+        spec = self._review_spec(
+            "eval-window-all-blocked", performance_eval_window_hours=72
+        )
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with patch.object(config, "OUTPUT", self.output_dir):
+            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {
+                    "ts": recent_ts,
+                    "channel": spec.id,
+                    "corner": "a",
+                    "video_id": "prior-a-video",
+                    "status": "performance_applied",
+                    "performance_decision_id": "dec-1",
+                    "performance_application_id": "app-1",
+                },
+                {
+                    "ts": recent_ts,
+                    "channel": spec.id,
+                    "corner": "b",
+                    "video_id": "prior-b-video",
+                    "status": "performance_applied",
+                    "performance_decision_id": "dec-2",
+                    "performance_application_id": "app-2",
+                },
+            ]
+            with spec.history_file.open("w", encoding="utf-8") as file:
+                for row in rows:
+                    file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        with (
+            patch.object(config, "OUTPUT", self.output_dir),
+            patch.object(config, "PUBLISH_DRY_RUN", False),
+            patch.object(ai_text, "generate") as generate_mock,
+        ):
+            with self.assertRaises(history.PerformanceEvalWindowSkip):
+                run_daily.run(
+                    spec,
+                    "2026-07-26",
+                    None,
                     do_upload=True,
                     video_scenes=0,
                 )
