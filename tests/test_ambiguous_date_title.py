@@ -180,6 +180,30 @@ class CheckAmbiguousDateTitleTest(unittest.TestCase):
         )
         self.assertTrue(supported["supported"])
 
+    def test_year_matching_latest_still_requires_current_as_of(self) -> None:
+        # レビュー指摘: 年月が一致していても「最新」の裏付け(current_as_of)が
+        # 無ければ、年一致だけでsupported=Trueにしてはいけない。
+        unsupported = ai_text.check_ambiguous_date_title(
+            "【2025年最新】アルゴリズム解説",
+            [_fact(effective_date="2025-01-01", date_role="historical_event", verified_at="2026-08-03")],
+        )
+        self.assertFalse(unsupported["supported"])
+
+        supported = ai_text.check_ambiguous_date_title(
+            "【2025年最新】アルゴリズム解説",
+            [_fact(effective_date="2025-01-01", date_role="current_as_of", verified_at="2026-08-03")],
+        )
+        self.assertTrue(supported["supported"])
+
+    def test_year_matching_revision_alone_does_not_require_current_as_of(self) -> None:
+        # "改訂"単独は変更が起きた時点を述べるだけで「現在有効」の主張では
+        # ないため、year_role=historical_eventのままでも年月一致で足りる。
+        result = ai_text.check_ambiguous_date_title(
+            "2025年7月改訂の仕様まとめ",
+            [_fact(effective_date="2025-07-01", date_role="historical_event", verified_at="2026-08-03")],
+        )
+        self.assertTrue(result["supported"])
+
 
 class ResearchVerifiedAtStampingTest(unittest.TestCase):
     def _payload(self, **fact_overrides) -> dict:
