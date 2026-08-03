@@ -150,7 +150,20 @@ CHART_BG_BACKEND = get("CHART_BG_BACKEND", _AUX_BACKEND_DEFAULT)
 _RESEARCH_BACKEND_EXPLICIT = bool(get("RESEARCH_BACKEND"))
 _FACTCHECK_BACKEND_EXPLICIT = bool(get("FACTCHECK_BACKEND"))
 
+# codex バックエンドの接続先。minimax(既定・隔離ホームでMiniMax API鍵を使う) |
+# chatgpt(ユーザーの実 ~/.codex ChatGPT認証をそのまま使い、実OpenAIモデルを呼ぶ)。
+# chatgpt指定時も ~/.codex の設定ファイルは一切書き換えない（読むだけ）。
+CODEX_PROVIDER = get("CODEX_PROVIDER", "minimax")
+# codex実行時の reasoning effort（low/medium/high/xhigh/ultra/max等）の明示指定。
+# 空なら未指定（モデル/ユーザー既定に任せる）。
+CODEX_REASONING_EFFORT = get("CODEX_REASONING_EFFORT", "")
+_SUPPORTED_CODEX_PROVIDERS = frozenset({"minimax", "chatgpt"})
+
 _SUPPORTED_PIPELINE_BACKENDS = frozenset({"codex", "opencode", "opencode_go", "claude"})
+# TEXT_BACKENDは補助段と値の語彙が異なる（claude系は claude_cli/anthropic の2択）。
+_SUPPORTED_TEXT_BACKENDS = frozenset(
+    {"codex", "opencode", "opencode_go", "claude_cli", "anthropic"}
+)
 
 
 def validate_pipeline_backends() -> None:
@@ -167,6 +180,13 @@ def validate_pipeline_backends() -> None:
     if invalid:
         details = ", ".join(f"{name}={value}" for name, value in invalid.items())
         raise ValueError(f"未対応のバックエンド設定です: {details}")
+    if TEXT_BACKEND not in _SUPPORTED_TEXT_BACKENDS:
+        raise ValueError(f"未対応の TEXT_BACKEND です: {TEXT_BACKEND}")
+    if CODEX_PROVIDER not in _SUPPORTED_CODEX_PROVIDERS:
+        raise ValueError(
+            f"未対応の CODEX_PROVIDER です: {CODEX_PROVIDER}"
+            f"（対応値: {', '.join(sorted(_SUPPORTED_CODEX_PROVIDERS))}）"
+        )
 
 
 validate_pipeline_backends()

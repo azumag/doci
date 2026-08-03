@@ -495,6 +495,30 @@ class WriteTimeoutTest(unittest.TestCase):
 
         self.assertIsNone(run_mock.call_args.kwargs["timeout"])
 
+    def test_codex_text_backend_uses_codex_model_without_web_fetch_requirement(
+        self,
+    ) -> None:
+        with (
+            mock.patch.object(config, "TEXT_BACKEND", "codex"),
+            mock.patch.object(config, "CODEX_MODEL", "gpt-5.6-luna"),
+            mock.patch.object(ai_text.llm, "run_codex", return_value="{}") as run_mock,
+        ):
+            self.assertEqual(ai_text._dispatch("prompt", timeout=17), "{}")
+
+        run_mock.assert_called_once_with(
+            "prompt", "gpt-5.6-luna", timeout=17, min_web_fetches=0
+        )
+
+    def test_codex_text_backend_omits_timeout_kwarg_when_unset(self) -> None:
+        with (
+            mock.patch.object(config, "TEXT_BACKEND", "codex"),
+            mock.patch.object(config, "CODEX_MODEL", "gpt-5.6-luna"),
+            mock.patch.object(ai_text.llm, "run_codex", return_value="{}") as run_mock,
+        ):
+            self.assertEqual(ai_text._dispatch("prompt"), "{}")
+
+        run_mock.assert_called_once_with("prompt", "gpt-5.6-luna", min_web_fetches=0)
+
     def test_legacy_claude_path_does_not_receive_opencode_model_default(self) -> None:
         with (
             mock.patch.object(config, "LEGACY_CLAUDE_MODEL", "claude-opus-4-8"),

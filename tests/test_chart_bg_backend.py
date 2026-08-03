@@ -105,6 +105,24 @@ class AuxiliaryBackendDefaultTest(unittest.TestCase):
         with mock.patch.object(config, "TEXT_BACKEND", "opencode"):
             self.assertEqual(config._default_aux_backend(), "opencode")
 
+    def test_text_backend_fails_fast_on_invalid_value(self) -> None:
+        with mock.patch.object(config, "TEXT_BACKEND", "opencode-go"):
+            with self.assertRaisesRegex(ValueError, "TEXT_BACKEND"):
+                config.validate_pipeline_backends()
+
+    def test_text_backend_accepts_codex(self) -> None:
+        with mock.patch.object(config, "TEXT_BACKEND", "codex"):
+            config.validate_pipeline_backends()
+
+    def test_codex_provider_fails_fast_on_invalid_value(self) -> None:
+        with mock.patch.object(config, "CODEX_PROVIDER", "openai"):
+            with self.assertRaisesRegex(ValueError, "CODEX_PROVIDER"):
+                config.validate_pipeline_backends()
+
+    def test_codex_provider_accepts_chatgpt(self) -> None:
+        with mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"):
+            config.validate_pipeline_backends()
+
 
 class SelectOpenCodeBackendTest(unittest.TestCase):
     def setUp(self) -> None:

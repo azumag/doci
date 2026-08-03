@@ -628,6 +628,13 @@ def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
         return _run_opencode(
             prompt, opencode_model, config.OPENCODE_AGENT, timeout=timeout
         )
+    if backend == "codex":
+        # 本文生成はWeb取得を必須にしない（plan/chart_bg段と同じ扱い）。
+        if timeout is None:
+            return llm.run_codex(prompt, config.CODEX_MODEL, min_web_fetches=0)
+        return llm.run_codex(
+            prompt, config.CODEX_MODEL, timeout=timeout, min_web_fetches=0
+        )
     raise ValueError(f"unknown TEXT_BACKEND: {backend}")
 
 

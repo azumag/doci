@@ -2,8 +2,12 @@
 
 Codex exec は明示設定時の経路。`claude -p ... --output-format json` は旧設定を明示した場合だけ叩く。Web検索が要る段は
 `allowed_tools=["WebSearch","WebFetch"]` を渡す（print モードで実検索が走ることを実測確認済）。
-`run_codex` は本番バックエンド（codex exec + MiniMax-M3 等）で、隔離 CODEX_HOME 配下の
-sandbox からシェル(curl等)でWeb検索/取得させる。
+`run_codex` は config.CODEX_PROVIDER で接続先を切り替える:
+- minimax(既定): 隔離 CODEX_HOME 配下に MiniMax プロバイダの config.toml を毎回生成し、
+  ユーザーの ~/.codex には一切触れない。
+- chatgpt: CODEX_HOME を上書きせず、ユーザーの実 ~/.codex（ChatGPT認証）をそのまま使う。
+  設定ファイルは書き換えない（読むだけ）。無人実行でも承認待ちで詰まらないよう
+  approval_policy 等は毎回 `-c` で明示上書きする。
 """
 from __future__ import annotations
 
@@ -60,11 +64,15 @@ wire_api = "responses"
 _WEB_FETCH_RE = re.compile(r"curl|wget|https?://", re.IGNORECASE)
 
 
-def _ensure_codex_home(model: str) -> Path:
-    """隔離 CODEX_HOME を用意し、MiniMax 用 config.toml を毎回上書き生成する。
-    ユーザーの ~/.codex には一切触れない（ChatGPTログイン破壊事故を避けるため）。"""
+def _ensure_codex_home(model: str) -> Path | None:
+    """CODEX_PROVIDER=minimax(既定)のときだけ隔離 CODEX_HOME を用意し、MiniMax 用
+    config.toml を毎回上書き生成する。chatgpt指定時は None を返し、呼び出し側が
+    CODEX_HOME を上書きしない（ユーザーの実 ~/.codex をそのまま使う）。
+    ユーザーの ~/.codex には一切書き込まない（ChatGPTログイン破壊事故を避けるため）。"""
+    if config.CODEX_PROVIDER != "minimax":
+        return None
     if not config.MINIMAX_API_KEY:
-        raise RuntimeError("MINIMAX_API_KEY が未設定です（codex バックエンドには必須）")
+        raise RuntimeError("MINIMAX_API_KEY が未設定です（codex/minimaxバックエンドには必須）")
     home = config.CODEX_HOME
     home.mkdir(parents=True, exist_ok=True)
     cfg_path = home / "config.toml"
@@ -109,9 +117,12 @@ def _parse_codex_events(stdout: str) -> tuple[str, int]:
 
 
 def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetches: int = 1) -> str:
-    """codex exec (--json, MiniMax等) をヘッドレスで実行し、最終 agent_message の text を返す。
+    """codex exec (--json) をヘッドレスで実行し、最終 agent_message の text を返す。
 
-    隔離 CODEX_HOME(config.CODEX_HOME)を毎回用意して実行する（ユーザーの ~/.codex は不使用）。
+    config.CODEX_PROVIDER=minimax(既定)なら隔離 CODEX_HOME(config.CODEX_HOME)を毎回
+    用意して実行する（ユーザーの ~/.codex は不使用）。chatgpt指定時はユーザーの実
+    ~/.codex(ChatGPT認証)をそのまま使う。approval_policy等は無人実行が承認待ちで
+    詰まらないよう毎回 `-c` で明示上書きする（対話用 config.toml の値に依存しない）。
     web fetch(curl/wget/URL実行)が min_web_fetches 未満なら「検索したフリ」とみなし ValueError
     にする（呼び出し側の既存リトライ/劣化継続に乗せる）。
     """
@@ -125,18 +136,19 @@ def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetche
         "--skip-git-repo-check",
         "--json",
         "-c",
+        "approval_policy=never",
+        "-c",
         "sandbox_mode=workspace-write",
         "-c",
         "sandbox_workspace_write.network_access=true",
-        "-m",
-        model,
-        "-",
     ]
-    env = {
-        **os.environ,
-        "CODEX_HOME": str(home),
-        "DOCI_MINIMAX_AUTHORIZATION": f"Bearer {config.MINIMAX_API_KEY}",
-    }
+    if config.CODEX_REASONING_EFFORT:
+        cmd += ["-c", f"model_reasoning_effort={config.CODEX_REASONING_EFFORT}"]
+    cmd += ["-m", model, "-"]
+    env = dict(os.environ)
+    if home is not None:
+        env["CODEX_HOME"] = str(home)
+        env["DOCI_MINIMAX_AUTHORIZATION"] = f"Bearer {config.MINIMAX_API_KEY}"
     proc = subprocess.run(
         cmd,
         input=prompt,
