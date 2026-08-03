@@ -218,22 +218,39 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             )
 
 
+def _auth_json(*, account_id: str, access_token: str, refresh_token: str = "rt") -> str:
+    return json.dumps(
+        {
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "it",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "account_id": account_id,
+            },
+            "last_refresh": "2026-08-04T00:00:00Z",
+        }
+    )
+
+
 class SyncRefreshedChatgptAuthTest(unittest.TestCase):
-    def test_writes_back_when_isolated_auth_changed(self) -> None:
+    def test_writes_back_a_same_account_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
-            (real_home / "auth.json").write_text('{"token": "old"}', encoding="utf-8")
+            (real_home / "auth.json").write_text(
+                _auth_json(account_id="acct-1", access_token="old"), encoding="utf-8"
+            )
             chatgpt_home = Path(tmp) / "chatgpt-codex-home"
             chatgpt_home.mkdir()
-            (chatgpt_home / "auth.json").write_text('{"token": "refreshed"}', encoding="utf-8")
+            refreshed = _auth_json(account_id="acct-1", access_token="new")
+            (chatgpt_home / "auth.json").write_text(refreshed, encoding="utf-8")
 
             with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
                 llm._sync_refreshed_chatgpt_auth(chatgpt_home)
 
             self.assertEqual(
-                (real_home / "auth.json").read_text(encoding="utf-8"),
-                '{"token": "refreshed"}',
+                (real_home / "auth.json").read_text(encoding="utf-8"), refreshed
             )
             self.assertFalse((real_home / "auth.json.doci-tmp").exists())
 
@@ -241,10 +258,11 @@ class SyncRefreshedChatgptAuthTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
-            (real_home / "auth.json").write_text('{"token": "same"}', encoding="utf-8")
+            same = _auth_json(account_id="acct-1", access_token="same")
+            (real_home / "auth.json").write_text(same, encoding="utf-8")
             chatgpt_home = Path(tmp) / "chatgpt-codex-home"
             chatgpt_home.mkdir()
-            (chatgpt_home / "auth.json").write_text('{"token": "same"}', encoding="utf-8")
+            (chatgpt_home / "auth.json").write_text(same, encoding="utf-8")
             before = (real_home / "auth.json").stat().st_mtime_ns
 
             with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
@@ -257,7 +275,8 @@ class SyncRefreshedChatgptAuthTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
-            (real_home / "auth.json").write_text('{"token": "good"}', encoding="utf-8")
+            good = _auth_json(account_id="acct-1", access_token="good")
+            (real_home / "auth.json").write_text(good, encoding="utf-8")
             chatgpt_home = Path(tmp) / "chatgpt-codex-home"
             chatgpt_home.mkdir()
             (chatgpt_home / "auth.json").write_text("not json at all", encoding="utf-8")
@@ -265,26 +284,72 @@ class SyncRefreshedChatgptAuthTest(unittest.TestCase):
             with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
                 llm._sync_refreshed_chatgpt_auth(chatgpt_home)
 
-            self.assertEqual(
-                (real_home / "auth.json").read_text(encoding="utf-8"),
-                '{"token": "good"}',
-            )
+            self.assertEqual((real_home / "auth.json").read_text(encoding="utf-8"), good)
 
     def test_missing_isolated_auth_is_a_noop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
-            (real_home / "auth.json").write_text('{"token": "good"}', encoding="utf-8")
+            good = _auth_json(account_id="acct-1", access_token="good")
+            (real_home / "auth.json").write_text(good, encoding="utf-8")
             chatgpt_home = Path(tmp) / "chatgpt-codex-home"
             chatgpt_home.mkdir()
 
             with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
                 llm._sync_refreshed_chatgpt_auth(chatgpt_home)
 
-            self.assertEqual(
-                (real_home / "auth.json").read_text(encoding="utf-8"),
-                '{"token": "good"}',
+            self.assertEqual((real_home / "auth.json").read_text(encoding="utf-8"), good)
+
+    def test_rejects_isolated_auth_with_missing_token_fields(self) -> None:
+        # workspace-writeサンドボックス内の任意コマンドが auth.json を
+        # トークン欠落のJSON({}等)で上書きしても、実ホームを壊さない。
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            good = _auth_json(account_id="acct-1", access_token="good")
+            (real_home / "auth.json").write_text(good, encoding="utf-8")
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            (chatgpt_home / "auth.json").write_text("{}", encoding="utf-8")
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            self.assertEqual((real_home / "auth.json").read_text(encoding="utf-8"), good)
+
+    def test_rejects_isolated_auth_for_a_different_account(self) -> None:
+        # プロンプトインジェクションで注入された「攻撃者アカウントの有効な
+        # トークン」で隔離ホームのauth.jsonが差し替えられても、account_idが
+        # 一致しないため実ホームへは伝播しない。
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            good = _auth_json(account_id="acct-1", access_token="good")
+            (real_home / "auth.json").write_text(good, encoding="utf-8")
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            attacker = _auth_json(account_id="attacker-acct", access_token="stolen")
+            (chatgpt_home / "auth.json").write_text(attacker, encoding="utf-8")
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            self.assertEqual((real_home / "auth.json").read_text(encoding="utf-8"), good)
+
+    def test_rejects_when_real_home_auth_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()  # auth.json を実ホームに置かない = 読めない状況
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            (chatgpt_home / "auth.json").write_text(
+                _auth_json(account_id="acct-1", access_token="new"), encoding="utf-8"
             )
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            self.assertFalse((real_home / "auth.json").exists())
 
 
 class CodexDualProviderTest(unittest.TestCase):
@@ -540,14 +605,15 @@ class CodexDualProviderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
-            (real_home / "auth.json").write_text('{"token": "old"}', encoding="utf-8")
+            (real_home / "auth.json").write_text(
+                _auth_json(account_id="acct-1", access_token="old"), encoding="utf-8"
+            )
             chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            refreshed = _auth_json(account_id="acct-1", access_token="refreshed")
 
             def fake_run(*_args, **_kwargs):
                 # codex execが隔離ホーム内でトークンをリフレッシュした状況を模する。
-                (chatgpt_home / "auth.json").write_text(
-                    '{"token": "refreshed"}', encoding="utf-8"
-                )
+                (chatgpt_home / "auth.json").write_text(refreshed, encoding="utf-8")
                 return self._completed("ok")
 
             with (
@@ -561,8 +627,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 llm.run_codex("prompt", "gpt-5.6-luna", min_web_fetches=0)
 
             self.assertEqual(
-                (real_home / "auth.json").read_text(encoding="utf-8"),
-                '{"token": "refreshed"}',
+                (real_home / "auth.json").read_text(encoding="utf-8"), refreshed
             )
 
     def test_run_codex_syncs_refreshed_auth_even_when_subprocess_times_out(
@@ -571,13 +636,16 @@ class CodexDualProviderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
-            (real_home / "auth.json").write_text('{"token": "old"}', encoding="utf-8")
+            (real_home / "auth.json").write_text(
+                _auth_json(account_id="acct-1", access_token="old"), encoding="utf-8"
+            )
             chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            refreshed = _auth_json(
+                account_id="acct-1", access_token="refreshed-before-timeout"
+            )
 
             def fake_run(*_args, **_kwargs):
-                (chatgpt_home / "auth.json").write_text(
-                    '{"token": "refreshed-before-timeout"}', encoding="utf-8"
-                )
+                (chatgpt_home / "auth.json").write_text(refreshed, encoding="utf-8")
                 raise subprocess.TimeoutExpired(cmd="codex", timeout=1)
 
             with (
@@ -592,8 +660,7 @@ class CodexDualProviderTest(unittest.TestCase):
                     llm.run_codex("prompt", "gpt-5.6-luna", min_web_fetches=0)
 
             self.assertEqual(
-                (real_home / "auth.json").read_text(encoding="utf-8"),
-                '{"token": "refreshed-before-timeout"}',
+                (real_home / "auth.json").read_text(encoding="utf-8"), refreshed
             )
 
 

@@ -120,29 +120,61 @@ def _ensure_chatgpt_codex_home() -> Path:
     return home
 
 
+# codex CLI の auth.json 形式（実 ~/.codex/auth.json で確認済み）。
+# {"auth_mode": ..., "tokens": {"id_token", "access_token", "refresh_token",
+#  "account_id"}, "last_refresh": ...}
+_AUTH_TOKEN_KEYS = ("access_token", "refresh_token", "account_id")
+
+
+def _auth_tokens(data: bytes) -> dict | None:
+    """auth.json をパースし tokens 辞書を返す。必須フィールドが全て非空文字列で
+    揃っていなければ None（構文的に有効なJSONというだけでは信用しない）。"""
+    try:
+        parsed = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    tokens = parsed.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    if not all(isinstance(tokens.get(k), str) and tokens.get(k) for k in _AUTH_TOKEN_KEYS):
+        return None
+    return tokens
+
+
 def _sync_refreshed_chatgpt_auth(home: Path) -> None:
     """codex exec 実行後、隔離ホーム側でトークンリフレッシュが起きていたら実
     ~/.codex/auth.json へ書き戻す。ChatGPTのリフレッシュトークンはローテーション式
     になり得るため、書き戻さないと次回実行時に実ホーム側の（既に無効化された）
     古いauth.jsonで隔離ホームを上書きしてしまい、実ログイン自体が壊れうる
     （元のコードが避けようとしていた「ChatGPTログイン破壊事故」と同種の経路）。
-    auth.json以外のファイルは実ホームへ一切書き込まない。壊れた/空の内容では
-    書き戻さない（不完全な同期で実ホームの認証を壊さないため）。"""
+
+    codex execのworkspace-writeサンドボックスはCODEX_HOME配下への書き込みを制限
+    しないため、プロンプトインジェクションで実行されたコマンドが隔離ホームの
+    auth.jsonを構文的に有効な別内容（トークン欠落・別アカウントのトークン等）に
+    書き換えている可能性がある。「JSONとして読めるか」だけでは不十分なので、
+    (1) tokens.access_token/refresh_token/account_id が全て揃っていること、
+    (2) account_id が書き換え前の実auth.jsonと完全一致すること、の両方を
+    確認してから書き戻す。auth.json以外のファイルは実ホームへ一切書き込まない。"""
     copied = home / "auth.json"
     try:
         new_bytes = copied.read_bytes()
     except OSError:
         return
-    try:
-        json.loads(new_bytes)
-    except json.JSONDecodeError:
+    new_tokens = _auth_tokens(new_bytes)
+    if new_tokens is None:
         return
     real_auth = config.CODEX_REAL_HOME / "auth.json"
     try:
-        if real_auth.exists() and real_auth.read_bytes() == new_bytes:
-            return
+        real_bytes = real_auth.read_bytes()
     except OSError:
-        pass
+        return
+    if real_bytes == new_bytes:
+        return
+    real_tokens = _auth_tokens(real_bytes)
+    if real_tokens is None or new_tokens["account_id"] != real_tokens["account_id"]:
+        return
     tmp = real_auth.with_name(real_auth.name + ".doci-tmp")
     tmp.write_bytes(new_bytes)
     os.chmod(tmp, 0o600)
