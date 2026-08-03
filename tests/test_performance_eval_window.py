@@ -195,5 +195,115 @@ class PerformanceEvalWindowTest(unittest.TestCase):
         self.assertIsNone(history.experiment_elapsed_hours({}, now=self.now))
 
 
+class PerformanceApplicationRecoveryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.spec = SimpleNamespace(
+            id="youtube-growth",
+            history_file=self.root / "history.jsonl",
+        )
+
+    def _queue(self, application_id: str = "app-1", corner: str = "video") -> None:
+        self.spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": "2026-08-01T00:00:00+00:00",
+            "channel": self.spec.id,
+            "corner": corner,
+            "video_id": None,
+            "status": "performance_queued",
+            "performance_decision_id": "dec-1",
+            "performance_application_id": application_id,
+        }
+        with self.spec.history_file.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def _rows(self) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in self.spec.history_file.read_text(encoding="utf-8").splitlines()
+        ]
+
+    def test_cancelled_recovery_frees_the_corner(self) -> None:
+        self._queue()
+
+        result = history.recover_performance_application(
+            self.spec,
+            "app-1",
+            status="cancelled",
+            reason="タイムアウト後にYouTube Studioで未投稿を確認",
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertFalse(result["idempotent"])
+        self.assertIsNone(history.active_performance_experiment(self.spec, "video"))
+        self.assertEqual(self._rows()[-1]["status"], "performance_cancelled")
+
+    def test_published_recovery_records_confirmed_video(self) -> None:
+        self._queue()
+
+        result = history.recover_performance_application(
+            self.spec,
+            "app-1",
+            status="published",
+            video_id="confirmed-video",
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["video_id"], "confirmed-video")
+        rows = self._rows()
+        self.assertEqual(rows[-1]["status"], "performance_applied")
+        self.assertEqual(rows[-1]["video_id"], "confirmed-video")
+
+    def test_recovery_is_idempotent_and_rejects_conflicting_video_id(self) -> None:
+        self._queue()
+
+        first = history.recover_performance_application(
+            self.spec, "app-1", status="published", video_id="confirmed-video"
+        )
+        rows_after_first = self._rows()
+        second = history.recover_performance_application(
+            self.spec, "app-1", status="published", video_id="confirmed-video"
+        )
+
+        self.assertFalse(first["idempotent"])
+        self.assertTrue(second["idempotent"])
+        self.assertEqual(len(self._rows()), len(rows_after_first))
+        with self.assertRaisesRegex(ValueError, "video_idが異なります"):
+            history.recover_performance_application(
+                self.spec, "app-1", status="published", video_id="different-video"
+            )
+
+    def test_recovery_rejects_already_cancelled_as_published(self) -> None:
+        self._queue()
+        history.recover_performance_application(self.spec, "app-1", status="cancelled")
+
+        with self.assertRaises(ValueError):
+            history.recover_performance_application(
+                self.spec, "app-1", status="published", video_id="late-video"
+            )
+
+    def test_recovery_raises_for_unknown_application_id(self) -> None:
+        with self.assertRaisesRegex(ValueError, "見つかりません"):
+            history.recover_performance_application(
+                self.spec, "does-not-exist", status="cancelled"
+            )
+
+    def test_published_recovery_requires_video_id(self) -> None:
+        self._queue()
+        with self.assertRaisesRegex(ValueError, "video_idが必要"):
+            history.recover_performance_application(
+                self.spec, "app-1", status="published"
+            )
+
+    def test_cancelled_recovery_rejects_video_id(self) -> None:
+        self._queue()
+        with self.assertRaisesRegex(ValueError, "video_idは指定できません"):
+            history.recover_performance_application(
+                self.spec, "app-1", status="cancelled", video_id="unexpected"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

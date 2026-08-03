@@ -408,6 +408,61 @@ class RunDailyCliTest(unittest.TestCase):
         log_mock.assert_called_once()
         self.assertIn("video_idが必要", log_mock.call_args.args[0])
 
+    def test_main_recovers_performance_application_as_cancelled(self) -> None:
+        spec = SimpleNamespace(id="alpha")
+        recovery = {
+            "channel": "alpha",
+            "application_id": "app-1",
+            "status": "cancelled",
+            "idempotent": False,
+        }
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "doci.run_daily",
+                    "--channel",
+                    "alpha",
+                    "--recover-performance-application",
+                    "app-1",
+                    "--recovery-reason",
+                    "タイムアウト後に未投稿を確認",
+                ],
+            ),
+            patch.object(run_daily.channel, "load", return_value=spec),
+            patch.object(
+                run_daily.history,
+                "recover_performance_application",
+                return_value=recovery,
+            ) as recover_mock,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            exit_code = run_daily.main()
+
+        self.assertEqual(exit_code, 0)
+        recover_mock.assert_called_once_with(
+            spec,
+            "app-1",
+            status="cancelled",
+            video_id=None,
+            reason="タイムアウト後に未投稿を確認",
+        )
+        self.assertEqual(json.loads(stdout.getvalue()), recovery)
+
+    def test_main_requires_channel_for_performance_application_recovery(self) -> None:
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "doci.run_daily",
+                    "--recover-performance-application",
+                    "app-1",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            run_daily.main()
+
     def test_main_list_channels_does_not_require_default_channel(self) -> None:
         with (
             patch("sys.argv", ["doci.run_daily", "--list-channels"]),

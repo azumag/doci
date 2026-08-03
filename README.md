@@ -267,6 +267,26 @@ YouTube投稿成功1本へ適用する。その動画が評価閾値に届くま
 `PerformanceEvalWindowSkip`として通常スキップする（初動データが育つ前に次の実験が
 投稿されるのを防ぐ、issue #38）。`youtube-growth`は72時間を設定している。
 
+YouTube投稿結果が`unknown`（タイムアウト等でAPI受理の可否が不明）の場合、実際には
+公開済みの可能性があるため実績適用（`performance_application_id`）は自動で取り消さず、
+`topic_ledger`の`publishing`予約と同様に運用者確認まで保留する。保留したままだと
+`active_performance_experiment`がこのapplicationを返し続け、そのcornerの次実験が
+永久に適用されなくなる（`performance_gated_publish`のチャンネルは新規動画が
+永久にunlistedのままになる）ため、外部状態を確認したら明示的に終端化する。
+
+```bash
+# 外部投稿が発生していないことを確認した後
+python -m doci.run_daily --channel <id> \
+  --recover-performance-application <application-id> \
+  --recovery-status cancelled --recovery-reason "YouTube Studioで投稿なしを確認"
+
+# 投稿済み動画を確認した場合
+python -m doci.run_daily --channel <id> \
+  --recover-performance-application <application-id> \
+  --recovery-status published --recovery-video-id <video-id> \
+  --recovery-reason "YouTube Studioで投稿済みを確認"
+```
+
 ### YouTube攻略Ch の公開判定
 
 `youtube-growth` は `max_uploads_per_day = 1` とし、JSTで1日1本だけ実投稿する。

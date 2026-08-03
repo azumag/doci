@@ -83,6 +83,15 @@ def _finalize_performance_application(
     if reservation_state.get("external_unknown"):
         # 投稿結果不明（タイムアウト等）は実際には公開済みの可能性があるため、
         # topic_ledgerのpublishing状態と同様に取り消さず手動確認まで保留する。
+        # 解消するまでcornerの次実験は適用されない
+        # （performance_gated_publishのチャンネルは新規動画が公開されなくなる）。
+        _log(
+            "実績適用の結果が不明のため保留（要手動復旧）: "
+            f"application_id={application_id} corner={corner_key} "
+            "`python -m doci.run_daily --channel <id> "
+            f"--recover-performance-application {application_id} "
+            "--recovery-status <cancelled|published> [--recovery-video-id <id>]`"
+        )
         return application_id
     history.cancel_performance_decision(
         spec,
@@ -1110,10 +1119,18 @@ def main() -> int:
     ap.add_argument("--no-upload", action="store_true", help="生成のみ（アップロードしない）")
     ap.add_argument("--video-scenes", type=int, default=config.MINIMAX_VIDEO_SCENES)
     ap.add_argument(
+        "--recover-performance-application",
+        metavar="APPLICATION_ID",
+        help=(
+            "外部結果を運用者が確認済みの実績適用（--channel必須）を終端化。"
+            "投稿結果不明のまま残った予約を解消し、cornerの次実験を再度許可する"
+        ),
+    )
+    ap.add_argument(
         "--recovery-status",
         choices=("cancelled", "published"),
         default="cancelled",
-        help="publishing復旧の終端状態（--recover-publishing専用）",
+        help="publishing/実績適用復旧の終端状態（--recover-publishing/--recover-performance-application専用）",
     )
     ap.add_argument(
         "--recovery-video-id",
@@ -1122,7 +1139,7 @@ def main() -> int:
     ap.add_argument(
         "--recovery-reason",
         default="運用者が外部投稿の結果を確認し、未完了予約を復旧",
-        help="publishing復旧の監査理由",
+        help="publishing/実績適用復旧の監査理由",
     )
     args = ap.parse_args()
     if args.list_channels:
@@ -1138,6 +1155,23 @@ def main() -> int:
             )
         except Exception as exc:
             _log(f"publishing復旧失敗: {exc}")
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.recover_performance_application:
+        if not args.channel:
+            ap.error("--recover-performance-application には --channel が必要です")
+        try:
+            spec = channel.load(args.channel)
+            result = history.recover_performance_application(
+                spec,
+                args.recover_performance_application,
+                status=args.recovery_status,
+                video_id=args.recovery_video_id,
+                reason=args.recovery_reason,
+            )
+        except Exception as exc:
+            _log(f"実績適用復旧失敗: {exc}")
             return 1
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

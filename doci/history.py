@@ -1125,6 +1125,95 @@ def apply_performance_decision(
     )
 
 
+def _find_performance_application_row(
+    rows: list[dict],
+    application_id: str,
+) -> dict | None:
+    for row in reversed(rows):
+        if str(row.get("performance_application_id") or "") != application_id:
+            continue
+        if str(row.get("status") or "") in {
+            "performance_queued",
+            "performance_applied",
+            "performance_cancelled",
+            "published",
+        }:
+            return row
+    return None
+
+
+def recover_performance_application(
+    spec: ChannelSpec,
+    application_id: str,
+    *,
+    status: str,
+    video_id: str | None = None,
+    reason: str = "運用者が外部投稿の結果を確認し、未完了の実績適用を復旧",
+) -> dict[str, object]:
+    """投稿結果不明（external_unknown）等で保留された実績適用を終端化する。
+
+    通常runからは呼ばない。運用者がYouTube側の実際の公開状態を確認した後、
+    未投稿ならcancelled、投稿済みならvideo_id付きpublishedを明示して実行する。
+    これを行わない限り、そのcornerは`active_performance_experiment`が
+    このapplication_idを返し続け、次の実験が永久に適用されない
+    （`performance_gated_publish`のチャンネルでは新規動画が永久にunlistedになる）。
+    """
+    application_id = application_id.strip()
+    if not application_id:
+        raise ValueError("application_idが空です")
+    if status not in {"cancelled", "published"}:
+        raise ValueError("statusはcancelledまたはpublishedです")
+    video_id = str(video_id or "").strip() or None
+    if status == "published" and not video_id:
+        raise ValueError("published復旧にはvideo_idが必要です")
+    if status == "cancelled" and video_id:
+        raise ValueError("cancelled復旧にvideo_idは指定できません")
+
+    rows = _read_all(spec)
+    row = _find_performance_application_row(rows, application_id)
+    if row is None:
+        raise ValueError(f"実績適用が見つかりません: {application_id}")
+    corner = str(row.get("corner") or "")
+    decision_id = str(row.get("performance_decision_id") or "")
+    current_status = str(row.get("status") or "")
+    already_applied = current_status in {"performance_applied", "published"}
+    already_cancelled = current_status == "performance_cancelled"
+    if (status == "published" and already_applied) or (
+        status == "cancelled" and already_cancelled
+    ):
+        existing_video_id = str(row.get("video_id") or "").strip() or None
+        if status == "published" and existing_video_id != video_id:
+            raise ValueError(
+                "published復旧済みですが、指定されたvideo_idが異なります"
+            )
+        return {
+            "channel": spec.id,
+            "corner": corner,
+            "decision_id": decision_id,
+            "application_id": application_id,
+            "status": status,
+            "video_id": existing_video_id if status == "published" else None,
+            "idempotent": True,
+        }
+    if already_applied or already_cancelled:
+        raise ValueError(
+            f"queued以外の実績適用はこの操作で上書きできません: {current_status}"
+        )
+    if status == "published":
+        apply_performance_decision(spec, corner, decision_id, application_id, video_id)
+    else:
+        cancel_performance_decision(spec, corner, decision_id, application_id, reason)
+    return {
+        "channel": spec.id,
+        "corner": corner,
+        "decision_id": decision_id,
+        "application_id": application_id,
+        "status": status,
+        "video_id": video_id if status == "published" else None,
+        "idempotent": False,
+    }
+
+
 def complete_performance_evaluation(
     spec: ChannelSpec,
     applied: dict,
