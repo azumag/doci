@@ -108,27 +108,42 @@ def _log(msg: str) -> None:
     print(f"[doci/llm] {msg}", flush=True)
 
 
+# プロセス内で一度だけ実auth.jsonをバックアップしたかどうか。
+# .env.example が推奨する全段(TEXT/RESEARCH/FACTCHECK/PLAN/CHART_BG)codex構成では
+# run_codexが1プロセス内で連続して呼ばれる。毎回無条件でバックアップを上書きすると、
+# ある段でトークンが破壊され実ホームへ伝播した直後、後続段の呼び出しがその破壊済み
+# auth.jsonで正常なバックアップを上書きしてしまい、復旧手段として機能しなくなる。
+# プロセス起動後の最初の呼び出し時点(＝まだ何も破壊されていないはず)の状態だけを
+# 残すことで、この上書き競合を避ける。
+_chatgpt_auth_backed_up = False
+
+
 def _ensure_chatgpt_codex_home() -> Path:
     """実 ~/.codex の auth.json だけをコピーした隔離 CODEX_HOME を返す。
     コピー元(config.CODEX_REAL_HOME)には一切書き込まない。前回実行の残置ファイル
     (codex execがサンドボックス内で書き込んだ config.toml 等)を次回実行が無検査で
     信用しないよう、隔離ホームは毎回完全に作り直す。
 
-    コピー前に、実行直前の実auth.jsonをconfig.CODEX_CHATGPT_AUTH_BACKUPへ退避する。
-    _sync_refreshed_chatgpt_authの検証（account_id一致）は、サンドボックス内で
-    コマンドを実行できる攻撃者が同一account_idを保ったままトークン値だけを壊す
-    攻撃までは防げない。万一実ログインが壊れても、このバックアップから手動で
-    ~/.codex/auth.json を復元できるようにしておく。"""
+    プロセス内で最初の呼び出し時だけ、その時点の実auth.jsonを
+    config.CODEX_CHATGPT_AUTH_BACKUPへ退避する（毎回上書きしない理由は
+    _chatgpt_auth_backed_up のコメントを参照）。_sync_refreshed_chatgpt_authの
+    検証（account_id一致）は、サンドボックス内でコマンドを実行できる攻撃者が
+    同一account_idを保ったままトークン値だけを壊す攻撃までは防げない。万一実
+    ログインが壊れても、このバックアップから手動で ~/.codex/auth.json を復元
+    できるようにしておく。"""
+    global _chatgpt_auth_backed_up
     real_auth = config.CODEX_REAL_HOME / "auth.json"
     if not real_auth.exists():
         raise RuntimeError(
             f"{real_auth} が見つかりません。`codex login` でChatGPT認証を済ませてください"
             "（CODEX_PROVIDER=chatgpt には実 ~/.codex の認証が必須です）"
         )
-    backup = config.CODEX_CHATGPT_AUTH_BACKUP
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(real_auth, backup)
-    os.chmod(backup, 0o600)
+    if not _chatgpt_auth_backed_up:
+        backup = config.CODEX_CHATGPT_AUTH_BACKUP
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(real_auth, backup)
+        os.chmod(backup, 0o600)
+        _chatgpt_auth_backed_up = True
     home = config.CODEX_CHATGPT_HOME
     if home.exists():
         shutil.rmtree(home)

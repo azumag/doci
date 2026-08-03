@@ -148,6 +148,11 @@ class CodexProviderConfigTest(unittest.TestCase):
 
 
 class ChatgptCodexHomeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # プロセス内1回だけのバックアップ用フラグをテスト間で独立させる。
+        llm._chatgpt_auth_backed_up = False
+        self.addCleanup(setattr, llm, "_chatgpt_auth_backed_up", False)
+
     def test_copies_only_auth_json_not_the_rest_of_real_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
@@ -196,6 +201,31 @@ class ChatgptCodexHomeTest(unittest.TestCase):
 
             self.assertEqual(backup.read_text(encoding="utf-8"), '{"token": "pre-run"}')
             self.assertEqual(oct(backup.stat().st_mode)[-3:], "600")
+
+    def test_does_not_overwrite_backup_on_later_calls_within_the_same_process(
+        self,
+    ) -> None:
+        # 全段(TEXT/RESEARCH/FACTCHECK/PLAN/CHART_BG)codex構成ではrun_codexが1
+        # プロセス内で連続して呼ばれる。ある段でトークンが破壊され実ホームへ
+        # 伝播した直後、後続段の呼び出しが破壊済みauth.jsonで正常なバックアップ
+        # を上書きしてはならない（それが唯一の手動復旧手段のため）。
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "good"}', encoding="utf-8")
+            backup = Path(tmp) / "backup-dir" / "auth.json"
+
+            with (
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
+            ):
+                _ensure_chatgpt_codex_home()  # 1回目: 正常な状態をバックアップ
+                # 何らかの経路(想定外の書き戻し等)で実ホームが壊れた状況を模する。
+                (real_home / "auth.json").write_text('{"broken": true}', encoding="utf-8")
+                _ensure_chatgpt_codex_home()  # 2回目: 壊れた状態で呼ばれる
+
+            self.assertEqual(backup.read_text(encoding="utf-8"), '{"token": "good"}')
 
     def test_raises_clearly_when_real_auth_json_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -375,6 +405,10 @@ class SyncRefreshedChatgptAuthTest(unittest.TestCase):
 
 
 class CodexDualProviderTest(unittest.TestCase):
+    def setUp(self) -> None:
+        llm._chatgpt_auth_backed_up = False
+        self.addCleanup(setattr, llm, "_chatgpt_auth_backed_up", False)
+
     def _completed(self, text: str) -> subprocess.CompletedProcess:
         stdout = json.dumps(
             {
