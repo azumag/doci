@@ -289,6 +289,27 @@ def _apply_narration_pattern_check(
         )
 
 
+def _apply_ambiguous_date_title_check(spec: ChannelSpec, script: dict) -> None:
+    """タイトルの過去年月・「改訂」「最新」表現と日付根拠の不整合を検出し、scriptへ記録する(issue #57)。
+
+    正規表現のみで通信・LLMを伴わないため誤動作しにくく、既存2関数のような
+    try/exceptガードは不要。検出・記録のみで公開判断は変えない
+    （_apply_title_pattern_checkと同じ運用）。
+    """
+    if not spec.pipeline_get("ambiguous_date_title_check", False):
+        return
+    research = script.get("_research")
+    facts = research.get("facts") if isinstance(research, dict) else None
+    match = ai_text.check_ambiguous_date_title(str(script.get("title", "")), facts)
+    script["_ambiguous_date_title_check"] = {"checked": True, "match": match}
+    if match is not None and not match["supported"]:
+        _log(
+            "曖昧日付タイトルの疑い: "
+            f"「{script.get('title', '')}」({'/'.join(match['matched_texts'])}) "
+            f"不足根拠: {', '.join(match['missing']) or match['reason']}"
+        )
+
+
 def _run_once(
     spec: ChannelSpec,
     day: str,
@@ -494,6 +515,7 @@ def _run_once(
         spec, script, recent_titles_for_prompt, cooldown_days
     )
     _apply_narration_pattern_check(spec, script, recent_openings_for_prompt)
+    _apply_ambiguous_date_title_check(spec, script)
     from . import youtube_review
 
     youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)

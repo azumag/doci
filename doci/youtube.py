@@ -39,6 +39,17 @@ _WRITABLE_VIDEO_STATUS_KEYS = {
     "selfDeclaredMadeForKids",
     "containsSyntheticMedia",
 }
+# snippet更新はオブジェクト全体を送信する必要がある(部分送信だと省略した
+# フィールドが消え得る)ため、書込可能キーだけを残して保持する(issue #57)。
+_WRITABLE_VIDEO_SNIPPET_KEYS = {
+    "title",
+    "description",
+    "tags",
+    "categoryId",
+    "defaultLanguage",
+    "defaultAudioLanguage",
+}
+_MAX_VIDEO_TITLE_LENGTH = 100
 
 
 class UploadPreflightError(RuntimeError):
@@ -613,6 +624,107 @@ def set_privacy(
     return "updated"
 
 
+def _video_snippet(
+    video_id: str,
+    *,
+    required_scopes: list[str] | None = None,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> tuple[object, dict]:
+    """_video_status のsnippet版。part="snippet" で現在値を取得する。"""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+        raise ValueError(f"invalid YouTube video id: {video_id!r}")
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=required_scopes or ACCOUNT_SCOPES,
+    )
+    service = _build_service(creds)
+    current = service.videos().list(part="snippet", id=video_id).execute()
+    items = current.get("items") or []
+    if len(items) != 1:
+        raise RuntimeError(f"YouTube動画が見つかりません: {video_id}")
+    return service, dict(items[0].get("snippet") or {})
+
+
+def video_snippet(
+    video_id: str,
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict:
+    """現在のtitle/description等を読み取る（変更なし）。"""
+    _, snippet = _video_snippet(
+        video_id,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+    )
+    return snippet
+
+
+def update_title_description(
+    video_id: str,
+    *,
+    title: str | None = None,
+    description: str | None = None,
+    expected_title: str | None = None,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> str:
+    """期待した現在タイトルのときだけ、他の書込み可能snippetを保持してtitle/descriptionを更新する(issue #57)。
+
+    YouTube Data APIのsnippet更新はオブジェクト全体送信が必要(部分送信では
+    tags/categoryId等の省略フィールドが失われ得る)ため、現snippetを取得して
+    書込可能キーだけ保持し、title/descriptionのみ上書きして送り返す。
+    """
+    if title is None and description is None:
+        raise ValueError("title と description の少なくとも一方を指定してください")
+    if title is not None:
+        if not title.strip():
+            raise ValueError("title を空文字にはできません")
+        if len(title) > _MAX_VIDEO_TITLE_LENGTH:
+            raise ValueError(
+                f"title は{_MAX_VIDEO_TITLE_LENGTH}文字以内にしてください: {len(title)}文字"
+            )
+        if "<" in title or ">" in title:
+            raise ValueError("title に '<' '>' は使用できません")
+    service, current_snippet = _video_snippet(
+        video_id,
+        required_scopes=MANAGE_SCOPES,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+    )
+    current_title = str(current_snippet.get("title") or "")
+    if expected_title is not None and current_title != expected_title:
+        raise RuntimeError(
+            f"YouTubeタイトルが想定外です: expected={expected_title!r} "
+            f"actual={current_title!r}"
+        )
+    new_title = current_title if title is None else title
+    new_description = (
+        str(current_snippet.get("description") or "")
+        if description is None
+        else description
+    )
+    if new_title == current_title and new_description == str(
+        current_snippet.get("description") or ""
+    ):
+        return "unchanged"
+    snippet = {
+        key: value
+        for key, value in current_snippet.items()
+        if key in _WRITABLE_VIDEO_SNIPPET_KEYS
+    }
+    snippet["title"] = new_title
+    snippet["description"] = new_description
+    service.videos().update(
+        part="snippet",
+        body={"id": video_id, "snippet": snippet},
+    ).execute()
+    return "updated"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="YouTube アップロード")
     ap.add_argument("--auth", action="store_true", help="初回OAuth同意してtokenを保存")
@@ -635,6 +747,20 @@ def main() -> None:
     ap.add_argument("--video")
     ap.add_argument("--title", default="doci test")
     ap.add_argument("--description", default="")
+    ap.add_argument(
+        "--update-video",
+        metavar="VIDEO_ID",
+        help="公開済み動画のタイトル・説明欄を更新（新値未指定なら現状表示のみ）",
+    )
+    ap.add_argument("--new-title", help="--update-video で設定する新タイトル")
+    ap.add_argument(
+        "--new-description-file",
+        help="--update-video で設定する新説明欄全文のファイルパス",
+    )
+    ap.add_argument(
+        "--expected-title",
+        help="現在のタイトルがこれと一致するときだけ更新する（競合検出）",
+    )
     args = ap.parse_args()
     privacy = config.YOUTUBE_PRIVACY
     token_file = Path(config.YOUTUBE_TOKEN_FILE)
@@ -669,6 +795,31 @@ def main() -> None:
             raise RuntimeError("tokenに紐づくYouTubeチャンネルが見つかりません")
         for account in accounts:
             print(f"channel_id={account['id']} title={account['title']}")
+        return
+    if args.update_video:
+        new_description = None
+        if args.new_description_file:
+            new_description = Path(args.new_description_file).read_text(
+                encoding="utf-8"
+            )
+        if args.new_title is None and new_description is None:
+            snippet = video_snippet(
+                args.update_video,
+                token_file=token_file,
+                client_secret_file=client_secret_file,
+            )
+            print(f"title: {snippet.get('title', '')}")
+            print(f"description: {snippet.get('description', '')}")
+            return
+        result = update_title_description(
+            args.update_video,
+            title=args.new_title,
+            description=new_description,
+            expected_title=args.expected_title,
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+        )
+        print(f"{args.update_video}: {result}")
         return
     if args.video:
         upload(

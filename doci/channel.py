@@ -178,6 +178,7 @@ _PIPELINE_KEYS = {
     "title_pattern_check",
     "narration_opening_guard",
     "narration_pattern_check",
+    "ambiguous_date_title_check",
     "plan_topic_retries",
     "max_uploads_per_day",
 }
@@ -674,6 +675,11 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         narration_pattern_check, bool
     ):
         raise ChannelConfigError("pipeline.narration_pattern_check must be a boolean")
+    ambiguous_date_title_check = pipeline.get("ambiguous_date_title_check")
+    if ambiguous_date_title_check is not None and not isinstance(
+        ambiguous_date_title_check, bool
+    ):
+        raise ChannelConfigError("pipeline.ambiguous_date_title_check must be a boolean")
     plan_topic_retries = pipeline.get("plan_topic_retries")
     if plan_topic_retries is not None and (
         isinstance(plan_topic_retries, bool)

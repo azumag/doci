@@ -863,6 +863,91 @@ def check_narration_opening_pattern_duplicate(
     }
 
 
+_AMBIGUOUS_DATE_TITLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("year", re.compile(r"20\d{2}年(?:\s*\d{1,2}月)?")),
+    ("month_revision", re.compile(r"\d{1,2}月\s*改[訂定]")),
+    ("revision", re.compile(r"改[訂定]版?")),
+    ("latest", re.compile(r"最新版?")),
+)
+_DATE_ROLE_CURRENT_AS_OF = "current_as_of"
+_DATE_ROLES = {"historical_event", _DATE_ROLE_CURRENT_AS_OF, "deadline"}
+
+
+def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | None:
+    """タイトル内の過去年月・「改訂」「最新」表現を、企画データの日付根拠と突き合わせる(issue #57)。
+
+    LLMを使わない正規表現ベースの判定（対象が機械的に検出できるパターンのため）。
+    生成をブロックせず検出・記録のみに使う（check_title_pattern_duplicateと同じ運用）。
+
+    戻り値: 該当表現が無ければ None。あれば {"matched_patterns", "matched_texts",
+    "supported", "missing", "reason"} を持つ dict。supported=False は公開前の
+    確認対象（日付の役割・確認日・出典のいずれかが企画データに揃っていない、
+    またはタイトルの年が変更日ではなく確認日にしか対応しない=取り違えの疑い）。
+    """
+    matched: list[tuple[str, str]] = []
+    for name, pattern in _AMBIGUOUS_DATE_TITLE_PATTERNS:
+        m = pattern.search(title)
+        if m:
+            matched.append((name, m.group(0)))
+    if not matched:
+        return None
+
+    dated_facts = [
+        f
+        for f in (facts or [])
+        if isinstance(f, dict)
+        and str(f.get("effective_date") or "").strip()
+        and str(f.get("date_role") or "").strip() in _DATE_ROLES
+        and str(f.get("verified_at") or "").strip()
+        and str(f.get("source_url") or "").strip()
+    ]
+
+    missing: list[str] = []
+    if not dated_facts:
+        missing = ["effective_date", "date_role", "verified_at", "source_url"]
+        supported = False
+        reason = "企画データに日付根拠(effective_date/date_role/verified_at/source_url)がありません"
+    else:
+        title_years = set(re.findall(r"20\d{2}", title))
+        if title_years:
+            effective_years = {
+                str(f["effective_date"])[:4] for f in dated_facts
+            }
+            verified_years = {str(f["verified_at"])[:4] for f in dated_facts}
+            if title_years & effective_years:
+                supported, reason = True, ""
+            elif title_years & verified_years:
+                supported = False
+                reason = (
+                    "タイトルの年が変更日(effective_date)ではなく"
+                    "確認日(verified_at)にしか対応していません"
+                )
+                missing = ["effective_date"]
+            else:
+                supported = False
+                reason = "タイトルの年と一致するeffective_dateがありません"
+                missing = ["effective_date"]
+        else:
+            supported = any(
+                f["date_role"] == _DATE_ROLE_CURRENT_AS_OF for f in dated_facts
+            )
+            reason = (
+                ""
+                if supported
+                else "「現在も有効」を裏付けるcurrent_as_ofの日付根拠がありません"
+            )
+            if not supported:
+                missing = ["date_role"]
+
+    return {
+        "matched_patterns": [name for name, _ in matched],
+        "matched_texts": [text for _, text in matched],
+        "supported": supported,
+        "missing": missing,
+        "reason": reason,
+    }
+
+
 def _validate(script: dict) -> dict:
     for k in REQUIRED_KEYS:
         if k not in script:
