@@ -1002,8 +1002,11 @@ def ensure_corner_eval_capacity(
 ) -> dict:
     """cornerの実験が評価期間内なら送出し、そうでなければ状態を返す。
 
-    tsが壊れている/欠落している実験行はスキップせず通す
-    （評価完了を判定する術が無いままcornerを恒久停止させないため）。
+    tsが壊れている/欠落している実験行、およびvideo_id未確定（video不在で
+    投稿結果unknown等により手動復旧待ちのまま保留中の performance_queued 行）
+    はスキップせず通す。評価期間は公開済み動画の初動データ育成が目的であり、
+    動画が存在しない予約行には保護対象が無いうえ、通せなければ
+    recover_performance_applicationでの復旧まで生成自体が恒久停止し得るため。
     """
     row = active_performance_experiment(spec, corner)
     if row is None:
@@ -1026,7 +1029,11 @@ def ensure_corner_eval_capacity(
         "applied_ts": row.get("ts"),
         "elapsed_hours": elapsed_hours,
     }
-    if elapsed_hours is not None and elapsed_hours < window_hours:
+    if (
+        row.get("video_id")
+        and elapsed_hours is not None
+        and elapsed_hours < window_hours
+    ):
         raise PerformanceEvalWindowSkip(
             spec.id,
             corner,

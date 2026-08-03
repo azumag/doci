@@ -56,6 +56,27 @@ class PerformanceEvalWindowTest(unittest.TestCase):
         self.assertAlmostEqual(exc.elapsed_hours, 10.0, places=3)
         self.assertIn("評価期間72時間内", exc.reason)
 
+    def test_queued_experiment_without_video_id_never_raises(self) -> None:
+        """投稿結果unknownで保留されたqueued行（video未確定）には、動画が
+        存在せず保護対象が無いため評価期間ゲートを適用しない
+        （復旧まで生成自体が恒久停止するのを防ぐ）。"""
+        self._append(
+            {
+                "ts": (self.now - timedelta(hours=1)).isoformat(),
+                "channel": "youtube-growth",
+                "corner": "video",
+                "video_id": None,
+                "status": "performance_queued",
+                "performance_decision_id": "dec-1",
+                "performance_application_id": "app-1",
+            }
+        )
+        info = history.ensure_corner_eval_capacity(
+            self.spec, "video", 72, now=self.now
+        )
+        self.assertTrue(info["active"])
+        self.assertIsNone(info["video_id"])
+
     def test_active_experiment_outside_window_does_not_raise(self) -> None:
         self._append(
             {

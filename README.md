@@ -266,6 +266,10 @@ YouTube投稿成功1本へ適用する。その動画が評価閾値に届くま
 到達だけで評価完了とせず、適用時刻からこの時間が経過するまで同じcornerの次実験生成を
 `PerformanceEvalWindowSkip`として通常スキップする（初動データが育つ前に次の実験が
 投稿されるのを防ぐ、issue #38）。`youtube-growth`は72時間を設定している。
+このゲートは動画IDが確定した実験（`performance_applied`/`published`）だけに適用され、
+video_id未確定のまま保留された`performance_queued`行（下記の投稿結果`unknown`保留分）
+には適用しない。保護すべき公開済み動画が存在しないうえ、適用してしまうと復旧まで
+生成自体が最長window_hours分だけ止まってしまうため。
 
 YouTube投稿結果が`unknown`（タイムアウト等でAPI受理の可否が不明）の場合、実際には
 公開済みの可能性があるため実績適用（`performance_application_id`）は自動で取り消さず、

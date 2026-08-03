@@ -991,6 +991,46 @@ max_uploads_per_day = {max_uploads_per_day}
 
         generate_mock.assert_not_called()
 
+    def test_run_daily_queued_experiment_without_video_does_not_block_generation(
+        self,
+    ) -> None:
+        """review指摘: 投稿結果unknownで保留された performance_queued 行
+        （video_id未確定）には評価期間ゲートを適用しないため、生成
+        (ai_text.generate) は正常に進む（動画が無く保護対象が無いため）。"""
+        spec = self._review_spec(
+            "eval-window-queued", performance_eval_window_hours=72
+        )
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with patch.object(config, "OUTPUT", self.output_dir):
+            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+            spec.history_file.write_text(
+                json.dumps(
+                    {
+                        "ts": recent_ts,
+                        "channel": spec.id,
+                        "corner": "a",
+                        "video_id": None,
+                        "status": "performance_queued",
+                        "performance_decision_id": "dec-1",
+                        "performance_application_id": "app-1",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "queued-no-video1",
+        )
+
+        self.assertEqual(result["video_id"], "queued-no-video1")
+        publish_mock.assert_called_once()
+
     def test_run_daily_choose_privacy_unlisted_when_theme_incomplete(self) -> None:
         spec = self._review_spec("review-unlisted")
         script = self._review_script(viewer_action="")
