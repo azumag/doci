@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +16,7 @@ class PerformanceFeedbackTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        pipeline: dict = {}
         self.spec = SimpleNamespace(
             id="youtube-growth",
             output_dir=self.root,
@@ -26,6 +27,8 @@ class PerformanceFeedbackTest(unittest.TestCase):
                     client_secret=self.root / "client.json",
                 )
             ),
+            pipeline=pipeline,
+            pipeline_get=pipeline.get,
         )
 
     def _history(self, count: int = 2) -> None:
@@ -333,6 +336,100 @@ class PerformanceFeedbackTest(unittest.TestCase):
                 "video",
                 ready["decision_id"],
             )
+        )
+
+    def test_eval_window_defers_completion_until_time_elapses(self) -> None:
+        self.spec.pipeline["performance_eval_window_hours"] = 72
+        self._history(count=8)
+        videos = []
+        for index in range(8):
+            upper = index >= 6
+            videos.append(
+                {
+                    "video_id": f"id-{index}",
+                    "corner": "video",
+                    "title": f"NEVER INCLUDE TITLE {index}",
+                    "topic": f"NEVER INCLUDE TOPIC {index}",
+                    "format_traits": (
+                        [
+                            "tier:long_short",
+                            "duration:60_to_179s",
+                            "chart:present",
+                        ]
+                        if upper
+                        else [
+                            "tier:long_short",
+                            "duration:60_to_179s",
+                            "chart:absent",
+                        ]
+                    ),
+                    "privacy_status": "unlisted",
+                    "data_api": {"views": 100},
+                    "analytics": {
+                        "views": 100,
+                        "average_view_percentage": 40 + index * 5,
+                    },
+                }
+            )
+        snapshot = {
+            "collected_at": "2026-07-26T00:00:00+00:00",
+            "videos": videos,
+        }
+        decision = performance.build_decision(
+            self.spec,
+            snapshot,
+            corner_key="video",
+        )
+        self.assertEqual(decision["status"], "active")
+        application_id = history.reserve_performance_decision(
+            self.spec,
+            "video",
+            decision["decision_id"],
+        )
+        history.apply_performance_decision(
+            self.spec,
+            "video",
+            decision["decision_id"],
+            str(application_id),
+            "id-7",
+        )
+
+        threshold_met_snapshot = json.loads(json.dumps(snapshot))
+        threshold_met_snapshot["collected_at"] = "2026-07-26T06:00:00+00:00"
+        threshold_met_snapshot["videos"][7]["analytics"]["views"] = 100
+
+        within_window = performance.build_decision(
+            self.spec,
+            threshold_met_snapshot,
+            corner_key="video",
+        )
+        self.assertEqual(within_window["status"], "waiting_for_result")
+        self.assertIn("評価期間72時間内", within_window["reason"])
+        self.assertEqual(within_window["eval_window_hours"], 72)
+        self.assertIsNotNone(within_window["eval_elapsed_hours"])
+        self.assertIsNotNone(
+            history.active_performance_experiment(self.spec, "video")
+        )
+
+        lines = self.spec.history_file.read_text(encoding="utf-8").splitlines()
+        rows = [json.loads(line) for line in lines]
+        backdated = (datetime.now(timezone.utc) - timedelta(hours=100)).isoformat()
+        for row in rows:
+            if row.get("status") == "performance_applied":
+                row["ts"] = backdated
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+        outside_window = performance.build_decision(
+            self.spec,
+            threshold_met_snapshot,
+            corner_key="video",
+        )
+        self.assertEqual(outside_window["status"], "active")
+        self.assertIsNone(
+            history.active_performance_experiment(self.spec, "video")
         )
 
 

@@ -28,18 +28,7 @@ mkdir -p "$PROJ/output"
 ts() { date "+%Y-%m-%d %H:%M:%S"; }
 echo "[$(ts)] ===== cron run start =====" >> "$LOG"
 
-# 確認Issueは生成・VOICEVOXの成否と切り離し、既存3時間ジョブのたびに先に取得する。
-# 前回の長時間生成が継続中でも実行する。短いoperation lockはPython側で管理する。
-export DOCI_REVIEW_CYCLE_ID="cron-$(date +%s)-$$"
-"$PY" -m doci.run_daily --reconcile-youtube-reviews >> "$LOG" 2>&1
-review_rc=$?
-if [ "$review_rc" != "0" ]; then
-  echo "[$(ts)] YouTube確認Issue処理失敗 rc=$review_rc。生成は継続。" >> "$LOG"
-else
-  export DOCI_REVIEW_RECONCILED=1
-fi
-
-# 新規生成だけ多重起動を防止する（確認Issue処理は上で完了済み）。
+# 多重起動を防止する。
 LOCK="$PROJ/output/.cron_generate_${RUN_NAME}.lock"
 if [ -e "$LOCK" ]; then
   pid=$(cat "$LOCK" 2>/dev/null)

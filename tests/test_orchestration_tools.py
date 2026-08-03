@@ -119,26 +119,5 @@ class LaunchdTemplateTest(unittest.TestCase):
         self.assertIn("<string>ideology</string>", output)
 
 
-class CronGenerateTest(unittest.TestCase):
-    def test_review_reconciliation_runs_before_voicevox_start(self) -> None:
-        script = (ROOT / "tools/cron_generate.sh").read_text(encoding="utf-8")
-
-        reconcile_at = script.index("--reconcile-youtube-reviews")
-        voicevox_at = script.index("/usr/local/bin/orb start")
-        generation_at = script.index('-m doci.run_daily "$@"')
-        long_generation_lock_at = script.index('LOCK="$PROJ/output/.cron_generate_')
-
-        self.assertLess(reconcile_at, long_generation_lock_at)
-        self.assertLess(reconcile_at, voicevox_at)
-        self.assertLess(reconcile_at, generation_at)
-        self.assertIn("DOCI_REVIEW_RECONCILED=1", script)
-        self.assertLess(
-            script.index('DOCI_REVIEW_CYCLE_ID="cron-$(date +%s)-$$"'),
-            reconcile_at,
-        )
-        self.assertIn('if [ "$review_rc" != "0" ]', script)
-        self.assertIn("else\n  export DOCI_REVIEW_RECONCILED=1", script)
-
-
 if __name__ == "__main__":
     unittest.main()

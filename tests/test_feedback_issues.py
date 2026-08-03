@@ -40,15 +40,13 @@ class FeedbackIssuesTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        pipeline = {"feedback_repository": "azumag/doci"}
         self.spec = SimpleNamespace(
             id="youtube-growth",
             output_dir=self.root,
             history_file=self.root / "history.jsonl",
-            publish=SimpleNamespace(
-                youtube=SimpleNamespace(
-                    review=SimpleNamespace(repository="azumag/doci"),
-                )
-            ),
+            pipeline=pipeline,
+            pipeline_get=pipeline.get,
         )
 
     # --- fixtures ---

@@ -27,7 +27,7 @@ from typing import Iterator
 
 from . import channel, config, performance
 from .channel import ChannelSpec
-from .youtube_review import _run_gh
+from .gh_cli import run_gh as _run_gh
 
 _FEEDBACK_MARKER_RE = re.compile(r"<!--\s*doci-feedback:([0-9a-f]{16})\s*-->")
 _HYPOTHESIS_MARKER_RE = re.compile(
@@ -465,7 +465,7 @@ def run(
             "skip_reason": "",
         }
 
-    repository = spec.publish.youtube.review.repository
+    repository = spec.pipeline_get("feedback_repository", "")
     if not repository:
         return {
             "mode": "apply",

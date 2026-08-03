@@ -105,16 +105,7 @@ voice = "narrator"
         self.assertEqual(spec.style.bgm.dir, spec.root / "bgm")
         self.assertEqual(spec.publish.platforms, ("youtube",))
         self.assertEqual(spec.publish.youtube.privacy, "unlisted")
-        self.assertTrue(spec.publish.youtube.review.enabled)
-        self.assertTrue(spec.publish.youtube.review.require_approval)
-        self.assertEqual(
-            spec.publish.youtube.review.repository,
-            "azumag/doci",
-        )
-        self.assertEqual(
-            spec.publish.youtube.review.publish_label,
-            "公開承認",
-        )
+        self.assertFalse(spec.publish.youtube.review.enabled)
         self.assertEqual(
             spec.publish.youtube.token,
             (config.ROOT / "secrets/youtube-growth/youtube_token.json").resolve(),
@@ -125,6 +116,8 @@ voice = "narrator"
         self.assertTrue(spec.pipeline_get("performance_feedback"))
         self.assertTrue(spec.pipeline_get("title_pattern_check"))
         self.assertEqual(spec.pipeline_get("max_uploads_per_day"), 1)
+        self.assertEqual(spec.pipeline_get("performance_eval_window_hours"), 72)
+        self.assertTrue(spec.pipeline_get("performance_gated_publish"))
         self.assertEqual(
             spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS),
             30,
@@ -209,6 +202,52 @@ plan_topic_retries = 0
             channel.ChannelConfigError, "plan_topic_retries"
         ):
             channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_rejects_invalid_performance_eval_window_hours(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_eval_window_hours = -1
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_eval_window_hours"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_performance_eval_window_hours_requires_performance_feedback(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_eval_window_hours = 72
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_feedback"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_performance_eval_window_hours_defaults_to_disabled(self) -> None:
+        self._write_channel()
+        with patch.object(config, "OUTPUT", self.root / "output"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertEqual(spec.pipeline_get("performance_eval_window_hours", 0), 0)
 
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\
@@ -406,50 +445,6 @@ access_token_env = "EAAB token value"
         with self.assertRaisesRegex(channel.ChannelConfigError, "environment variable name"):
             channel.load("sample", channels_dir=self.channels_dir)
 
-    def test_rejects_enabled_youtube_review_without_safe_repository(self) -> None:
-        self._write_channel(toml='''\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[publish.youtube.review]
-enabled = true
-repository = "not-an-owner-repo"
-''')
-
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError,
-            "owner/name",
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_review_requires_unlisted_staging_privacy(self) -> None:
-        self._write_channel(toml='''\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[publish.youtube]
-privacy = "private"
-[publish.youtube.review]
-enabled = true
-repository = "owner/repo"
-''')
-
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError,
-            "must be unlisted",
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
     def test_review_defaults_to_unlisted_independent_of_global_privacy(
         self,
     ) -> None:
@@ -464,13 +459,82 @@ corner = "prompts/corner.md"
 voice = "narrator"
 [publish.youtube.review]
 enabled = true
-repository = "owner/repo"
 ''')
 
         with patch.object(config, "YOUTUBE_PRIVACY", "private"):
             spec = channel.load("sample", channels_dir=self.channels_dir)
 
         self.assertEqual(spec.publish.youtube.privacy, "unlisted")
+
+    def test_rejects_invalid_performance_gated_publish(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_feedback = true
+performance_gated_publish = "yes"
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_gated_publish"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_performance_gated_publish_defaults_to_disabled(self) -> None:
+        self._write_channel()
+        with patch.object(config, "OUTPUT", self.root / "output"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertFalse(spec.pipeline_get("performance_gated_publish", False))
+
+    def test_performance_gated_publish_requires_performance_feedback(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_gated_publish = true
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_feedback"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_performance_gated_publish_rejects_enabled_review(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube.review]
+enabled = true
+[pipeline]
+performance_feedback = true
+performance_gated_publish = true
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_gated_publish"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
 
     def test_ideology_uses_legacy_youtube_files_until_migrated(self) -> None:
         self._write_channel(

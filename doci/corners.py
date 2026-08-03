@@ -15,6 +15,23 @@ def pick_corner(spec: ChannelSpec, last_corner: str | None) -> CornerSpec:
     return spec.corners[spec.rotation[0]]
 
 
+def rotation_order(spec: ChannelSpec, last_corner: str | None) -> list[CornerSpec]:
+    """`pick_corner`と同じ起点からrotationを一周ぶん返す。
+
+    先頭は`pick_corner`と同じコーナー。先頭候補が評価期間ゲート等で
+    使えない場合に、他のコーナーへ順にフォールバックする用途で使う。
+    """
+    start = (
+        (spec.rotation.index(last_corner) + 1) % len(spec.rotation)
+        if last_corner in spec.rotation
+        else 0
+    )
+    return [
+        spec.corners[spec.rotation[(start + offset) % len(spec.rotation)]]
+        for offset in range(len(spec.rotation))
+    ]
+
+
 def _output_rules_path(spec: ChannelSpec) -> Path:
     override = spec.root / "prompts" / "output_rules.md"
     return override if override.is_file() else config.PROMPTS / "output_rules.md"

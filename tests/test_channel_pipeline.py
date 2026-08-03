@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import json
-import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,11 +15,11 @@ from doci import (
     config,
     corners,
     history,
+    performance,
     publish,
     run_daily,
     topic_ledger,
     voicevox,
-    youtube_review,
 )
 
 
@@ -99,6 +100,24 @@ voice = "voice_b"
         self.assertEqual(corners.pick_corner(spec, "b").key, "a")
         self.assertEqual(spec.voice_for("a").speaker, 41)
         self.assertEqual(spec.voice_for("b").speaker, 42)
+
+    def test_rotation_order_starts_at_pick_corner_and_covers_full_rotation(
+        self,
+    ) -> None:
+        spec = self._make_spec("alpha")
+
+        self.assertEqual(
+            [c.key for c in corners.rotation_order(spec, None)], ["a", "b"]
+        )
+        self.assertEqual(
+            [c.key for c in corners.rotation_order(spec, "a")], ["b", "a"]
+        )
+        self.assertEqual(
+            [c.key for c in corners.rotation_order(spec, "b")], ["a", "b"]
+        )
+        self.assertEqual(
+            [c.key for c in corners.rotation_order(spec, "unknown")], ["a", "b"]
+        )
 
     def test_build_prompt_uses_channel_prompts_and_common_rules(self) -> None:
         spec = self._make_spec("alpha")
@@ -798,10 +817,12 @@ factcheck = false
         script: dict,
         video_id: str,
         *,
+        corner_key: str | None = "a",
         publish_dry_run: bool = False,
         publish_unknown: bool = False,
         publish_results: list[publish.PublishResult] | None = None,
         generate_side_effect=None,
+        performance_decision: dict | None = None,
     ):
         def fake_fetch_image(_prompt, out_path, **_kwargs):
             Path(out_path).write_bytes(b"image")
@@ -827,61 +848,58 @@ factcheck = false
             detail="投稿結果不明" if publish_unknown else "",
         )
         result_rows = publish_results if publish_results is not None else [uploaded]
-        with (
-            patch.dict(os.environ, {"DOCI_REVIEW_RECONCILED": ""}),
-            patch.object(config, "OUTPUT", self.output_dir),
-            patch.object(config, "PUBLISH_DRY_RUN", publish_dry_run),
-            patch.object(
-                run_daily,
-                "_reconcile_youtube_review",
-            ) as reconcile_mock,
-            patch.object(
-                ai_text,
-                "generate",
-                side_effect=generate_side_effect,
-                return_value=script,
-            ),
-            patch.object(
-                run_daily.voicevox,
-                "synthesize",
-                return_value=voicevox.TtsResult(
-                    wav_path=self.root / "fake.wav",
-                    duration=10.0,
-                    segments=[],
-                ),
-            ),
-            patch.object(run_daily.assets, "fetch_video", side_effect=fake_fetch_image),
-            patch.object(run_daily.assets, "fetch_image", side_effect=fake_fetch_image),
-            patch.object(run_daily.compose, "compose", side_effect=fake_compose),
-            patch("doci.thumbnail.render", side_effect=fake_thumbnail),
-            patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail),
-            patch("doci.publish.publish", return_value=result_rows) as publish_mock,
-            patch.object(topic_ledger, "reserve", wraps=topic_ledger.reserve) as ledger_reserve_mock,
-            patch.object(history, "reserve_topic", wraps=history.reserve_topic) as history_reserve_mock,
-            patch.object(youtube_review, "queue_pending") as queue_mock,
-            patch.object(
-                youtube_review,
-                "ensure_issue",
-                return_value=SimpleNamespace(
-                    number=42,
-                    url="https://github.com/owner/repo/issues/42",
-                ),
-            ) as ensure_mock,
-        ):
+        with contextlib.ExitStack() as stack:
+            enter = stack.enter_context
+            enter(patch.object(config, "OUTPUT", self.output_dir))
+            enter(patch.object(config, "PUBLISH_DRY_RUN", publish_dry_run))
+            enter(
+                patch.object(
+                    ai_text,
+                    "generate",
+                    side_effect=generate_side_effect,
+                    return_value=script,
+                )
+            )
+            enter(
+                patch.object(
+                    run_daily.voicevox,
+                    "synthesize",
+                    return_value=voicevox.TtsResult(
+                        wav_path=self.root / "fake.wav",
+                        duration=10.0,
+                        segments=[],
+                    ),
+                )
+            )
+            enter(patch.object(run_daily.assets, "fetch_video", side_effect=fake_fetch_image))
+            enter(patch.object(run_daily.assets, "fetch_image", side_effect=fake_fetch_image))
+            enter(patch.object(run_daily.compose, "compose", side_effect=fake_compose))
+            enter(patch("doci.thumbnail.render", side_effect=fake_thumbnail))
+            enter(patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail))
+            publish_mock = enter(patch("doci.publish.publish", return_value=result_rows))
+            ledger_reserve_mock = enter(
+                patch.object(topic_ledger, "reserve", wraps=topic_ledger.reserve)
+            )
+            history_reserve_mock = enter(
+                patch.object(history, "reserve_topic", wraps=history.reserve_topic)
+            )
+            if performance_decision is not None:
+                enter(
+                    patch.object(
+                        performance, "refresh", return_value=performance_decision
+                    )
+                )
             result = run_daily.run(
                 spec,
                 "2026-07-26",
-                "a",
+                corner_key,
                 do_upload=True,
                 video_scenes=0,
             )
 
         return (
             result,
-            reconcile_mock,
             publish_mock,
-            queue_mock,
-            ensure_mock,
             ledger_reserve_mock,
             history_reserve_mock,
         )
@@ -908,10 +926,27 @@ factcheck = false
         self,
         channel_id: str,
         *,
-        require_approval: bool = False,
         max_uploads_per_day: int = 1,
+        performance_gated_publish: bool = False,
+        performance_eval_window_hours: int = 0,
     ) -> channel.ChannelSpec:
-        approval_line = "require_approval = true\n" if require_approval else ""
+        review_section = (
+            ""
+            if performance_gated_publish
+            else "[publish.youtube.review]\nenabled = true\n"
+        )
+        needs_performance_feedback = (
+            performance_gated_publish or performance_eval_window_hours > 0
+        )
+        gated_lines = (
+            "performance_feedback = true\n" if needs_performance_feedback else ""
+        )
+        if performance_gated_publish:
+            gated_lines += "performance_gated_publish = true\n"
+        if performance_eval_window_hours > 0:
+            gated_lines += (
+                f"performance_eval_window_hours = {performance_eval_window_hours}\n"
+            )
         return self._make_spec(
             channel_id,
             pipeline=f"""\
@@ -923,102 +958,284 @@ privacy = "unlisted"
 client_secret = "client.json"
 token = "token.json"
 
-[publish.youtube.review]
-enabled = true
-{approval_line}repository = "owner/repo"
-publish_label = "公開承認"
-hold_label = "保留"
-keep_unlisted_label = "限定公開で保持"
-
+{review_section}
 [pipeline]
 research = false
 plan = false
 factcheck = false
 max_uploads_per_day = {max_uploads_per_day}
-""",
+{gated_lines}""",
         )
 
-    def test_run_daily_routes_missing_action_to_unlisted_issue_workflow(self) -> None:
+    def test_run_daily_eval_window_skip_blocks_generation_before_ai_text(self) -> None:
+        """issue #38: real_publish + performance_feedback + window>0 の配線が
+        実際にensure_corner_eval_capacityを呼び、生成(ai_text.generate)より前に
+        PerformanceEvalWindowSkipを送出することを確認する統合テスト
+        （review指摘: 単体テストのみではこの配線の退行を検知できない）。"""
+        spec = self._review_spec(
+            "eval-window-skip", performance_eval_window_hours=72
+        )
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with patch.object(config, "OUTPUT", self.output_dir):
+            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+            spec.history_file.write_text(
+                json.dumps(
+                    {
+                        "ts": recent_ts,
+                        "channel": spec.id,
+                        "corner": "a",
+                        "video_id": "prior-video",
+                        "status": "performance_applied",
+                        "performance_decision_id": "dec-1",
+                        "performance_application_id": "app-1",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        with (
+            patch.object(config, "OUTPUT", self.output_dir),
+            patch.object(config, "PUBLISH_DRY_RUN", False),
+            patch.object(ai_text, "generate") as generate_mock,
+        ):
+            with self.assertRaises(history.PerformanceEvalWindowSkip):
+                run_daily.run(
+                    spec,
+                    "2026-07-26",
+                    "a",
+                    do_upload=True,
+                    video_scenes=0,
+                )
+
+        generate_mock.assert_not_called()
+
+    def test_run_daily_falls_back_to_next_corner_when_one_is_eval_blocked(
+        self,
+    ) -> None:
+        """review指摘: 評価期間ゲートはcorner単位の実験を独立に扱うはずが、
+        1cornerの評価期間中に自動選択が他cornerの生成まで止めていた。
+        rotationの次候補（corner b）が空いていればそちらへフォールバック
+        し、rotation全体は止まらないことを確認する。"""
+        spec = self._review_spec(
+            "eval-window-fallback", performance_eval_window_hours=72
+        )
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=200)).isoformat()
+        with patch.object(config, "OUTPUT", self.output_dir):
+            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {
+                    "ts": old_ts,
+                    "channel": spec.id,
+                    "corner": "b",
+                    "video_id": "prior-b-video",
+                    "status": "published",
+                },
+                {
+                    "ts": recent_ts,
+                    "channel": spec.id,
+                    "corner": "a",
+                    "video_id": "prior-a-video",
+                    "status": "performance_applied",
+                    "performance_decision_id": "dec-1",
+                    "performance_application_id": "app-1",
+                },
+            ]
+            with spec.history_file.open("w", encoding="utf-8") as file:
+                for row in rows:
+                    file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "fallback-video1",
+            corner_key=None,
+        )
+
+        self.assertEqual(result["corner"], "b")
+        self.assertEqual(result["video_id"], "fallback-video1")
+        publish_mock.assert_called_once()
+
+    def test_run_daily_all_corners_blocked_raises_skip(self) -> None:
+        spec = self._review_spec(
+            "eval-window-all-blocked", performance_eval_window_hours=72
+        )
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with patch.object(config, "OUTPUT", self.output_dir):
+            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {
+                    "ts": recent_ts,
+                    "channel": spec.id,
+                    "corner": "a",
+                    "video_id": "prior-a-video",
+                    "status": "performance_applied",
+                    "performance_decision_id": "dec-1",
+                    "performance_application_id": "app-1",
+                },
+                {
+                    "ts": recent_ts,
+                    "channel": spec.id,
+                    "corner": "b",
+                    "video_id": "prior-b-video",
+                    "status": "performance_applied",
+                    "performance_decision_id": "dec-2",
+                    "performance_application_id": "app-2",
+                },
+            ]
+            with spec.history_file.open("w", encoding="utf-8") as file:
+                for row in rows:
+                    file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        with (
+            patch.object(config, "OUTPUT", self.output_dir),
+            patch.object(config, "PUBLISH_DRY_RUN", False),
+            patch.object(ai_text, "generate") as generate_mock,
+        ):
+            with self.assertRaises(history.PerformanceEvalWindowSkip):
+                run_daily.run(
+                    spec,
+                    "2026-07-26",
+                    None,
+                    do_upload=True,
+                    video_scenes=0,
+                )
+
+        generate_mock.assert_not_called()
+
+    def test_run_daily_queued_experiment_without_video_does_not_block_generation(
+        self,
+    ) -> None:
+        """review指摘: 投稿結果unknownで保留された performance_queued 行
+        （video_id未確定）には評価期間ゲートを適用しないため、生成
+        (ai_text.generate) は正常に進む（動画が無く保護対象が無いため）。"""
+        spec = self._review_spec(
+            "eval-window-queued", performance_eval_window_hours=72
+        )
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with patch.object(config, "OUTPUT", self.output_dir):
+            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+            spec.history_file.write_text(
+                json.dumps(
+                    {
+                        "ts": recent_ts,
+                        "channel": spec.id,
+                        "corner": "a",
+                        "video_id": None,
+                        "status": "performance_queued",
+                        "performance_decision_id": "dec-1",
+                        "performance_application_id": "app-1",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "queued-no-video1",
+        )
+
+        self.assertEqual(result["video_id"], "queued-no-video1")
+        publish_mock.assert_called_once()
+
+    def test_run_daily_choose_privacy_unlisted_when_theme_incomplete(self) -> None:
         spec = self._review_spec("review-unlisted")
         script = self._review_script(viewer_action="")
 
-        result, reconcile_mock, publish_mock, queue_mock, ensure_mock, _, _ = (
-            self._run_review_pipeline(
-                spec,
-                script,
-                "unlisted123",
-            )
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "unlisted123",
         )
 
-        reconcile_mock.assert_called_once_with(spec, True)
         self.assertEqual(
             publish_mock.call_args.kwargs["youtube_privacy"],
             "unlisted",
         )
-        queue_mock.assert_called_once()
-        self.assertEqual(queue_mock.call_args.args[:3], (spec, "unlisted123", script["title"]))
-        self.assertFalse(queue_mock.call_args.args[3].eligible_for_public)
-        ensure_mock.assert_called_once_with(spec, "unlisted123")
-        self.assertEqual(
-            result["youtube_review_issue"],
-            "https://github.com/owner/repo/issues/42",
-        )
-        workdir = Path(result["workdir"])
-        self.assertFalse((workdir / "video.mp4").exists())
-        self.assertTrue((workdir / "script.json").exists())
-        self.assertTrue((workdir / "recovery.json").exists())
-        self.assertFalse(result["video_retained"])
-        self.assertEqual(result["media_cleanup"]["status"], "cleaned")
+        self.assertEqual(result["youtube_privacy"], "unlisted")
+        theme_review = json.loads(
+            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
+        )["_youtube_theme_review"]
+        self.assertFalse(theme_review["eligible_for_public"])
 
-    def test_run_daily_routes_complete_theme_fields_directly_to_public(self) -> None:
+    def test_run_daily_choose_privacy_public_when_theme_complete(self) -> None:
         spec = self._review_spec("review-public")
         script = self._review_script(
             viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
         )
 
-        result, reconcile_mock, publish_mock, queue_mock, ensure_mock, _, _ = (
-            self._run_review_pipeline(
-                spec,
-                script,
-                "public123",
-            )
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "public123",
         )
 
-        reconcile_mock.assert_called_once_with(spec, True)
         self.assertEqual(
             publish_mock.call_args.kwargs["youtube_privacy"],
             "public",
         )
-        queue_mock.assert_not_called()
-        ensure_mock.assert_not_called()
         self.assertEqual(result["youtube_privacy"], "public")
-        self.assertIsNone(result["youtube_review_issue"])
 
-    def test_run_daily_require_approval_keeps_clear_theme_unlisted(self) -> None:
-        spec = self._review_spec("review-approval", require_approval=True)
-        script = self._review_script(
-            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+    def test_run_daily_performance_gate_publishes_when_experiment_applied(self) -> None:
+        spec = self._review_spec("gate-public", performance_gated_publish=True)
+        script = self._review_script(viewer_action="")
+
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "gate-public1",
+            performance_decision={
+                "status": "active",
+                "decision_id": "dec-1",
+                "reason": "",
+            },
         )
 
-        result, _, publish_mock, queue_mock, ensure_mock, _, _ = (
-            self._run_review_pipeline(
-                spec,
-                script,
-                "approval123",
-            )
+        self.assertEqual(
+            publish_mock.call_args.kwargs["youtube_privacy"],
+            "public",
+        )
+        self.assertEqual(result["youtube_privacy"], "public")
+        gate_record = json.loads(
+            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
+        )["_performance_gated_publish"]
+        self.assertTrue(gate_record["applied"])
+        self.assertEqual(gate_record["privacy"], "public")
+        self.assertEqual(gate_record["decision_id"], "dec-1")
+
+    def test_run_daily_performance_gate_keeps_unlisted_when_no_experiment(self) -> None:
+        spec = self._review_spec("gate-unlisted", performance_gated_publish=True)
+        script = self._review_script(viewer_action="")
+
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "gate-unlisted1",
+            performance_decision={
+                "status": "insufficient_data",
+                "decision_id": "dec-2",
+                "reason": "比較可能な動画が2本。最低8本必要",
+            },
         )
 
         self.assertEqual(
             publish_mock.call_args.kwargs["youtube_privacy"],
             "unlisted",
         )
-        queue_mock.assert_called_once()
-        self.assertTrue(queue_mock.call_args.args[3].eligible_for_public)
-        ensure_mock.assert_called_once_with(spec, "approval123")
-        self.assertEqual(
-            result["youtube_review_issue"],
-            "https://github.com/owner/repo/issues/42",
-        )
+        self.assertEqual(result["youtube_privacy"], "unlisted")
+        gate_record = json.loads(
+            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
+        )["_performance_gated_publish"]
+        self.assertFalse(gate_record["applied"])
 
     def test_global_publish_dry_run_does_not_queue_topic_reservations(self) -> None:
         spec = self._review_spec("review-dry-run")
@@ -1033,10 +1250,7 @@ max_uploads_per_day = {max_uploads_per_day}
 
         (
             result,
-            reconcile_mock,
             publish_mock,
-            queue_mock,
-            ensure_mock,
             ledger_reserve_mock,
             history_reserve_mock,
         ) = self._run_review_pipeline(
@@ -1047,10 +1261,7 @@ max_uploads_per_day = {max_uploads_per_day}
             generate_side_effect=generate_and_guard,
         )
 
-        reconcile_mock.assert_called_once_with(spec, False)
         publish_mock.assert_called_once()
-        queue_mock.assert_not_called()
-        ensure_mock.assert_not_called()
         self.assertFalse(ledger_reserve_mock.call_args.kwargs["reserve"])
         self.assertFalse(history_reserve_mock.call_args.kwargs["reserve"])
         self.assertFalse((self.output_dir / "topic_ledger.jsonl").exists())
@@ -1077,7 +1288,7 @@ max_uploads_per_day = {max_uploads_per_day}
             kwargs["topic_guard"](script["_research"]["topic"])
             return script
 
-        result, _, _, _, _, _, _ = self._run_review_pipeline(
+        result, _, _, _ = self._run_review_pipeline(
             spec,
             script,
             "unknown123",
@@ -1118,7 +1329,7 @@ max_uploads_per_day = {max_uploads_per_day}
             kwargs["topic_guard"](script["_research"]["topic"])
             return script
 
-        result, _, _, _, _, _, _ = self._run_review_pipeline(
+        result, _, _, _ = self._run_review_pipeline(
             spec,
             script,
             "mixed123",

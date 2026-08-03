@@ -54,14 +54,6 @@ privacy = "unlisted"
 client_secret = "secrets/youtube-growth/client_secret.json"
 token = "secrets/youtube-growth/youtube_token.json"
 
-[publish.youtube.review]
-enabled = true
-require_approval = true
-repository = "azumag/doci"
-publish_label = "公開承認"
-hold_label = "保留"
-keep_unlisted_label = "限定公開で保持"
-
 [pipeline]
 research = true
 factcheck = true
@@ -72,3 +64,6 @@ narration_opening_guard = true
 narration_pattern_check = true
 ambiguous_date_title_check = true
 max_uploads_per_day = 1
+performance_eval_window_hours = 72
+performance_gated_publish = true
+feedback_repository = "azumag/doci"
