@@ -4,6 +4,7 @@ import contextlib
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -908,17 +909,25 @@ factcheck = false
         *,
         max_uploads_per_day: int = 1,
         performance_gated_publish: bool = False,
+        performance_eval_window_hours: int = 0,
     ) -> channel.ChannelSpec:
         review_section = (
             ""
             if performance_gated_publish
             else "[publish.youtube.review]\nenabled = true\n"
         )
-        gated_lines = (
-            "performance_feedback = true\nperformance_gated_publish = true\n"
-            if performance_gated_publish
-            else ""
+        needs_performance_feedback = (
+            performance_gated_publish or performance_eval_window_hours > 0
         )
+        gated_lines = (
+            "performance_feedback = true\n" if needs_performance_feedback else ""
+        )
+        if performance_gated_publish:
+            gated_lines += "performance_gated_publish = true\n"
+        if performance_eval_window_hours > 0:
+            gated_lines += (
+                f"performance_eval_window_hours = {performance_eval_window_hours}\n"
+            )
         return self._make_spec(
             channel_id,
             pipeline=f"""\
@@ -938,6 +947,49 @@ factcheck = false
 max_uploads_per_day = {max_uploads_per_day}
 {gated_lines}""",
         )
+
+    def test_run_daily_eval_window_skip_blocks_generation_before_ai_text(self) -> None:
+        """issue #38: real_publish + performance_feedback + window>0 の配線が
+        実際にensure_corner_eval_capacityを呼び、生成(ai_text.generate)より前に
+        PerformanceEvalWindowSkipを送出することを確認する統合テスト
+        （review指摘: 単体テストのみではこの配線の退行を検知できない）。"""
+        spec = self._review_spec(
+            "eval-window-skip", performance_eval_window_hours=72
+        )
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with patch.object(config, "OUTPUT", self.output_dir):
+            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
+            spec.history_file.write_text(
+                json.dumps(
+                    {
+                        "ts": recent_ts,
+                        "channel": spec.id,
+                        "corner": "a",
+                        "video_id": "prior-video",
+                        "status": "performance_applied",
+                        "performance_decision_id": "dec-1",
+                        "performance_application_id": "app-1",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        with (
+            patch.object(config, "OUTPUT", self.output_dir),
+            patch.object(config, "PUBLISH_DRY_RUN", False),
+            patch.object(ai_text, "generate") as generate_mock,
+        ):
+            with self.assertRaises(history.PerformanceEvalWindowSkip):
+                run_daily.run(
+                    spec,
+                    "2026-07-26",
+                    "a",
+                    do_upload=True,
+                    video_scenes=0,
+                )
+
+        generate_mock.assert_not_called()
 
     def test_run_daily_choose_privacy_unlisted_when_theme_incomplete(self) -> None:
         spec = self._review_spec("review-unlisted")
