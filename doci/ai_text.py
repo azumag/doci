@@ -871,6 +871,16 @@ _AMBIGUOUS_DATE_TITLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 _DATE_ROLE_CURRENT_AS_OF = "current_as_of"
 _DATE_ROLES = {"historical_event", _DATE_ROLE_CURRENT_AS_OF, "deadline"}
+# 年抽出は検出パターンの"year"(20\d{2}年)と同じ厳格さで揃える。裸の4桁数値
+# ("登録者2000人"等)を年と誤認しないよう、"年"を必須にする(issue #57レビュー指摘)。
+_TITLE_YEAR_MONTH_RE = re.compile(r"(20\d{2})年(?:\s*(\d{1,2})月)?")
+
+
+def _title_year_months(title: str) -> list[tuple[str, str | None]]:
+    return [
+        (m.group(1), m.group(2).zfill(2) if m.group(2) else None)
+        for m in _TITLE_YEAR_MONTH_RE.finditer(title)
+    ]
 
 
 def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | None:
@@ -908,15 +918,32 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
         supported = False
         reason = "企画データに日付根拠(effective_date/date_role/verified_at/source_url)がありません"
     else:
-        title_years = set(re.findall(r"20\d{2}", title))
-        if title_years:
-            effective_years = {
-                str(f["effective_date"])[:4] for f in dated_facts
-            }
-            verified_years = {str(f["verified_at"])[:4] for f in dated_facts}
-            if title_years & effective_years:
+        year_months = _title_year_months(title)
+        if year_months:
+            def _fact_matches(year: str, month: str | None, fact: dict) -> bool:
+                effective = str(fact["effective_date"])
+                if effective[:4] != year:
+                    return False
+                if month is None:
+                    return True
+                fact_month = effective[5:7] if len(effective) >= 7 else None
+                # factが年粒度までしか記録していない場合、月の矛盾は確認できない
+                # ため年一致のみで根拠として認める(記録されている粒度が限界)。
+                return fact_month is None or fact_month == month
+
+            matched_ok = any(
+                _fact_matches(year, month, f)
+                for year, month in year_months
+                for f in dated_facts
+            )
+            matched_verified_only = any(
+                str(f["verified_at"])[:4] == year
+                for year, _ in year_months
+                for f in dated_facts
+            )
+            if matched_ok:
                 supported, reason = True, ""
-            elif title_years & verified_years:
+            elif matched_verified_only:
                 supported = False
                 reason = (
                     "タイトルの年が変更日(effective_date)ではなく"
@@ -925,7 +952,7 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
                 missing = ["effective_date"]
             else:
                 supported = False
-                reason = "タイトルの年と一致するeffective_dateがありません"
+                reason = "タイトルの年月と一致するeffective_dateがありません"
                 missing = ["effective_date"]
         else:
             supported = any(

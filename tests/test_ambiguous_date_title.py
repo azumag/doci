@@ -106,6 +106,67 @@ class CheckAmbiguousDateTitleTest(unittest.TestCase):
         self.assertFalse(result["supported"])
         self.assertIn("確認日(verified_at)", result["reason"])
 
+    def test_bare_four_digit_number_is_not_mistaken_for_a_year(self) -> None:
+        # レビュー指摘: 「登録者2000人」等の4桁数値は「年」を伴わないため
+        # 年として扱わず、日付なしの鮮度表現(current_as_ofの有無)で判定する。
+        facts = [
+            _fact(
+                effective_date="2020-01-01",
+                date_role="current_as_of",
+                verified_at="2026-08-03",
+            )
+        ]
+        result = ai_text.check_ambiguous_date_title(
+            "登録者2000人を超える最新戦略", facts
+        )
+        self.assertTrue(result["supported"])
+
+    def test_same_year_different_month_is_a_confusion(self) -> None:
+        # レビュー指摘: 「7月改訂」と「effective_date=2025-03-31」は同じ年(2025)
+        # だが月が異なるため取り違え。年のみの比較では見逃していた。
+        facts = [
+            _fact(
+                effective_date="2025-03-31",
+                date_role="historical_event",
+                verified_at="2026-08-03",
+            )
+        ]
+        result = ai_text.check_ambiguous_date_title(
+            "【2025年7月改訂】登録者数では見えない「真のファン」を診断する3つの指標",
+            facts,
+        )
+        self.assertFalse(result["supported"])
+
+    def test_same_year_same_month_is_supported(self) -> None:
+        facts = [
+            _fact(
+                effective_date="2025-07-01",
+                date_role="historical_event",
+                verified_at="2026-08-03",
+            )
+        ]
+        result = ai_text.check_ambiguous_date_title(
+            "【2025年7月改訂】登録者数では見えない「真のファン」を診断する3つの指標",
+            facts,
+        )
+        self.assertTrue(result["supported"])
+
+    def test_year_only_granularity_fact_cannot_contradict_month(self) -> None:
+        # factがYYYY粒度までしか記録していない場合、月の矛盾は確認できない
+        # ため年一致のみで根拠として認める(記録されている粒度が限界)。
+        facts = [
+            _fact(
+                effective_date="2025",
+                date_role="historical_event",
+                verified_at="2026-08-03",
+            )
+        ]
+        result = ai_text.check_ambiguous_date_title(
+            "【2025年7月改訂】登録者数では見えない「真のファン」を診断する3つの指標",
+            facts,
+        )
+        self.assertTrue(result["supported"])
+
     def test_dateless_freshness_wording_supported_only_with_current_as_of(self) -> None:
         unsupported = ai_text.check_ambiguous_date_title(
             "最新版アルゴリズム解説",
