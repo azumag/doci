@@ -87,10 +87,6 @@ token = "secrets/ideology/youtube_token.json"
 
 [publish.youtube.review]
 enabled = false
-repository = "owner/repository"
-publish_label = "公開承認"
-hold_label = "保留"
-keep_unlisted_label = "限定公開で保持"
 
 [publish.tiktok]
 token = "secrets/ideology/tiktok_token.json"
@@ -112,7 +108,7 @@ access_token_env = "IG_TOKEN_IDEOLOGY"
 | ID | 名前 | 内容 | YouTube公開設定 |
 |---|---|---|---|
 | `ideology` | doci（ソ連/アメリカ） | 共産主義・資本主義の小噺 | public |
-| `youtube-growth` | YouTube攻略Ch | ショート・通常動画・分析改善 | 主題ガード通過時 public / それ以外 unlisted |
+| `youtube-growth` | YouTube攻略Ch | ショート・通常動画・分析改善 | 実績施策を適用した動画のみ public / それ以外 unlisted |
 
 ```bash
 # 1本だけ生成（アップロードしない・動作確認）
@@ -196,7 +192,7 @@ token = "secrets/sample/youtube_token.json"
 |---|---|
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
-| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `title_pattern_check`, `plan_topic_retries`, `max_uploads_per_day` |
+| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `title_pattern_check`, `plan_topic_retries`, `max_uploads_per_day`, `performance_eval_window_hours`, `performance_gated_publish` |
 | `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio` |
 | `style.thumbnail` | `font_family`, `title_color` |
 | `style.chart` | `palette`, `font` |
@@ -205,7 +201,7 @@ token = "secrets/sample/youtube_token.json"
 | `style.credits` | `template` |
 | `publish` | `platforms` |
 | `publish.youtube` | `privacy`, `client_secret`, `token`, `review` |
-| `publish.youtube.review` | `enabled`, `require_approval`, `repository`, `publish_label`, `hold_label`, `keep_unlisted_label` |
+| `publish.youtube.review` | `enabled` |
 | `publish.tiktok` | `token`, `privacy` |
 | `publish.instagram` | `user_id`, `access_token_env` |
 
@@ -266,54 +262,37 @@ YouTube Analytics APIを有効化したうえで追加scopeが必要。明示的
 `python -m doci.performance --sync --channel <id> --corner <key>` でreadbackと判断根拠を
 確認できる。仮説は同一corner・同一尺・同一tierの最低8本を比較し、1回に1形式だけを
 YouTube投稿成功1本へ適用する。その動画が評価閾値に届くまで同じcornerの次実験は待機する。
+`pipeline.performance_eval_window_hours`（既定0＝無効）を設定したチャンネルは、閾値
+到達だけで評価完了とせず、適用時刻からこの時間が経過するまで同じcornerの次実験生成を
+`PerformanceEvalWindowSkip`として通常スキップする（初動データが育つ前に次の実験が
+投稿されるのを防ぐ、issue #38）。`youtube-growth`は72時間を設定している。
 
-### YouTube攻略Ch の主題確認
+### YouTube攻略Ch の公開判定
 
 `youtube-growth` は `max_uploads_per_day = 1` とし、JSTで1日1本だけ実投稿する。
-各動画は原則 `unlisted` で登録し、企画の主題確認が明確でも自動公開しない。
-適用結果を確認できたタイミングで確認Issueへ `公開承認` ラベルを付けた場合だけ、既存の
-安全な再取得・動画ID照合を経て `public` へ変更する。
-`publish.youtube.review.require_approval = true` はこの手動承認モードを表す。
+GitHub Issueでの人手承認・ラベル待ち・reconcileの仕組みは廃止した。人手ラベルや
+限定公開からの経過時間は公開可否に一切関与しない。
 
-通常の確認モードでは、企画に次の3点が明記され、主題適合も `clear` の場合だけ自動で
-`public` 投稿できる。手動承認モードではこの自動公開を行わず、明確な企画も必ずIssueへ送る。
+`pipeline.performance_gated_publish = true`（`performance_feedback = true` が前提。
+`publish.youtube.review.enabled` との併用は設定エラー）を設定したチャンネルは、
+実績フィードバックの単一変数施策（`performance_feedback`のdecision）を実際に
+予約・適用できたrunの動画だけを `public` で投稿し、それ以外は全て `unlisted` の
+まま投稿する。適用有無は生成時点で確定しており、後からの承認・切り替えは無い。
+判定結果は `script["_performance_gated_publish"]`（`applied`/`privacy`/`decision_id`）
+に記録される。
 
-- 対象者がYouTube制作者
-- 解決する具体的なYouTube上の課題または指標
-- 視聴後にYouTube Studioまたは次の動画制作で取れる操作
+稼働初期など、`performance_feedback` の比較標本が十分に育つまでは（相対比較には
+最低8本の動画が必要）、実験が `active` にならず全動画が `unlisted` のままになる。
+これは意図した挙動であり、既存の公開済み動画が十分に蓄積すると解消する。
 
-1点でも欠ける、主題が曖昧、リサーチが失敗した、またはタイトルからYouTube攻略と
-確認できない場合も生成は止めず、`unlisted` で投稿して動画ごとのGitHub Issueを作る。
-Issueでは `公開承認` / `保留` / `限定公開で保持` のうち1ラベルだけを決定として使う。
-`公開承認` の場合だけYouTubeを公開へ変更し、動画URLをIssueへ記録して自動クローズする。
-ほかの2ラベル、ラベル無し、複数ラベル、限定公開からの経過時間では公開設定を変更しない。
+`pipeline.performance_eval_window_hours` の72時間ゲート（前節）は、次の実験生成
+自体を抑制する仕組みとしてそのまま併存する。
 
-公開設定の変更には `youtube.force-ssl` scope が必要なため、運用開始前に対象チャンネルを
-次のコマンドで再認証する。`--analytics` は既存の実績分析scopeも同時に維持するために指定する。
-
-```bash
-python -m doci.youtube --auth --analytics --manage --channel youtube-growth
-```
-
-決定ラベルはリポジトリ設定で事前に作成する。dociはラベルを自動作成せず、GitHub操作には
-既存 `gh` 認証を使う。実行時に `gh api user` から確認した認証ユーザー以外が作成した
-同形式のIssueは追跡対象にしない。Issue作成intentにはその認証ユーザー名をoutboxへ
-耐久記録し、作成結果が不明な間に認証ユーザーが変わった場合は重複作成せずfail-closedにする。
-トークンや秘密値は設定・ログ・Issue本文へ保存しない。
-3時間ごとの既存 `--all-channels` launchd 実行は、VOICEVOX起動や動画生成より前に
-`--reconcile-youtube-reviews` を実行して確認Issueを取得する。動画単位の処理失敗も
-CLIの非zero終了へ伝搬し、その場合は後続のチャンネルrunでも生成前に再試行する。限定公開アップロードは
-Issue作成より先に `output/<channel>/youtube_review_outbox.jsonl` へ耐久記録されるため、
-Issue作成や後続の履歴保存に失敗しても次の3時間実行で再試行される。
-Issue作成結果が不明な動画だけはSearch index反映前の重複作成を避け、同一cron内では
-再試行せず次の3時間cycleまで待つ。
-`保留` は3時間周期に1回だけIssueを再取得し、動画状態もoutbox状態も変更・追記しない。
-記録済みの確認Issue番号は作成者単位のGraphQL batchで直接取得し、無関係なIssue総数に
-依存しない。公開・限定公開保持の変更直前だけ対象Issueを個別再取得する。
-`限定公開で保持` の決定は動画を変更せず、確定コメントを残してIssueをクローズする。
-`保留` とラベル無しはopenのまま次の3時間確認へ残す。
-未決Issueを経過時間で打ち切ることはなく、outboxは各動画の最新状態を残したままatomicに
-圧縮する。同一cron内の選択的再試行planも並行cycleを分離しつつ最大64ファイルに制限する。
+`performance_gated_publish` を使わないチャンネル（`ideology` 等）は、従来どおり
+`publish.youtube.review.enabled` の有無で `doci.youtube_review.choose_privacy()` が
+動く。`enabled=false` なら `publish.youtube.privacy` の静的な値をそのまま使い、
+`enabled=true` なら企画の主題適合（対象者・課題・視聴後操作の3点＋主題適合が
+すべて明確か）を都度判定して `public`/`unlisted` を決める。
 
 個別レイヤのテスト:
 ```bash
@@ -346,7 +325,8 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/minimax.py` 画像/動画（非同期ポーリング）
 - `doci/compose.py` ffmpeg 合成（9:16・字幕焼込み）
 - `doci/youtube.py` アップロード・公開設定更新
-- `doci/youtube_review.py` 主題ガード・限定公開Issue確認
+- `doci/youtube_review.py` 主題適合の自動判定（テーマガード）
+- `doci/gh_cli.py` gh CLIの薄い共有ラッパー（secret除去）
 - `doci/topic_ledger.py` 全チャネル共通の日次投稿枠・投稿状態管理（題材の跨ぎ照合はしない）
 - `channels/<id>/` チャンネル定義・ペルソナ・声・BGM
 - `doci/prompts/output_rules.md` 全チャンネル共通の出力規則

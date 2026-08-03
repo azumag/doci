@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import shutil
 import subprocess
 import sys
@@ -81,6 +80,10 @@ def _finalize_performance_application(
             video_id,
         )
         return application_id
+    if reservation_state.get("external_unknown"):
+        # 投稿結果不明（タイムアウト等）は実際には公開済みの可能性があるため、
+        # topic_ledgerのpublishing状態と同様に取り消さず手動確認まで保留する。
+        return application_id
     history.cancel_performance_decision(
         spec,
         corner_key,
@@ -90,96 +93,6 @@ def _finalize_performance_application(
     )
     reservation_state.pop("performance_application_id", None)
     return None
-
-
-def _reconcile_youtube_review(spec: ChannelSpec, do_upload: bool) -> None:
-    """実投稿runの冒頭でだけ確認Issueを処理する。失敗しても生成は継続する。"""
-    review_spec = spec.publish.youtube.review
-    if not (
-        review_spec.enabled
-        and do_upload
-        and config.PUBLISH_YOUTUBE
-        and not config.PUBLISH_DRY_RUN
-    ):
-        return
-    try:
-        from . import youtube_review
-
-        cycle_id = os.environ.get("DOCI_REVIEW_CYCLE_ID", "")
-        retry_ids = youtube_review.load_retry_plan(spec, cycle_id)
-        if retry_ids is None:
-            events = youtube_review.reconcile(spec)
-        else:
-            outcome = youtube_review.reconcile_result(
-                spec,
-                only_video_ids=set(retry_ids),
-            )
-            youtube_review.save_retry_plan(
-                spec,
-                cycle_id,
-                outcome.failed_video_ids,
-            )
-            events = list(outcome.events)
-        if not events:
-            _log("YouTube確認Issue: 未処理の決定なし")
-        for event in events:
-            _log(f"YouTube確認Issue: {event}")
-    except Exception as exc:  # 確認系の不調でも新規生成は止めない
-        _log(f"YouTube確認Issueの取得・反映失敗→生成は継続: {str(exc)[:240]}")
-
-
-def _reconcile_all_youtube_reviews() -> tuple[dict, int]:
-    """3時間ジョブの生成処理から独立して、全チャンネルの確認Issueを取得する。"""
-    results: list[dict] = []
-    if not config.PUBLISH_YOUTUBE or config.PUBLISH_DRY_RUN:
-        return {
-            "mode": "reconcile_youtube_reviews",
-            "status": "skipped",
-            "reason": "YouTube publication is disabled or dry-run",
-            "channels": results,
-        }, 0
-
-    from . import youtube_review
-
-    cycle_id = os.environ.get("DOCI_REVIEW_CYCLE_ID", "")
-    for channel_id in channel.discover():
-        try:
-            spec = channel.load(channel_id)
-            if not spec.publish.youtube.review.enabled:
-                continue
-            outcome = youtube_review.reconcile_result(spec)
-            youtube_review.save_retry_plan(
-                spec,
-                cycle_id,
-                outcome.failed_video_ids,
-            )
-            events = list(outcome.events)
-            results.append(
-                {
-                    "channel": channel_id,
-                    "status": "error" if outcome.failed_count else "ok",
-                    "events": events,
-                    "failed_count": outcome.failed_count,
-                    "failed_video_ids": list(outcome.failed_video_ids),
-                }
-            )
-        except Exception as exc:
-            _log(f"channel={channel_id} YouTube確認Issue ERROR: {exc}")
-            results.append(
-                {
-                    "channel": channel_id,
-                    "status": "error",
-                    "error": str(exc)[:240],
-                    "failed_count": 1,
-                }
-            )
-    failed = sum(int(item.get("failed_count", 0)) for item in results)
-    return {
-        "mode": "reconcile_youtube_reviews",
-        "status": "error" if failed else "ok",
-        "failed": failed,
-        "channels": results,
-    }, 1 if failed else 0
 
 
 def _credits(spec: ChannelSpec, corner) -> str:
@@ -321,9 +234,6 @@ def _run_once(
     real_publish = _real_publish_requested(do_upload)
     if corner_key and corner_key not in spec.corners:
         raise ValueError(f"unknown corner for channel {spec.id}: {corner_key}")
-    review_spec = spec.publish.youtube.review
-    if os.environ.get("DOCI_REVIEW_RECONCILED") != "1":
-        _reconcile_youtube_review(spec, real_publish)
     if real_publish:
         topic_ledger.ensure_daily_capacity(spec)
     corner = (
@@ -331,14 +241,38 @@ def _run_once(
         if corner_key
         else corners.pick_corner(spec, history.last_corner(spec))
     )
+    eval_window_check = None
+    if real_publish and spec.pipeline_get("performance_feedback", False):
+        eval_window_hours = int(
+            spec.pipeline_get("performance_eval_window_hours", 0) or 0
+        )
+        if eval_window_hours > 0:
+            try:
+                eval_window_check = history.ensure_corner_eval_capacity(
+                    spec, corner.key, eval_window_hours
+                )
+            except history.PerformanceEvalWindowSkip as exc:
+                _log(f"実験評価期間スキップ: {exc.reason}")
+                raise
+            if eval_window_check["active"] and eval_window_check["elapsed_hours"] is None:
+                _log(
+                    f"実験評価期間チェック: corner={corner.key} "
+                    f"ts不明のため経過時間を判定できず生成を継続"
+                )
     voice = spec.voice_for(corner)
     workdir = spec.output_dir / _workdir_name(
         day, corner.key, datetime.now().strftime("%H%M%S")
     )
     workdir.mkdir(parents=True, exist_ok=True)
+    max_uploads_per_day = spec.pipeline_get("max_uploads_per_day")
     _log(
         f"channel={spec.id} corner={corner.key} "
         f"voice={corner.voice_key}(spk{voice.speaker}) workdir={workdir}"
+    )
+    _log(
+        "投稿頻度policy: "
+        f"max_uploads_per_day={max_uploads_per_day if max_uploads_per_day is not None else '無制限'} "
+        f"performance_eval_window_hours={spec.pipeline_get('performance_eval_window_hours', 0)}"
     )
 
     # 1) 台本
@@ -516,25 +450,46 @@ def _run_once(
     )
     _apply_narration_pattern_check(spec, script, recent_openings_for_prompt)
     _apply_ambiguous_date_title_check(spec, script)
-    from . import youtube_review
-
-    youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)
-    if theme_assessment is not None:
-        script["_youtube_theme_review"] = theme_assessment.to_dict()
-        if theme_assessment.eligible_for_public:
-            if review_spec.require_approval:
-                _log(
-                    "YouTube主題ガード: 3項目と主題適合は明確だが"
-                    "承認制のためunlisted"
-                )
-            else:
-                _log("YouTube主題ガード: 3項目と主題適合が明確→public")
-        else:
+    if eval_window_check is not None:
+        script["_performance_eval_window"] = eval_window_check
+    if spec.pipeline_get("performance_gated_publish", False):
+        theme_assessment = None
+        youtube_privacy = "public" if performance_application_id else "unlisted"
+        script["_performance_gated_publish"] = {
+            "applied": bool(performance_application_id),
+            "privacy": youtube_privacy,
+            "decision_id": (
+                performance_decision.get("decision_id")
+                if performance_decision
+                else None
+            ),
+        }
+        if performance_application_id:
             _log(
-                "YouTube主題ガード: "
-                + " / ".join(theme_assessment.reasons)
-                + "→unlistedで確認Issueへ"
+                "実績フィードバック公開ゲート: 施策適用runのためpublic "
+                f"(decision={script['_performance_gated_publish']['decision_id']})"
             )
+        else:
+            status = performance_decision.get("status") if performance_decision else None
+            reason = performance_decision.get("reason") if performance_decision else None
+            _log(
+                "実績フィードバック公開ゲート: 施策未適用のためunlisted "
+                f"(status={status}; {reason})"
+            )
+    else:
+        from . import youtube_review
+
+        youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)
+        if theme_assessment is not None:
+            script["_youtube_theme_review"] = theme_assessment.to_dict()
+            if theme_assessment.eligible_for_public:
+                _log("YouTube主題ガード: 3項目と主題適合が明確→public")
+            else:
+                _log(
+                    "YouTube主題ガード: "
+                    + " / ".join(theme_assessment.reasons)
+                    + "→unlisted"
+                )
     (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
 
@@ -738,8 +693,6 @@ def _run_once(
 
     # 5) アップロード（route.platforms と各 PUBLISH_* で出し分け: issue #3）
     video_id = None
-    review_issue_url = None
-    review_issue_error = None
     pub_results: list = []
     if do_upload:
         if real_publish:
@@ -794,36 +747,6 @@ def _run_once(
             # APIが受理した直後のタイムアウトも含め、成功IDが無い限り
             # publishingを解除しない。重複投稿より手動確認を優先する。
             reservation_state["external_unknown"] = True
-        if (
-            video_id
-            and review_spec.enabled
-            and youtube_privacy == "unlisted"
-            and theme_assessment is not None
-        ):
-            try:
-                youtube_review.queue_pending(
-                    spec,
-                    video_id,
-                    script["title"],
-                    theme_assessment,
-                )
-            except Exception as exc:
-                review_issue_error = str(exc)[:240]
-                _log(
-                    "YouTube確認outbox記録失敗→限定公開を維持し要手動確認: "
-                    f"{review_issue_error}"
-                )
-            else:
-                try:
-                    issue = youtube_review.ensure_issue(spec, video_id)
-                    review_issue_url = issue.url
-                    _log(f"YouTube確認Issue: #{issue.number} {issue.url}")
-                except Exception as exc:  # 次の3時間実行でoutboxから再試行する
-                    review_issue_error = str(exc)[:240]
-                    _log(
-                        "YouTube確認Issue作成失敗→限定公開を維持し次回再試行: "
-                        f"{review_issue_error}"
-                    )
         if performance_application_id and performance_decision:
             performance_application_id = _finalize_performance_application(
                 spec,
@@ -896,8 +819,6 @@ def _run_once(
             "youtube_theme_review": (
                 theme_assessment.to_dict() if theme_assessment is not None else None
             ),
-            "youtube_review_issue": review_issue_url,
-            "youtube_review_issue_error": review_issue_error,
         },
     )
     media_cleanup: dict[str, object]
@@ -987,7 +908,6 @@ def _run_once(
         "platforms": route.platforms,
         "publish": [{"platform": r.platform, "status": r.status} for r in pub_results],
         "youtube_privacy": youtube_privacy if video_id else None,
-        "youtube_review_issue": review_issue_url,
         "workdir": str(workdir),
         "video_retained": out_mp4.exists(),
         "media_cleanup": media_cleanup,
@@ -1123,7 +1043,10 @@ def _run_all_channels(
             results.append(
                 {"channel": channel_id, "status": "ok", "result": result}
             )
-        except history.TopicCooldownSkip as exc:
+        except (
+            history.TopicCooldownSkip,
+            history.PerformanceEvalWindowSkip,
+        ) as exc:
             results.append(
                 {
                     "channel": channel_id,
@@ -1175,11 +1098,6 @@ def main() -> int:
         help="チャンネル一覧と直近実行を表示",
     )
     target.add_argument(
-        "--reconcile-youtube-reviews",
-        action="store_true",
-        help="全チャンネルのYouTube確認Issueだけを取得・反映",
-    )
-    target.add_argument(
         "--recover-publishing",
         metavar="RESERVATION_ID",
         help="外部結果を運用者が確認済みのpublishing予約を終端化",
@@ -1210,10 +1128,6 @@ def main() -> int:
     if args.list_channels:
         print(json.dumps(_list_channels(), ensure_ascii=False, indent=2))
         return 0
-    if args.reconcile_youtube_reviews:
-        result, exit_code = _reconcile_all_youtube_reviews()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return exit_code
     if args.recover_publishing:
         try:
             result = topic_ledger.recover_publishing(
@@ -1246,7 +1160,10 @@ def main() -> int:
             do_upload=not args.no_upload,
             video_scenes=args.video_scenes,
         )
-    except history.TopicCooldownSkip as exc:
+    except (
+        history.TopicCooldownSkip,
+        history.PerformanceEvalWindowSkip,
+    ) as exc:
         print(
             json.dumps(
                 {

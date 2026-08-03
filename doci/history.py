@@ -40,6 +40,32 @@ class TopicCooldownSkip(RuntimeError):
         super().__init__(self.reason)
 
 
+class PerformanceEvalWindowSkip(RuntimeError):
+    """適用済み実験がまだ評価期間内のため、同一cornerの次実験をスキップする。"""
+
+    def __init__(
+        self,
+        channel_id: str,
+        corner: str,
+        application_id: str,
+        video_id: str | None,
+        window_hours: int,
+        elapsed_hours: float,
+    ):
+        self.channel_id = channel_id
+        self.corner = corner
+        self.application_id = application_id
+        self.video_id = video_id
+        self.window_hours = window_hours
+        self.elapsed_hours = elapsed_hours
+        self.reason = (
+            f"channel={channel_id} corner={corner} は実験{application_id}"
+            f"（動画{video_id or '未確定'}）の評価期間{window_hours}時間内"
+            f"（経過{elapsed_hours:.1f}時間）のため、次実験の生成をスキップ"
+        )
+        super().__init__(self.reason)
+
+
 def _read_path(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -954,6 +980,62 @@ def active_performance_experiment(
 ) -> dict | None:
     """cornerで適用中または評価待ちの実験を返す。"""
     return _active_performance_experiment_rows(_read_all(spec), corner)
+
+
+def experiment_elapsed_hours(
+    row: dict,
+    now: datetime | None = None,
+) -> float | None:
+    """実験行のtsから現在までの経過時間（時間）を返す。tsが不明ならNone。"""
+    ts = _parse_ts(row.get("ts"))
+    if ts is None:
+        return None
+    reference = now or datetime.now(timezone.utc)
+    return (reference - ts).total_seconds() / 3600.0
+
+
+def ensure_corner_eval_capacity(
+    spec: ChannelSpec,
+    corner: str,
+    window_hours: int,
+    now: datetime | None = None,
+) -> dict:
+    """cornerの実験が評価期間内なら送出し、そうでなければ状態を返す。
+
+    tsが壊れている/欠落している実験行はスキップせず通す
+    （評価完了を判定する術が無いままcornerを恒久停止させないため）。
+    """
+    row = active_performance_experiment(spec, corner)
+    if row is None:
+        return {
+            "corner": corner,
+            "window_hours": window_hours,
+            "active": False,
+            "application_id": None,
+            "video_id": None,
+            "applied_ts": None,
+            "elapsed_hours": None,
+        }
+    elapsed_hours = experiment_elapsed_hours(row, now=now)
+    info = {
+        "corner": corner,
+        "window_hours": window_hours,
+        "active": True,
+        "application_id": row.get("performance_application_id"),
+        "video_id": row.get("video_id"),
+        "applied_ts": row.get("ts"),
+        "elapsed_hours": elapsed_hours,
+    }
+    if elapsed_hours is not None and elapsed_hours < window_hours:
+        raise PerformanceEvalWindowSkip(
+            spec.id,
+            corner,
+            str(row.get("performance_application_id") or ""),
+            row.get("video_id"),
+            window_hours,
+            elapsed_hours,
+        )
+    return info
 
 
 def performance_decision_used(spec: ChannelSpec, decision_id: str) -> bool:

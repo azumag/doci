@@ -86,14 +86,9 @@ class StyleSpec:
 
 @dataclass(frozen=True)
 class YouTubeReviewSpec:
-    """限定公開動画を GitHub Issue で確認する運用設定。"""
+    """主題適合の自動判定で公開設定を決めるかどうかの運用設定。"""
 
     enabled: bool = False
-    require_approval: bool = False
-    repository: str = ""
-    publish_label: str = "公開承認"
-    hold_label: str = "保留"
-    keep_unlisted_label: str = "限定公開で保持"
 
 
 @dataclass(frozen=True)
@@ -181,6 +176,9 @@ _PIPELINE_KEYS = {
     "ambiguous_date_title_check",
     "plan_topic_retries",
     "max_uploads_per_day",
+    "performance_eval_window_hours",
+    "performance_gated_publish",
+    "feedback_repository",
 }
 _STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
@@ -198,14 +196,7 @@ _BGM_STYLE_KEYS = {"dir", "volume", "rotation"}
 _CREDITS_STYLE_KEYS = {"template"}
 _PUBLISH_KEYS = {"platforms", "youtube", "tiktok", "instagram"}
 _YOUTUBE_PUBLISH_KEYS = {"privacy", "client_secret", "token", "review"}
-_YOUTUBE_REVIEW_KEYS = {
-    "enabled",
-    "require_approval",
-    "repository",
-    "publish_label",
-    "hold_label",
-    "keep_unlisted_label",
-}
+_YOUTUBE_REVIEW_KEYS = {"enabled"}
 _TIKTOK_PUBLISH_KEYS = {"token", "privacy"}
 _INSTAGRAM_PUBLISH_KEYS = {"user_id", "access_token_env"}
 _PUBLISH_PLATFORMS = {"youtube", "tiktok", "instagram"}
@@ -436,49 +427,6 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
     review_enabled = review.get("enabled", False)
     if not isinstance(review_enabled, bool):
         raise ChannelConfigError("publish.youtube.review.enabled must be a boolean")
-    require_approval = review.get("require_approval", False)
-    if not isinstance(require_approval, bool):
-        raise ChannelConfigError(
-            "publish.youtube.review.require_approval must be a boolean"
-        )
-    if require_approval and not review_enabled:
-        raise ChannelConfigError(
-            "publish.youtube.review.require_approval requires enabled=true"
-        )
-    review_repository = _string(
-        review,
-        "repository",
-        "",
-        "publish.youtube.review.",
-    ).strip()
-    if review_enabled and not re.fullmatch(
-        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
-        review_repository,
-    ):
-        raise ChannelConfigError(
-            "publish.youtube.review.repository must be owner/name when enabled"
-        )
-    review_labels = {
-        key: _string(
-            review,
-            key,
-            default,
-            "publish.youtube.review.",
-        ).strip()
-        for key, default in (
-            ("publish_label", "公開承認"),
-            ("hold_label", "保留"),
-            ("keep_unlisted_label", "限定公開で保持"),
-        )
-    }
-    if any(not value for value in review_labels.values()):
-        raise ChannelConfigError(
-            "publish.youtube.review decision labels must not be empty"
-        )
-    if len(set(review_labels.values())) != len(review_labels):
-        raise ChannelConfigError(
-            "publish.youtube.review decision labels must be distinct"
-        )
 
     platforms = data.get("platforms", ["youtube", "tiktok", "instagram"])
     if not isinstance(platforms, list) or not all(
@@ -526,12 +474,6 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
         "unlisted" if review_enabled else config.YOUTUBE_PRIVACY,
         "publish.youtube.",
     )
-    if review_enabled and youtube_privacy != "unlisted":
-        raise ChannelConfigError(
-            "publish.youtube.privacy must be unlisted when "
-            "publish.youtube.review.enabled is true; review decides the "
-            "final public or unlisted upload state"
-        )
 
     return PublishSpec(
         platforms=tuple(platforms),
@@ -539,14 +481,7 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
             privacy=youtube_privacy,
             client_secret=youtube_client_secret,
             token=youtube_token,
-            review=YouTubeReviewSpec(
-                enabled=review_enabled,
-                require_approval=require_approval,
-                repository=review_repository,
-                publish_label=review_labels["publish_label"],
-                hold_label=review_labels["hold_label"],
-                keep_unlisted_label=review_labels["keep_unlisted_label"],
-            ),
+            review=YouTubeReviewSpec(enabled=review_enabled),
         ),
         tiktok=TikTokPublishSpec(
             token=_publish_path(tiktok, "token", config.TIKTOK_TOKEN_FILE),
@@ -696,12 +631,49 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         raise ChannelConfigError(
             "pipeline.max_uploads_per_day must be a non-negative integer"
         )
+    performance_eval_window_hours = pipeline.get("performance_eval_window_hours")
+    if performance_eval_window_hours is not None and (
+        isinstance(performance_eval_window_hours, bool)
+        or not isinstance(performance_eval_window_hours, int)
+        or performance_eval_window_hours < 0
+    ):
+        raise ChannelConfigError(
+            "pipeline.performance_eval_window_hours must be a non-negative integer"
+        )
+    performance_gated_publish = pipeline.get("performance_gated_publish")
+    if performance_gated_publish is not None and not isinstance(
+        performance_gated_publish, bool
+    ):
+        raise ChannelConfigError(
+            "pipeline.performance_gated_publish must be a boolean"
+        )
+    if performance_gated_publish and not performance_feedback:
+        raise ChannelConfigError(
+            "pipeline.performance_gated_publish requires "
+            "pipeline.performance_feedback = true"
+        )
+    feedback_repository = pipeline.get("feedback_repository", "")
+    if not isinstance(feedback_repository, str):
+        raise ChannelConfigError("pipeline.feedback_repository must be a string")
+    if feedback_repository and not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        feedback_repository,
+    ):
+        raise ChannelConfigError(
+            "pipeline.feedback_repository must be owner/name"
+        )
     style = data.get("style", {})
     publish = data.get("publish", {})
     if not isinstance(style, dict):
         raise ChannelConfigError("style must be a table")
     if not isinstance(publish, dict):
         raise ChannelConfigError("publish must be a table")
+    publish_spec = _load_publish(publish, spec_id)
+    if performance_gated_publish and publish_spec.youtube.review.enabled:
+        raise ChannelConfigError(
+            "pipeline.performance_gated_publish cannot be combined with "
+            "publish.youtube.review.enabled"
+        )
 
     return ChannelSpec(
         id=spec_id,
@@ -711,7 +683,7 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         rotation=list(rotation),
         voices_path=voices_path,
         style=_load_style(style, root),
-        publish=_load_publish(publish, spec_id),
+        publish=publish_spec,
         pipeline=dict(pipeline),
     )
 

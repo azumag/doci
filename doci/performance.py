@@ -410,18 +410,40 @@ def build_decision(
         if corner_key
         else None
     )
-    if (
+    window_hours = int(spec.pipeline_get("performance_eval_window_hours", 0) or 0)
+    elapsed_hours = (
+        history.experiment_elapsed_hours(active_experiment)
+        if active_experiment
+        else None
+    )
+    within_window = (
+        window_hours > 0
+        and elapsed_hours is not None
+        and elapsed_hours < window_hours
+    )
+    threshold_reached = bool(
         active_experiment
         and active_experiment.get("video_id")
         and _has_evaluation_result(
             snapshot,
             str(active_experiment["video_id"]),
         )
-    ):
+    )
+    if active_experiment and threshold_reached and not within_window:
         history.complete_performance_evaluation(spec, active_experiment)
         active_experiment = None
     if active_experiment:
         applied_video_id = str(active_experiment.get("video_id") or "")
+        if applied_video_id and within_window:
+            reason_detail = (
+                f"適用動画 {applied_video_id} は評価期間{window_hours}時間内"
+                f"（経過{elapsed_hours:.1f}時間）。指標閾値は"
+                + ("到達済み" if threshold_reached else "未到達")
+            )
+        elif applied_video_id:
+            reason_detail = f"適用動画 {applied_video_id} が評価閾値に未到達"
+        else:
+            reason_detail = "別runで適用予約中"
         decision.update(
             {
                 "status": (
@@ -431,17 +453,14 @@ def build_decision(
                 ),
                 "reason": (
                     f"decision {active_experiment['performance_decision_id']} は"
-                    + (
-                        f"適用動画 {applied_video_id} が評価閾値に未到達"
-                        if applied_video_id
-                        else "別runで適用予約中"
-                    )
-                    + source_suffix
+                    f"{reason_detail}{source_suffix}"
                 ),
                 "applied_decision_id": active_experiment[
                     "performance_decision_id"
                 ],
                 "applied_video_id": applied_video_id or None,
+                "eval_window_hours": window_hours or None,
+                "eval_elapsed_hours": elapsed_hours,
                 "guidance": "",
             }
         )
