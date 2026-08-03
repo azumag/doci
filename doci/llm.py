@@ -5,14 +5,20 @@ Codex exec は明示設定時の経路。`claude -p ... --output-format json` �
 `run_codex` は config.CODEX_PROVIDER で接続先を切り替える:
 - minimax(既定): 隔離 CODEX_HOME 配下に MiniMax プロバイダの config.toml を毎回生成し、
   ユーザーの ~/.codex には一切触れない。
-- chatgpt: 実 ~/.codex から auth.json だけをコピーした別の隔離 CODEX_HOME を使う。
-  無人実行はリサーチ/ファクトチェック段で外部Webページの内容をプロンプトに取り込むため、
-  実 ~/.codex をそのまま使うとプロンプトインジェクション経由でプロジェクト一覧・MCP設定
+- chatgpt: 実 ~/.codex から auth.json だけをコピーした別の隔離 CODEX_HOME を毎回作り
+  直して使う（前回実行の残置ファイルを次回が無検査で信用しないため）。無人実行は
+  リサーチ/ファクトチェック段で外部Webページの内容をプロンプトに取り込むため、実
+  ~/.codex をそのまま使うとプロンプトインジェクション経由でプロジェクト一覧・MCP設定
   等の個人情報まで読まれ得る。認証情報1ファイルだけに絞って露出面を最小化する
-  （auth.json自体が読める点は実ChatGPT認証を使う要件上避けられない）。
-  設定ファイル(config.toml等)は書かない＝コピー元の実 ~/.codex には一切書き込まない。
+  （auth.json自体が読める点は実ChatGPT認証を使う要件上避けられない）。実行後、隔離
+  ホーム内でのトークンリフレッシュ結果は auth.json のみ実ホームへ書き戻す（一方向
+  コピーのままだとローテーション型リフレッシュトークンが無効化され実ログインが
+  壊れうるため）。コピー元の実 ~/.codex にはこの auth.json 以外一切書き込まない。
 web fetch を要求しない呼び出し(min_web_fetches=0)ではサンドボックスのネットワークアクセス
-も無効化し、そもそも外部送信の経路自体を塞ぐ。
+も無効化し、外部送信の経路自体を塞ぐ。chatgptプロバイダで web fetch必須
+(min_web_fetches>=1)の呼び出しは、CODEX_CHATGPT_ALLOW_UNTRUSTED_WEBを明示しない限り
+既定で拒否する（ネットワーク有効サンドボックス内に実認証を置いたままプロンプト
+インジェクションに晒すリスクを避けるため）。
 """
 from __future__ import annotations
 
@@ -95,7 +101,9 @@ def _ensure_codex_home(model: str) -> Path:
 
 def _ensure_chatgpt_codex_home() -> Path:
     """実 ~/.codex の auth.json だけをコピーした隔離 CODEX_HOME を返す。
-    コピー元(config.CODEX_REAL_HOME)には一切書き込まない。"""
+    コピー元(config.CODEX_REAL_HOME)には一切書き込まない。前回実行の残置ファイル
+    (codex execがサンドボックス内で書き込んだ config.toml 等)を次回実行が無検査で
+    信用しないよう、隔離ホームは毎回完全に作り直す。"""
     real_auth = config.CODEX_REAL_HOME / "auth.json"
     if not real_auth.exists():
         raise RuntimeError(
@@ -103,11 +111,42 @@ def _ensure_chatgpt_codex_home() -> Path:
             "（CODEX_PROVIDER=chatgpt には実 ~/.codex の認証が必須です）"
         )
     home = config.CODEX_CHATGPT_HOME
-    home.mkdir(parents=True, exist_ok=True)
+    if home.exists():
+        shutil.rmtree(home)
+    home.mkdir(parents=True)
     dest = home / "auth.json"
     shutil.copy(real_auth, dest)
     os.chmod(dest, 0o600)
     return home
+
+
+def _sync_refreshed_chatgpt_auth(home: Path) -> None:
+    """codex exec 実行後、隔離ホーム側でトークンリフレッシュが起きていたら実
+    ~/.codex/auth.json へ書き戻す。ChatGPTのリフレッシュトークンはローテーション式
+    になり得るため、書き戻さないと次回実行時に実ホーム側の（既に無効化された）
+    古いauth.jsonで隔離ホームを上書きしてしまい、実ログイン自体が壊れうる
+    （元のコードが避けようとしていた「ChatGPTログイン破壊事故」と同種の経路）。
+    auth.json以外のファイルは実ホームへ一切書き込まない。壊れた/空の内容では
+    書き戻さない（不完全な同期で実ホームの認証を壊さないため）。"""
+    copied = home / "auth.json"
+    try:
+        new_bytes = copied.read_bytes()
+    except OSError:
+        return
+    try:
+        json.loads(new_bytes)
+    except json.JSONDecodeError:
+        return
+    real_auth = config.CODEX_REAL_HOME / "auth.json"
+    try:
+        if real_auth.exists() and real_auth.read_bytes() == new_bytes:
+            return
+    except OSError:
+        pass
+    tmp = real_auth.with_name(real_auth.name + ".doci-tmp")
+    tmp.write_bytes(new_bytes)
+    os.chmod(tmp, 0o600)
+    tmp.replace(real_auth)
 
 
 def _parse_codex_events(stdout: str) -> tuple[str, int]:
@@ -149,7 +188,24 @@ def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetche
     ネットワークアクセスも無効化し、外部送信の経路自体を塞ぐ。
     web fetch(curl/wget/URL実行)が min_web_fetches 未満なら「検索したフリ」とみなし ValueError
     にする（呼び出し側の既存リトライ/劣化継続に乗せる）。
+
+    CODEX_PROVIDER=chatgptでは、min_web_fetches>=1（外部Webページの内容をプロンプトへ
+    取り込む呼び出し）を既定で拒否する。ネットワーク有効サンドボックス内に実ChatGPT
+    認証(auth.json)が置かれるため、プロンプトインジェクション経由でトークンを外部送信
+    される経路になり得る。CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB=1で明示許可した場合のみ通す。
     """
+    if (
+        config.CODEX_PROVIDER == "chatgpt"
+        and min_web_fetches > 0
+        and not config.CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB
+    ):
+        raise RuntimeError(
+            "CODEX_PROVIDER=chatgpt はWeb取得必須の呼び出し"
+            f"(min_web_fetches={min_web_fetches})では既定で拒否されます。"
+            "外部Webページの内容を取り込むプロンプトインジェクションで実ChatGPT認証が"
+            "外部送信されるリスクがあるためです。リスクを理解した上で使う場合のみ"
+            "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB=1 を明示してください。"
+        )
     home = _ensure_codex_home(model)
     scratch = config.OUTPUT / "codex-scratch"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -173,15 +229,21 @@ def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetche
     env = {**os.environ, "CODEX_HOME": str(home)}
     if config.CODEX_PROVIDER == "minimax":
         env["DOCI_MINIMAX_AUTHORIZATION"] = f"Bearer {config.MINIMAX_API_KEY}"
-    proc = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=str(scratch),
-        env=env,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(scratch),
+            env=env,
+        )
+    finally:
+        # タイムアウト等でも、隔離ホーム内で起きたトークンリフレッシュは
+        # 可能な限り実ホームへ反映する（同期の詳細は _sync_refreshed_chatgpt_auth）。
+        if config.CODEX_PROVIDER == "chatgpt":
+            _sync_refreshed_chatgpt_auth(home)
     if proc.returncode != 0:
         raise RuntimeError(f"codex exec failed (rc={proc.returncode}): {proc.stderr[:500]}")
     message, fetch_count = _parse_codex_events(proc.stdout)

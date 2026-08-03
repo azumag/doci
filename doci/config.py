@@ -156,11 +156,19 @@ _RESEARCH_BACKEND_EXPLICIT = bool(get("RESEARCH_BACKEND"))
 _FACTCHECK_BACKEND_EXPLICIT = bool(get("FACTCHECK_BACKEND"))
 
 # codex バックエンドの接続先。minimax(既定・隔離ホームでMiniMax API鍵を使う) |
-# chatgpt(ユーザーの実 ~/.codex ChatGPT認証をそのまま使い、実OpenAIモデルを呼ぶ)。
-# chatgpt指定時も ~/.codex の設定ファイルは一切書き換えない（読むだけ）。
+# chatgpt(実 ~/.codex の auth.json だけをコピーした隔離ホームで実ChatGPT認証を使い、
+# 実OpenAIモデルを呼ぶ)。いずれも ~/.codex の設定ファイルは一切書き換えない（読むだけ）。
 CODEX_PROVIDER = get("CODEX_PROVIDER", "minimax")
 # codex実行時の reasoning effort の明示指定。空なら未指定（モデル/ユーザー既定に任せる）。
 CODEX_REASONING_EFFORT = get("CODEX_REASONING_EFFORT", "")
+# CODEX_PROVIDER=chatgpt で Web取得必須(min_web_fetches>=1、research/factcheck等)の
+# 呼び出しを許可するか。既定false: 外部Webページの内容をプロンプトへ取り込む段は、
+# プロンプトインジェクション経由で実ChatGPT認証(auth.json)をネットワーク送信されうる
+# ため既定で拒否する。MiniMax鍵と違い実アカウント認証は失効・再発行が容易でなく、
+# リスクを理解した上で使う場合だけ明示的に有効化させる。
+CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB = get_bool(
+    "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False
+)
 _SUPPORTED_CODEX_PROVIDERS = frozenset({"minimax", "chatgpt"})
 _SUPPORTED_CODEX_REASONING_EFFORTS = frozenset(
     {"low", "medium", "high", "xhigh", "ultra", "max"}

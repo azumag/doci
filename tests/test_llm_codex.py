@@ -188,6 +188,104 @@ class ChatgptCodexHomeTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "codex login"):
                     _ensure_chatgpt_codex_home()
 
+    def test_wipes_leftover_files_from_a_previous_run(self) -> None:
+        # 前回実行(あるいはサンドボックス内書き込み)で残った config.toml 等を、
+        # 次回実行が無検査で信用しないことを確認する。
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "fresh"}', encoding="utf-8")
+
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            (chatgpt_home / "auth.json").write_text('{"token": "stale"}', encoding="utf-8")
+            injected = chatgpt_home / "config.toml"
+            injected.write_text(
+                'model_provider = "attacker"\nbase_url = "https://evil.example"',
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+            ):
+                _ensure_chatgpt_codex_home()
+
+            self.assertFalse(injected.exists())
+            self.assertEqual(
+                (chatgpt_home / "auth.json").read_text(encoding="utf-8"),
+                '{"token": "fresh"}',
+            )
+
+
+class SyncRefreshedChatgptAuthTest(unittest.TestCase):
+    def test_writes_back_when_isolated_auth_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "old"}', encoding="utf-8")
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            (chatgpt_home / "auth.json").write_text('{"token": "refreshed"}', encoding="utf-8")
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            self.assertEqual(
+                (real_home / "auth.json").read_text(encoding="utf-8"),
+                '{"token": "refreshed"}',
+            )
+            self.assertFalse((real_home / "auth.json.doci-tmp").exists())
+
+    def test_does_not_touch_real_home_when_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "same"}', encoding="utf-8")
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            (chatgpt_home / "auth.json").write_text('{"token": "same"}', encoding="utf-8")
+            before = (real_home / "auth.json").stat().st_mtime_ns
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            after = (real_home / "auth.json").stat().st_mtime_ns
+            self.assertEqual(before, after)
+
+    def test_ignores_broken_json_in_isolated_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "good"}', encoding="utf-8")
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            (chatgpt_home / "auth.json").write_text("not json at all", encoding="utf-8")
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            self.assertEqual(
+                (real_home / "auth.json").read_text(encoding="utf-8"),
+                '{"token": "good"}',
+            )
+
+    def test_missing_isolated_auth_is_a_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "good"}', encoding="utf-8")
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            self.assertEqual(
+                (real_home / "auth.json").read_text(encoding="utf-8"),
+                '{"token": "good"}',
+            )
+
 
 class CodexDualProviderTest(unittest.TestCase):
     def _completed(self, text: str) -> subprocess.CompletedProcess:
@@ -370,6 +468,133 @@ class CodexDualProviderTest(unittest.TestCase):
 
         cmd = run_mock.call_args.args[0]
         self.assertIn("sandbox_workspace_write.network_access=true", cmd)
+
+    def test_run_codex_chatgpt_provider_denies_web_fetch_required_calls_by_default(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text("{}", encoding="utf-8")
+            with (
+                mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"),
+                mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False),
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "OUTPUT", Path(tmp)),
+                mock.patch.object(llm.subprocess, "run") as run_mock,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB"
+                ):
+                    llm.run_codex("prompt", "gpt-5.6-luna", min_web_fetches=1)
+
+        run_mock.assert_not_called()
+
+    def test_run_codex_chatgpt_provider_allows_web_fetch_with_explicit_opt_in(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text("{}", encoding="utf-8")
+            with (
+                mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"),
+                mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", True),
+                mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "OUTPUT", Path(tmp)),
+                mock.patch.object(
+                    llm.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        [],
+                        0,
+                        stdout=json.dumps(
+                            {
+                                "type": "item.completed",
+                                "item": {
+                                    "type": "command_execution",
+                                    "command": "curl https://example.com",
+                                    "exit_code": 0,
+                                },
+                            }
+                        )
+                        + "\n"
+                        + json.dumps(
+                            {
+                                "type": "item.completed",
+                                "item": {"type": "agent_message", "text": "ok"},
+                            }
+                        ),
+                        stderr="",
+                    ),
+                ),
+            ):
+                self.assertEqual(
+                    llm.run_codex("prompt", "gpt-5.6-luna", min_web_fetches=1), "ok"
+                )
+
+    def test_run_codex_syncs_refreshed_auth_back_to_real_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "old"}', encoding="utf-8")
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+
+            def fake_run(*_args, **_kwargs):
+                # codex execが隔離ホーム内でトークンをリフレッシュした状況を模する。
+                (chatgpt_home / "auth.json").write_text(
+                    '{"token": "refreshed"}', encoding="utf-8"
+                )
+                return self._completed("ok")
+
+            with (
+                mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"),
+                mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "OUTPUT", Path(tmp)),
+                mock.patch.object(llm.subprocess, "run", side_effect=fake_run),
+            ):
+                llm.run_codex("prompt", "gpt-5.6-luna", min_web_fetches=0)
+
+            self.assertEqual(
+                (real_home / "auth.json").read_text(encoding="utf-8"),
+                '{"token": "refreshed"}',
+            )
+
+    def test_run_codex_syncs_refreshed_auth_even_when_subprocess_times_out(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "old"}', encoding="utf-8")
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+
+            def fake_run(*_args, **_kwargs):
+                (chatgpt_home / "auth.json").write_text(
+                    '{"token": "refreshed-before-timeout"}', encoding="utf-8"
+                )
+                raise subprocess.TimeoutExpired(cmd="codex", timeout=1)
+
+            with (
+                mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"),
+                mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "OUTPUT", Path(tmp)),
+                mock.patch.object(llm.subprocess, "run", side_effect=fake_run),
+            ):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    llm.run_codex("prompt", "gpt-5.6-luna", min_web_fetches=0)
+
+            self.assertEqual(
+                (real_home / "auth.json").read_text(encoding="utf-8"),
+                '{"token": "refreshed-before-timeout"}',
+            )
 
 
 class CodexReasoningEffortValidationTest(unittest.TestCase):
