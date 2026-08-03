@@ -180,6 +180,17 @@ class CheckAmbiguousDateTitleTest(unittest.TestCase):
         )
         self.assertTrue(supported["supported"])
 
+    def test_current_as_of_without_effective_date_is_still_valid_evidence(self) -> None:
+        # レビュー指摘: current_as_ofは変更日不明でも成立する役割
+        # (research.pyのプロンプトも不明時はeffective_dateを空文字のままにする
+        # 指示のため)。effective_date必須にすると正当なcurrent_as_ofの事実が
+        # 根拠として一切カウントされなくなる。
+        result = ai_text.check_ambiguous_date_title(
+            "最新版アルゴリズム解説",
+            [_fact(effective_date="", date_role="current_as_of", verified_at="2026-08-03")],
+        )
+        self.assertTrue(result["supported"])
+
     def test_year_matching_latest_still_requires_current_as_of(self) -> None:
         # レビュー指摘: 年月が一致していても「最新」の裏付け(current_as_of)が
         # 無ければ、年一致だけでsupported=Trueにしてはいけない。

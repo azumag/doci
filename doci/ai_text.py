@@ -902,15 +902,26 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
     if not matched:
         return None
 
-    dated_facts = [
-        f
-        for f in (facts or [])
-        if isinstance(f, dict)
-        and str(f.get("effective_date") or "").strip()
-        and str(f.get("date_role") or "").strip() in _DATE_ROLES
-        and str(f.get("verified_at") or "").strip()
-        and str(f.get("source_url") or "").strip()
-    ]
+    def _is_dated_fact(f: object) -> bool:
+        if not isinstance(f, dict):
+            return False
+        date_role = str(f.get("date_role") or "").strip()
+        if date_role not in _DATE_ROLES:
+            return False
+        if not str(f.get("verified_at") or "").strip():
+            return False
+        if not str(f.get("source_url") or "").strip():
+            return False
+        # current_as_ofは「変更日不明でも現在有効と確認した」ケースのため
+        # effective_dateを必須にしない(research.pyのプロンプトも不明時は
+        # 空文字のままにする指示のため、常に付くとは限らない)。
+        if date_role != _DATE_ROLE_CURRENT_AS_OF and not str(
+            f.get("effective_date") or ""
+        ).strip():
+            return False
+        return True
+
+    dated_facts = [f for f in (facts or []) if _is_dated_fact(f)]
 
     matched_pattern_names = {name for name, _ in matched}
     # "最新"は年月の裏付けとは別に「現在も有効」という主張そのものなので、
