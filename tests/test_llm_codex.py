@@ -161,6 +161,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
             ):
                 home = _ensure_chatgpt_codex_home()
 
@@ -177,6 +178,25 @@ class ChatgptCodexHomeTest(unittest.TestCase):
                 '{"token": "secret-token"}',
             )
 
+    def test_backs_up_the_pre_run_real_auth_json(self) -> None:
+        # account_id一致検証はサンドボックス内攻撃者による同一アカウントでの
+        # トークン破壊までは防げないため、実行直前の状態を復旧用に残しておく。
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"token": "pre-run"}', encoding="utf-8")
+            backup = Path(tmp) / "backup-dir" / "auth.json"
+
+            with (
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
+            ):
+                _ensure_chatgpt_codex_home()
+
+            self.assertEqual(backup.read_text(encoding="utf-8"), '{"token": "pre-run"}')
+            self.assertEqual(oct(backup.stat().st_mode)[-3:], "600")
+
     def test_raises_clearly_when_real_auth_json_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
@@ -184,6 +204,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "codex login"):
                     _ensure_chatgpt_codex_home()
@@ -208,6 +229,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
             ):
                 _ensure_chatgpt_codex_home()
 
@@ -373,6 +395,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "MINIMAX_API_KEY", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
             ):
                 home = _ensure_codex_home("gpt-5.6-luna")
             self.assertEqual(home, chatgpt_home)
@@ -402,6 +425,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(
                     llm.subprocess, "run", return_value=self._completed("ok")
@@ -427,6 +451,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "MINIMAX_API_KEY", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(
                     llm.subprocess, "run", return_value=self._completed("ok")
@@ -446,6 +471,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", "max"),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(
                     llm.subprocess, "run", return_value=self._completed("ok")
@@ -546,6 +572,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(llm.subprocess, "run") as run_mock,
             ):
@@ -569,6 +596,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(
                     llm.subprocess,
@@ -621,6 +649,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(llm.subprocess, "run", side_effect=fake_run),
             ):
@@ -653,6 +682,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(llm.subprocess, "run", side_effect=fake_run),
             ):

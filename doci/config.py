@@ -18,6 +18,11 @@ CODEX_HOME = ROOT / ".codex-doci"
 CODEX_CHATGPT_HOME = ROOT / ".codex-doci-chatgpt"
 # コピー元の実 ~/.codex。codex CLI 自身の解決規則(環境変数優先)に合わせる。
 CODEX_REAL_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+# 実行直前の実 auth.json の退避先。account_id一致検証だけでは、サンドボックス内で
+# コマンドを実行できる攻撃者が同一account_idを保ったままトークン値だけを壊す
+# 攻撃までは防げないため、書き戻しで万一実ログインが壊れても手動復旧できるよう
+# 直前の正常な状態を残しておく。
+CODEX_CHATGPT_AUTH_BACKUP = ROOT / ".codex-doci-chatgpt-backup" / "auth.json"
 
 
 def _load_dotenv(path: Path) -> None:

@@ -15,10 +15,15 @@ Codex exec は明示設定時の経路。`claude -p ... --output-format json` �
   コピーのままだとローテーション型リフレッシュトークンが無効化され実ログインが
   壊れうるため）。コピー元の実 ~/.codex にはこの auth.json 以外一切書き込まない。
 web fetch を要求しない呼び出し(min_web_fetches=0)ではサンドボックスのネットワークアクセス
-も無効化し、外部送信の経路自体を塞ぐ。chatgptプロバイダで web fetch必須
-(min_web_fetches>=1)の呼び出しは、CODEX_CHATGPT_ALLOW_UNTRUSTED_WEBを明示しない限り
-既定で拒否する（ネットワーク有効サンドボックス内に実認証を置いたままプロンプト
-インジェクションに晒すリスクを避けるため）。
+も無効化するが、これは外部送信を防ぐだけでサンドボックス内のファイル書き込み自体は
+防がない点に注意（他バックエンド由来の汚染されたコンテンツがプロンプト経由でcodex段に
+渡された場合、network_access=falseでも隔離ホーム内のauth.json書き換えは起こり得る）。
+chatgptプロバイダで web fetch必須(min_web_fetches>=1)の呼び出しは、
+CODEX_CHATGPT_ALLOW_UNTRUSTED_WEBを明示しない限り既定で拒否する。
+auth.json書き戻し前の検証(account_id一致)は別アカウントへのなりすましは防ぐが、
+同一account_idを保ったままのトークン破壊までは防げないため、書き戻し前の実auth.json
+を config.CODEX_CHATGPT_AUTH_BACKUP へ退避し、万一の際に手動復旧できるようにしている。
+詳細は _sync_refreshed_chatgpt_auth のdocstringを参照。
 """
 from __future__ import annotations
 
@@ -99,17 +104,31 @@ def _ensure_codex_home(model: str) -> Path:
     return home
 
 
+def _log(msg: str) -> None:
+    print(f"[doci/llm] {msg}", flush=True)
+
+
 def _ensure_chatgpt_codex_home() -> Path:
     """実 ~/.codex の auth.json だけをコピーした隔離 CODEX_HOME を返す。
     コピー元(config.CODEX_REAL_HOME)には一切書き込まない。前回実行の残置ファイル
     (codex execがサンドボックス内で書き込んだ config.toml 等)を次回実行が無検査で
-    信用しないよう、隔離ホームは毎回完全に作り直す。"""
+    信用しないよう、隔離ホームは毎回完全に作り直す。
+
+    コピー前に、実行直前の実auth.jsonをconfig.CODEX_CHATGPT_AUTH_BACKUPへ退避する。
+    _sync_refreshed_chatgpt_authの検証（account_id一致）は、サンドボックス内で
+    コマンドを実行できる攻撃者が同一account_idを保ったままトークン値だけを壊す
+    攻撃までは防げない。万一実ログインが壊れても、このバックアップから手動で
+    ~/.codex/auth.json を復元できるようにしておく。"""
     real_auth = config.CODEX_REAL_HOME / "auth.json"
     if not real_auth.exists():
         raise RuntimeError(
             f"{real_auth} が見つかりません。`codex login` でChatGPT認証を済ませてください"
             "（CODEX_PROVIDER=chatgpt には実 ~/.codex の認証が必須です）"
         )
+    backup = config.CODEX_CHATGPT_AUTH_BACKUP
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(real_auth, backup)
+    os.chmod(backup, 0o600)
     home = config.CODEX_CHATGPT_HOME
     if home.exists():
         shutil.rmtree(home)
@@ -152,33 +171,53 @@ def _sync_refreshed_chatgpt_auth(home: Path) -> None:
 
     codex execのworkspace-writeサンドボックスはCODEX_HOME配下への書き込みを制限
     しないため、プロンプトインジェクションで実行されたコマンドが隔離ホームの
-    auth.jsonを構文的に有効な別内容（トークン欠落・別アカウントのトークン等）に
-    書き換えている可能性がある。「JSONとして読めるか」だけでは不十分なので、
-    (1) tokens.access_token/refresh_token/account_id が全て揃っていること、
-    (2) account_id が書き換え前の実auth.jsonと完全一致すること、の両方を
-    確認してから書き戻す。auth.json以外のファイルは実ホームへ一切書き込まない。"""
+    auth.jsonを書き換えている可能性がある。「JSONとして読めるか」だけでは不十分
+    なので、(1) tokens.access_token/refresh_token/account_id が全て揃っている
+    こと、(2) account_id が書き換え前の実auth.jsonと完全一致すること、の両方を
+    確認してから書き戻す。auth.json以外のファイルは実ホームへ一切書き込まない。
+
+    【この検証の限界】 サンドボックス内でコマンドを実行できる攻撃者は隔離ホームの
+    auth.jsonを読めるため、正しいaccount_idを保ったままトークン値だけをデタラメ
+    な値に差し替えることができ、その場合は両チェックを通過してしまう
+    （＝別アカウントへのなりすましは防げるが、同一account_idを保った上での
+    トークン破壊＝可用性攻撃までは防げない）。この経路への備えとして、
+    _ensure_chatgpt_codex_home が実行直前の実auth.jsonを
+    config.CODEX_CHATGPT_AUTH_BACKUP へ退避しており、万一破壊されても手動で
+    復元できる。書き戻しをスキップした場合は理由をログに残す（無音で正規の
+    リフレッシュ結果を捨てると、ログイン切れの原因が追えなくなるため）。"""
     copied = home / "auth.json"
     try:
         new_bytes = copied.read_bytes()
-    except OSError:
+    except OSError as exc:
+        _log(f"chatgpt認証同期: 隔離ホームのauth.jsonを読めずスキップ: {exc}")
         return
     new_tokens = _auth_tokens(new_bytes)
     if new_tokens is None:
+        _log("chatgpt認証同期: 隔離ホームのauth.jsonが不正な形式のためスキップ")
         return
     real_auth = config.CODEX_REAL_HOME / "auth.json"
     try:
         real_bytes = real_auth.read_bytes()
-    except OSError:
+    except OSError as exc:
+        _log(f"chatgpt認証同期: 実ホームのauth.jsonを読めずスキップ: {exc}")
         return
     if real_bytes == new_bytes:
         return
     real_tokens = _auth_tokens(real_bytes)
-    if real_tokens is None or new_tokens["account_id"] != real_tokens["account_id"]:
+    if real_tokens is None:
+        _log("chatgpt認証同期: 実ホームのauth.jsonが不正な形式のためスキップ")
+        return
+    if new_tokens["account_id"] != real_tokens["account_id"]:
+        _log(
+            "chatgpt認証同期: account_idが一致しないためスキップ"
+            "（別アカウントへのなりすましの疑い）"
+        )
         return
     tmp = real_auth.with_name(real_auth.name + ".doci-tmp")
     tmp.write_bytes(new_bytes)
     os.chmod(tmp, 0o600)
     tmp.replace(real_auth)
+    _log("chatgpt認証同期: リフレッシュされたauth.jsonを実ホームへ反映しました")
 
 
 def _parse_codex_events(stdout: str) -> tuple[str, int]:

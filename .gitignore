@@ -30,3 +30,5 @@ tools/ffbin/
 .codex-doci/
 # CODEX_PROVIDER=chatgpt 用の隔離ホーム(実 ~/.codex の auth.json のコピーを含む)
 .codex-doci-chatgpt/
+# 実 auth.json の書き戻し前バックアップ(認証情報を含む)
+.codex-doci-chatgpt-backup/
