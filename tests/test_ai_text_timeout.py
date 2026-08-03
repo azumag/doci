@@ -509,7 +509,9 @@ class WriteTimeoutTest(unittest.TestCase):
             "prompt", "gpt-5.6-luna", timeout=17, min_web_fetches=0
         )
 
-    def test_codex_text_backend_omits_timeout_kwarg_when_unset(self) -> None:
+    def test_codex_text_backend_defaults_to_unlimited_timeout_when_unset(self) -> None:
+        # run_codexの既定timeout=600に暗黙で丸め込まれず、他バックエンド同様
+        # timeout未指定=無制限（timeout=Noneを明示）になることを確認する。
         with (
             mock.patch.object(config, "TEXT_BACKEND", "codex"),
             mock.patch.object(config, "CODEX_MODEL", "gpt-5.6-luna"),
@@ -517,7 +519,9 @@ class WriteTimeoutTest(unittest.TestCase):
         ):
             self.assertEqual(ai_text._dispatch("prompt"), "{}")
 
-        run_mock.assert_called_once_with("prompt", "gpt-5.6-luna", min_web_fetches=0)
+        run_mock.assert_called_once_with(
+            "prompt", "gpt-5.6-luna", timeout=None, min_web_fetches=0
+        )
 
     def test_legacy_claude_path_does_not_receive_opencode_model_default(self) -> None:
         with (

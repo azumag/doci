@@ -13,6 +13,11 @@ CONFIG_DIR = ROOT / "config"
 OUTPUT = ROOT / "output"
 # codex CLI 用の隔離ホーム。ユーザーの ~/.codex には一切触れない(ChatGPTログイン破壊事故を避けるため)。
 CODEX_HOME = ROOT / ".codex-doci"
+# CODEX_PROVIDER=chatgpt 用の隔離ホーム。実 ~/.codex の auth.json だけをコピーして使う
+# （プロジェクト一覧・MCP設定等の個人情報はコピーしない。露出面をトークン1件に絞る）。
+CODEX_CHATGPT_HOME = ROOT / ".codex-doci-chatgpt"
+# コピー元の実 ~/.codex。codex CLI 自身の解決規則(環境変数優先)に合わせる。
+CODEX_REAL_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
 def _load_dotenv(path: Path) -> None:
@@ -154,10 +159,12 @@ _FACTCHECK_BACKEND_EXPLICIT = bool(get("FACTCHECK_BACKEND"))
 # chatgpt(ユーザーの実 ~/.codex ChatGPT認証をそのまま使い、実OpenAIモデルを呼ぶ)。
 # chatgpt指定時も ~/.codex の設定ファイルは一切書き換えない（読むだけ）。
 CODEX_PROVIDER = get("CODEX_PROVIDER", "minimax")
-# codex実行時の reasoning effort（low/medium/high/xhigh/ultra/max等）の明示指定。
-# 空なら未指定（モデル/ユーザー既定に任せる）。
+# codex実行時の reasoning effort の明示指定。空なら未指定（モデル/ユーザー既定に任せる）。
 CODEX_REASONING_EFFORT = get("CODEX_REASONING_EFFORT", "")
 _SUPPORTED_CODEX_PROVIDERS = frozenset({"minimax", "chatgpt"})
+_SUPPORTED_CODEX_REASONING_EFFORTS = frozenset(
+    {"low", "medium", "high", "xhigh", "ultra", "max"}
+)
 
 _SUPPORTED_PIPELINE_BACKENDS = frozenset({"codex", "opencode", "opencode_go", "claude"})
 # TEXT_BACKENDは補助段と値の語彙が異なる（claude系は claude_cli/anthropic の2択）。
@@ -186,6 +193,14 @@ def validate_pipeline_backends() -> None:
         raise ValueError(
             f"未対応の CODEX_PROVIDER です: {CODEX_PROVIDER}"
             f"（対応値: {', '.join(sorted(_SUPPORTED_CODEX_PROVIDERS))}）"
+        )
+    if (
+        CODEX_REASONING_EFFORT
+        and CODEX_REASONING_EFFORT not in _SUPPORTED_CODEX_REASONING_EFFORTS
+    ):
+        raise ValueError(
+            f"未対応の CODEX_REASONING_EFFORT です: {CODEX_REASONING_EFFORT}"
+            f"（対応値: {', '.join(sorted(_SUPPORTED_CODEX_REASONING_EFFORTS))} または空文字）"
         )
 
 

@@ -28,3 +28,5 @@ tools/ffbin/
 *.egg-info/
 # codex exec 用の隔離ホーム(MiniMax APIキーを含む config.toml を生成する)
 .codex-doci/
+# CODEX_PROVIDER=chatgpt 用の隔離ホーム(実 ~/.codex の auth.json のコピーを含む)
+.codex-doci-chatgpt/

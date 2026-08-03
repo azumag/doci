@@ -5,15 +5,21 @@ Codex exec は明示設定時の経路。`claude -p ... --output-format json` �
 `run_codex` は config.CODEX_PROVIDER で接続先を切り替える:
 - minimax(既定): 隔離 CODEX_HOME 配下に MiniMax プロバイダの config.toml を毎回生成し、
   ユーザーの ~/.codex には一切触れない。
-- chatgpt: CODEX_HOME を上書きせず、ユーザーの実 ~/.codex（ChatGPT認証）をそのまま使う。
-  設定ファイルは書き換えない（読むだけ）。無人実行でも承認待ちで詰まらないよう
-  approval_policy 等は毎回 `-c` で明示上書きする。
+- chatgpt: 実 ~/.codex から auth.json だけをコピーした別の隔離 CODEX_HOME を使う。
+  無人実行はリサーチ/ファクトチェック段で外部Webページの内容をプロンプトに取り込むため、
+  実 ~/.codex をそのまま使うとプロンプトインジェクション経由でプロジェクト一覧・MCP設定
+  等の個人情報まで読まれ得る。認証情報1ファイルだけに絞って露出面を最小化する
+  （auth.json自体が読める点は実ChatGPT認証を使う要件上避けられない）。
+  設定ファイル(config.toml等)は書かない＝コピー元の実 ~/.codex には一切書き込まない。
+web fetch を要求しない呼び出し(min_web_fetches=0)ではサンドボックスのネットワークアクセス
+も無効化し、そもそも外部送信の経路自体を塞ぐ。
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -64,13 +70,13 @@ wire_api = "responses"
 _WEB_FETCH_RE = re.compile(r"curl|wget|https?://", re.IGNORECASE)
 
 
-def _ensure_codex_home(model: str) -> Path | None:
-    """CODEX_PROVIDER=minimax(既定)のときだけ隔離 CODEX_HOME を用意し、MiniMax 用
-    config.toml を毎回上書き生成する。chatgpt指定時は None を返し、呼び出し側が
-    CODEX_HOME を上書きしない（ユーザーの実 ~/.codex をそのまま使う）。
-    ユーザーの ~/.codex には一切書き込まない（ChatGPTログイン破壊事故を避けるため）。"""
-    if config.CODEX_PROVIDER != "minimax":
-        return None
+def _ensure_codex_home(model: str) -> Path:
+    """CODEX_PROVIDER に応じた隔離 CODEX_HOME を用意する。
+    minimax(既定): MiniMax 用 config.toml を毎回上書き生成する。
+    chatgpt: 実 ~/.codex の auth.json だけをコピーする（他の個人設定は持ち込まない）。
+    いずれも、ユーザーの実 ~/.codex には一切書き込まない。"""
+    if config.CODEX_PROVIDER == "chatgpt":
+        return _ensure_chatgpt_codex_home()
     if not config.MINIMAX_API_KEY:
         raise RuntimeError("MINIMAX_API_KEY が未設定です（codex/minimaxバックエンドには必須）")
     home = config.CODEX_HOME
@@ -84,6 +90,23 @@ def _ensure_codex_home(model: str) -> Path | None:
         encoding="utf-8",
     )
     os.chmod(cfg_path, 0o600)
+    return home
+
+
+def _ensure_chatgpt_codex_home() -> Path:
+    """実 ~/.codex の auth.json だけをコピーした隔離 CODEX_HOME を返す。
+    コピー元(config.CODEX_REAL_HOME)には一切書き込まない。"""
+    real_auth = config.CODEX_REAL_HOME / "auth.json"
+    if not real_auth.exists():
+        raise RuntimeError(
+            f"{real_auth} が見つかりません。`codex login` でChatGPT認証を済ませてください"
+            "（CODEX_PROVIDER=chatgpt には実 ~/.codex の認証が必須です）"
+        )
+    home = config.CODEX_CHATGPT_HOME
+    home.mkdir(parents=True, exist_ok=True)
+    dest = home / "auth.json"
+    shutil.copy(real_auth, dest)
+    os.chmod(dest, 0o600)
     return home
 
 
@@ -119,16 +142,18 @@ def _parse_codex_events(stdout: str) -> tuple[str, int]:
 def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetches: int = 1) -> str:
     """codex exec (--json) をヘッドレスで実行し、最終 agent_message の text を返す。
 
-    config.CODEX_PROVIDER=minimax(既定)なら隔離 CODEX_HOME(config.CODEX_HOME)を毎回
-    用意して実行する（ユーザーの ~/.codex は不使用）。chatgpt指定時はユーザーの実
-    ~/.codex(ChatGPT認証)をそのまま使う。approval_policy等は無人実行が承認待ちで
-    詰まらないよう毎回 `-c` で明示上書きする（対話用 config.toml の値に依存しない）。
+    隔離 CODEX_HOME を毎回用意して実行する（ユーザーの実 ~/.codex には一切書き込まない。
+    chatgptプロバイダの詳細は _ensure_chatgpt_codex_home を参照）。approval_policy等は
+    無人実行が承認待ちで詰まらないよう毎回 `-c` で明示上書きする（対話用 config.toml の
+    値に依存しない）。min_web_fetches=0（web取得を要求しない呼び出し）ではサンドボックスの
+    ネットワークアクセスも無効化し、外部送信の経路自体を塞ぐ。
     web fetch(curl/wget/URL実行)が min_web_fetches 未満なら「検索したフリ」とみなし ValueError
     にする（呼び出し側の既存リトライ/劣化継続に乗せる）。
     """
     home = _ensure_codex_home(model)
     scratch = config.OUTPUT / "codex-scratch"
     scratch.mkdir(parents=True, exist_ok=True)
+    network_access = "true" if min_web_fetches > 0 else "false"
     cmd = [
         config.CODEX_BIN,
         "exec",
@@ -140,14 +165,13 @@ def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetche
         "-c",
         "sandbox_mode=workspace-write",
         "-c",
-        "sandbox_workspace_write.network_access=true",
+        f"sandbox_workspace_write.network_access={network_access}",
     ]
     if config.CODEX_REASONING_EFFORT:
         cmd += ["-c", f"model_reasoning_effort={config.CODEX_REASONING_EFFORT}"]
     cmd += ["-m", model, "-"]
-    env = dict(os.environ)
-    if home is not None:
-        env["CODEX_HOME"] = str(home)
+    env = {**os.environ, "CODEX_HOME": str(home)}
+    if config.CODEX_PROVIDER == "minimax":
         env["DOCI_MINIMAX_AUTHORIZATION"] = f"Bearer {config.MINIMAX_API_KEY}"
     proc = subprocess.run(
         cmd,

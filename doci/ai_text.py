@@ -630,8 +630,12 @@ def _dispatch(prompt: str, timeout: int | float | None = None) -> str:
         )
     if backend == "codex":
         # 本文生成はWeb取得を必須にしない（plan/chart_bg段と同じ扱い）。
+        # timeout未指定＝無制限は他バックエンド(claude_cli等)と揃える。
+        # run_codexの既定timeout=600に暗黙で丸め込まない。
         if timeout is None:
-            return llm.run_codex(prompt, config.CODEX_MODEL, min_web_fetches=0)
+            return llm.run_codex(
+                prompt, config.CODEX_MODEL, timeout=None, min_web_fetches=0
+            )
         return llm.run_codex(
             prompt, config.CODEX_MODEL, timeout=timeout, min_web_fetches=0
         )
