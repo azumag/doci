@@ -945,7 +945,10 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
         year_months = _title_year_months(title)
         if year_months:
             def _fact_matches(year: str, month: str | None, fact: dict) -> bool:
-                effective = str(fact["effective_date"])
+                # current_as_ofはeffective_dateキー自体が無いことがあるため
+                # (issue #57レビュー指摘: KeyErrorでデイリー実行全体が停止し得た)
+                # .get()で安全に読む。
+                effective = str(fact.get("effective_date") or "")
                 if effective[:4] != year:
                     return False
                 if month is None:

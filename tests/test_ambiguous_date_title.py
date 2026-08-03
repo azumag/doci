@@ -191,6 +191,22 @@ class CheckAmbiguousDateTitleTest(unittest.TestCase):
         )
         self.assertTrue(result["supported"])
 
+    def test_current_as_of_fact_missing_effective_date_key_does_not_raise(self) -> None:
+        # レビュー指摘: current_as_ofはeffective_dateキー自体が無いことがあり
+        # (research.pyの正規化を経ない任意の呼び出し元を想定)、タイトルに
+        # 年が含まれると_fact_matchesの直接添字アクセスでKeyErrorになり得た。
+        fact = {
+            "claim": "テスト用の事実",
+            "source_url": "https://support.google.com/youtube/answer/x",
+            "date_role": "current_as_of",
+            "verified_at": "2026-08-03",
+        }
+        result = ai_text.check_ambiguous_date_title(
+            "2025年最新版アルゴリズム解説", [fact]
+        )
+        self.assertIsNotNone(result)
+        self.assertFalse(result["supported"])
+
     def test_year_matching_latest_still_requires_current_as_of(self) -> None:
         # レビュー指摘: 年月が一致していても「最新」の裏付け(current_as_of)が
         # 無ければ、年一致だけでsupported=Trueにしてはいけない。
