@@ -223,6 +223,26 @@ performance_eval_window_hours = -1
         ):
             channel.load("sample", channels_dir=self.channels_dir)
 
+    def test_performance_eval_window_hours_requires_performance_feedback(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_eval_window_hours = 72
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_feedback"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
     def test_performance_eval_window_hours_defaults_to_disabled(self) -> None:
         self._write_channel()
         with patch.object(config, "OUTPUT", self.root / "output"):

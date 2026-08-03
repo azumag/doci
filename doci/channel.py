@@ -640,6 +640,11 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         raise ChannelConfigError(
             "pipeline.performance_eval_window_hours must be a non-negative integer"
         )
+    if performance_eval_window_hours and not performance_feedback:
+        raise ChannelConfigError(
+            "pipeline.performance_eval_window_hours requires "
+            "pipeline.performance_feedback = true"
+        )
     performance_gated_publish = pipeline.get("performance_gated_publish")
     if performance_gated_publish is not None and not isinstance(
         performance_gated_publish, bool

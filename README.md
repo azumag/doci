@@ -262,7 +262,8 @@ YouTube Analytics APIを有効化したうえで追加scopeが必要。明示的
 `python -m doci.performance --sync --channel <id> --corner <key>` でreadbackと判断根拠を
 確認できる。仮説は同一corner・同一尺・同一tierの最低8本を比較し、1回に1形式だけを
 YouTube投稿成功1本へ適用する。その動画が評価閾値に届くまで同じcornerの次実験は待機する。
-`pipeline.performance_eval_window_hours`（既定0＝無効）を設定したチャンネルは、閾値
+`pipeline.performance_eval_window_hours`（既定0＝無効、`performance_feedback = true`
+必須。設定時に無ければ`ChannelConfigError`）を設定したチャンネルは、閾値
 到達だけで評価完了とせず、適用時刻からこの時間が経過するまで同じcornerの次実験生成を
 `PerformanceEvalWindowSkip`として通常スキップする（初動データが育つ前に次の実験が
 投稿されるのを防ぐ、issue #38）。`youtube-growth`は72時間を設定している。
