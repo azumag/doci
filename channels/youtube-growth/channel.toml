@@ -70,4 +70,5 @@ performance_feedback = true
 title_pattern_check = true
 narration_opening_guard = true
 narration_pattern_check = true
+ambiguous_date_title_check = true
 max_uploads_per_day = 1

@@ -845,7 +845,18 @@ class ResearchPromptTest(unittest.TestCase):
 
         run_mock.assert_called_once()
         self.assertIsNotNone(result)
-        self.assertEqual(result["facts"], [{"claim": "確認済み", "source_url": source_url}])
+        fact = result["facts"][0]
+        verified_at = fact.pop("verified_at")
+        self.assertRegex(verified_at, r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(
+            fact,
+            {
+                "claim": "確認済み",
+                "source_url": source_url,
+                "effective_date": "",
+                "date_role": "none",
+            },
+        )
 
     def test_wikipedia_background_only_is_not_used_as_primary_fact_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -926,7 +937,18 @@ class ResearchPromptTest(unittest.TestCase):
                 allowed_source_urls={research._normalized_source_url(allowed_url)},
             )
 
-        self.assertEqual(result["facts"], [{"claim": "取得済み", "source_url": allowed_url}])
+        fact = result["facts"][0]
+        verified_at = fact.pop("verified_at")
+        self.assertRegex(verified_at, r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(
+            fact,
+            {
+                "claim": "取得済み",
+                "source_url": allowed_url,
+                "effective_date": "",
+                "date_role": "none",
+            },
+        )
 
     def test_opencode_go_rejects_when_all_fact_urls_are_unretrieved(self) -> None:
         raw = json.dumps(

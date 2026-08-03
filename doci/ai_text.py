@@ -863,6 +863,155 @@ def check_narration_opening_pattern_duplicate(
     }
 
 
+_AMBIGUOUS_DATE_TITLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("year", re.compile(r"20\d{2}年(?:\s*\d{1,2}月)?")),
+    ("month_revision", re.compile(r"\d{1,2}月\s*改[訂定]")),
+    ("revision", re.compile(r"改[訂定]版?")),
+    ("latest", re.compile(r"最新版?")),
+)
+_DATE_ROLE_CURRENT_AS_OF = "current_as_of"
+_DATE_ROLES = {"historical_event", _DATE_ROLE_CURRENT_AS_OF, "deadline"}
+# 年抽出は検出パターンの"year"(20\d{2}年)と同じ厳格さで揃える。裸の4桁数値
+# ("登録者2000人"等)を年と誤認しないよう、"年"を必須にする(issue #57レビュー指摘)。
+_TITLE_YEAR_MONTH_RE = re.compile(r"(20\d{2})年(?:\s*(\d{1,2})月)?")
+
+
+def _title_year_months(title: str) -> list[tuple[str, str | None]]:
+    return [
+        (m.group(1), m.group(2).zfill(2) if m.group(2) else None)
+        for m in _TITLE_YEAR_MONTH_RE.finditer(title)
+    ]
+
+
+def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | None:
+    """タイトル内の過去年月・「改訂」「最新」表現を、企画データの日付根拠と突き合わせる(issue #57)。
+
+    LLMを使わない正規表現ベースの判定（対象が機械的に検出できるパターンのため）。
+    生成をブロックせず検出・記録のみに使う（check_title_pattern_duplicateと同じ運用）。
+
+    戻り値: 該当表現が無ければ None。あれば {"matched_patterns", "matched_texts",
+    "supported", "missing", "reason"} を持つ dict。supported=False は公開前の
+    確認対象（日付の役割・確認日・出典のいずれかが企画データに揃っていない、
+    またはタイトルの年が変更日ではなく確認日にしか対応しない=取り違えの疑い）。
+    """
+    matched: list[tuple[str, str]] = []
+    for name, pattern in _AMBIGUOUS_DATE_TITLE_PATTERNS:
+        m = pattern.search(title)
+        if m:
+            matched.append((name, m.group(0)))
+    if not matched:
+        return None
+
+    def _is_dated_fact(f: object) -> bool:
+        if not isinstance(f, dict):
+            return False
+        date_role = str(f.get("date_role") or "").strip()
+        if date_role not in _DATE_ROLES:
+            return False
+        if not str(f.get("verified_at") or "").strip():
+            return False
+        if not str(f.get("source_url") or "").strip():
+            return False
+        # current_as_ofは「変更日不明でも現在有効と確認した」ケースのため
+        # effective_dateを必須にしない(research.pyのプロンプトも不明時は
+        # 空文字のままにする指示のため、常に付くとは限らない)。
+        if date_role != _DATE_ROLE_CURRENT_AS_OF and not str(
+            f.get("effective_date") or ""
+        ).strip():
+            return False
+        return True
+
+    dated_facts = [f for f in (facts or []) if _is_dated_fact(f)]
+
+    matched_pattern_names = {name for name, _ in matched}
+    # "最新"は年月の裏付けとは別に「現在も有効」という主張そのものなので、
+    # 年月が一致していてもcurrent_as_ofが無ければ根拠不十分とする
+    # (レビュー指摘: 「2025年最新」のように年月とfreshness語が併記される
+    # 主要ケースで、年一致だけでは"最新"の裏付けにならない)。
+    # "改訂"は変更が起きた時点を述べるだけで「現在有効」の主張ではなく、
+    # その曖昧さ(制度の改訂日か動画自体の改訂日か)は年月一致で解消できる
+    # ため、current_as_of の追加要求はしない。
+    requires_freshness_confirmation = "latest" in matched_pattern_names
+
+    missing: list[str] = []
+    if not dated_facts:
+        missing = ["effective_date", "date_role", "verified_at", "source_url"]
+        supported = False
+        reason = "企画データに日付根拠(effective_date/date_role/verified_at/source_url)がありません"
+    else:
+        has_current_as_of = any(
+            f["date_role"] == _DATE_ROLE_CURRENT_AS_OF for f in dated_facts
+        )
+        year_months = _title_year_months(title)
+        if year_months:
+            def _fact_matches(year: str, month: str | None, fact: dict) -> bool:
+                # current_as_ofはeffective_dateキー自体が無いことがあるため
+                # (issue #57レビュー指摘: KeyErrorでデイリー実行全体が停止し得た)
+                # .get()で安全に読む。
+                effective = str(fact.get("effective_date") or "")
+                if effective[:4] != year:
+                    return False
+                if month is None:
+                    return True
+                fact_month = effective[5:7] if len(effective) >= 7 else None
+                # factが年粒度までしか記録していない場合、月の矛盾は確認できない
+                # ため年一致のみで根拠として認める(記録されている粒度が限界)。
+                return fact_month is None or fact_month == month
+
+            matched_ok = any(
+                _fact_matches(year, month, f)
+                for year, month in year_months
+                for f in dated_facts
+            )
+            matched_verified_only = any(
+                str(f["verified_at"])[:4] == year
+                for year, _ in year_months
+                for f in dated_facts
+            )
+            if matched_ok and requires_freshness_confirmation and not has_current_as_of:
+                supported = False
+                reason = "「現在も有効」を裏付けるcurrent_as_ofの日付根拠がありません"
+                missing = ["date_role"]
+            elif matched_ok:
+                supported, reason = True, ""
+            elif matched_verified_only:
+                supported = False
+                reason = (
+                    "タイトルの年が変更日(effective_date)ではなく"
+                    "確認日(verified_at)にしか対応していません"
+                )
+                missing = ["effective_date"]
+            else:
+                supported = False
+                reason = "タイトルの年月と一致するeffective_dateがありません"
+                missing = ["effective_date"]
+        elif requires_freshness_confirmation:
+            # 年を伴わない「最新」表現。年月で裏付けようがないため
+            # current_as_ofの有無だけで判定する。
+            supported = has_current_as_of
+            reason = (
+                ""
+                if supported
+                else "「現在も有効」を裏付けるcurrent_as_ofの日付根拠がありません"
+            )
+            if not supported:
+                missing = ["date_role"]
+        else:
+            # 年を伴わない「改訂」表現(例: "7月改訂"に対応する年が本文に無い)は
+            # 変更時点を述べるだけで「現在有効」の主張ではないためcurrent_as_of
+            # を要求しない。年が無く月だけでは照合しようがないため、出典・
+            # 確認日を備えた日付根拠(dated_facts)が存在すること自体で足りるとする。
+            supported, reason = True, ""
+
+    return {
+        "matched_patterns": [name for name, _ in matched],
+        "matched_texts": [text for _, text in matched],
+        "supported": supported,
+        "missing": missing,
+        "reason": reason,
+    }
+
+
 def _validate(script: dict) -> dict:
     for k in REQUIRED_KEYS:
         if k not in script:
