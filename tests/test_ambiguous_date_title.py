@@ -180,6 +180,22 @@ class CheckAmbiguousDateTitleTest(unittest.TestCase):
         )
         self.assertTrue(supported["supported"])
 
+    def test_yearless_revision_does_not_require_current_as_of(self) -> None:
+        # レビュー指摘: 年を伴わない「改訂」表現(例: "7月改訂")にも
+        # current_as_ofを要求してしまうと、design意図(改訂は変更時点を
+        # 述べるだけで現在有効の主張ではない)と矛盾し恒常的な偽陽性になる。
+        result = ai_text.check_ambiguous_date_title(
+            "7月改訂の収益化ルールまとめ",
+            [
+                _fact(
+                    effective_date="2025-07-01",
+                    date_role="historical_event",
+                    verified_at="2026-08-03",
+                )
+            ],
+        )
+        self.assertTrue(result["supported"])
+
     def test_current_as_of_without_effective_date_is_still_valid_evidence(self) -> None:
         # レビュー指摘: current_as_ofは変更日不明でも成立する役割
         # (research.pyのプロンプトも不明時はeffective_dateを空文字のままにする

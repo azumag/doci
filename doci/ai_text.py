@@ -985,7 +985,9 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
                 supported = False
                 reason = "タイトルの年月と一致するeffective_dateがありません"
                 missing = ["effective_date"]
-        else:
+        elif requires_freshness_confirmation:
+            # 年を伴わない「最新」表現。年月で裏付けようがないため
+            # current_as_ofの有無だけで判定する。
             supported = has_current_as_of
             reason = (
                 ""
@@ -994,6 +996,12 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
             )
             if not supported:
                 missing = ["date_role"]
+        else:
+            # 年を伴わない「改訂」表現(例: "7月改訂"に対応する年が本文に無い)は
+            # 変更時点を述べるだけで「現在有効」の主張ではないためcurrent_as_of
+            # を要求しない。年が無く月だけでは照合しようがないため、出典・
+            # 確認日を備えた日付根拠(dated_facts)が存在すること自体で足りるとする。
+            supported, reason = True, ""
 
     return {
         "matched_patterns": [name for name, _ in matched],
