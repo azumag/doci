@@ -7,6 +7,7 @@ from urllib.parse import unquote
 from pathlib import Path
 from unittest import mock
 
+from doci import channel as channel_mod
 from doci import config, research
 from doci.channel import CornerSpec
 
@@ -1063,6 +1064,42 @@ class ResearchPromptTest(unittest.TestCase):
 
         self.assertIsNone(result)
         search_mock.assert_not_called()
+
+    def test_youtube_growth_channel_keeps_heuristic_without_override(self) -> None:
+        # youtube-growthはpipeline.research_requires_youtube_case_studiesを
+        # 設定していないため、#81の修正後も既存のキーワード推定(_needs_youtube_case_studies)
+        # で従来通りフェイルクローズし続けること。
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["shorts"]
+        with (
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            mock.patch.object(research, "_youtube_video_candidates", return_value=[]),
+            mock.patch.object(
+                research, "_search_reference_materials"
+            ) as search_mock,
+        ):
+            result = research.web_research(corner, [], spec)
+
+        self.assertIsNone(result)
+        search_mock.assert_not_called()
+
+    def test_pipeline_override_disables_heuristic_for_ideology_channel(self) -> None:
+        # issue #81: ideologyの「ショート動画用」という一般的な文言が
+        # YouTube運用系向けの厳格な出典検証(_needs_youtube_case_studies)に
+        # 誤って引っかかっていた。channel.tomlのpipeline.research_requires_youtube_case_studies
+        # = false により、実取得候補0件でも安全側フェイルクローズせず通常のWeb検索に進むこと。
+        spec = channel_mod.load("ideology")
+        corner = spec.corners["communism"]
+        with (
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            mock.patch.object(research, "_youtube_video_candidates", return_value=[]),
+            mock.patch.object(
+                research, "_search_reference_materials", return_value=[]
+            ) as search_mock,
+        ):
+            research.web_research(corner, [], spec)
+
+        search_mock.assert_called_once()
 
     def test_explicit_legacy_claude_research_uses_auxiliary_default_model(self) -> None:
         raw = json.dumps(

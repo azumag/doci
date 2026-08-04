@@ -1176,6 +1176,7 @@ def _is_official_youtube_source(url: str) -> bool:
 
 
 def _needs_youtube_case_studies(channel_guidance: str) -> bool:
+    # 誤検知しうる推定フォールバック。pipeline.research_requires_youtube_case_studies明示時はそちらが優先(web_research参照)。
     guidance = channel_guidance.casefold()
     return "youtube" in guidance or "ショート" in channel_guidance
 
@@ -1248,11 +1249,17 @@ def web_research(
         except OSError:
             continue
     channel_guidance = "\n\n".join(guidance_parts) or "（追加方針なし）"
-    needs_youtube_examples = (
-        _needs_youtube_case_studies(channel_guidance)
-        if require_youtube_examples is None
-        else require_youtube_examples
+    pipeline_override = (
+        spec.pipeline_get("research_requires_youtube_case_studies")
+        if spec is not None
+        else None
     )
+    if require_youtube_examples is not None:
+        needs_youtube_examples = require_youtube_examples
+    elif pipeline_override is not None:
+        needs_youtube_examples = pipeline_override
+    else:
+        needs_youtube_examples = _needs_youtube_case_studies(channel_guidance)
     video_candidates = _youtube_video_candidates(
         spec, corner, needs_youtube_examples
     )

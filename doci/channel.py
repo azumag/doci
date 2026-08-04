@@ -170,6 +170,7 @@ _PIPELINE_KEYS = {
     "asset_media",
     "topic_cooldown_days",
     "performance_feedback",
+    "research_requires_youtube_case_studies",
     "title_pattern_check",
     "narration_opening_guard",
     "narration_pattern_check",
@@ -597,6 +598,15 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     performance_feedback = pipeline.get("performance_feedback")
     if performance_feedback is not None and not isinstance(performance_feedback, bool):
         raise ChannelConfigError("pipeline.performance_feedback must be a boolean")
+    research_requires_youtube_case_studies = pipeline.get(
+        "research_requires_youtube_case_studies"
+    )
+    if research_requires_youtube_case_studies is not None and not isinstance(
+        research_requires_youtube_case_studies, bool
+    ):
+        raise ChannelConfigError(
+            "pipeline.research_requires_youtube_case_studies must be a boolean"
+        )
     title_pattern_check = pipeline.get("title_pattern_check")
     if title_pattern_check is not None and not isinstance(title_pattern_check, bool):
         raise ChannelConfigError("pipeline.title_pattern_check must be a boolean")
