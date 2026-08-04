@@ -11,11 +11,16 @@ PROJ="${0:A:h:h}"
 #  - node: nvm(内蔵) を homebrew より前に。バージョンは固定パス指定だとnvmの
 #    バージョン更新(旧バージョン削除)で無言のPATH欠落を起こす(2026-08-04に
 #    v23.10.0固定指定のままv24.18.0へ更新されてcodexが見つからなくなった実績あり)ため、
-#    インストール済みの最新バージョンを都度解決する。
+#    インストール済みの最新バージョンを都度解決する。解決はPATHサニタイズより前に
+#    行うため、外部コマンド(ls/sort/tail等)は使わずzshのglob修飾子だけで完結させる
+#    （継承PATH経由で外付けボリュームのls/sort/tailを起動してdyldが固まる事態を
+#    避けるため。launchdの既定PATHは/usr/bin等のみで実害はないが、開発者が
+#    homebrew優先PATHの対話シェルから手動実行した場合に備える）。
 #  - python: 下記 .venv-cron(uv管理standalone・内蔵)
 #  - opencode/codex/orb/Chrome は元から内蔵
 # /opt/homebrew(外付け) は最後＝フォールバックのみ（基本使わせない）。
-NVM_NODE_BIN=$(ls -d /Users/azumag/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)
+nvm_node_bins=(/Users/azumag/.nvm/versions/node/*/bin(N/on[-1]))
+NVM_NODE_BIN="${nvm_node_bins[1]}"
 export PATH="$PROJ/tools/ffbin:${NVM_NODE_BIN:-/Users/azumag/.nvm/versions/node/v24.18.0/bin}:/Users/azumag/.local/bin:/Users/azumag/.opencode/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 
 RUN_NAME="default"
