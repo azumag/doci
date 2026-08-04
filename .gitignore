@@ -32,3 +32,5 @@ tools/ffbin/
 .codex-doci-chatgpt/
 # 実 auth.json の書き戻し前バックアップ(認証情報を含む)
 .codex-doci-chatgpt-backup/
+# CODEX_PROVIDER=chatgpt 隔離ホームの同時アクセス防止ロック
+.codex-doci-chatgpt.lock

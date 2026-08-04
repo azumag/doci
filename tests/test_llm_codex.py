@@ -167,6 +167,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
             ):
                 home = _ensure_chatgpt_codex_home()
@@ -197,6 +198,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
             ):
                 _ensure_chatgpt_codex_home()
@@ -221,6 +223,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
             ):
                 _ensure_chatgpt_codex_home()  # 1回目: 正常な状態をバックアップ
@@ -246,6 +249,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
             ):
                 _ensure_chatgpt_codex_home()
@@ -281,6 +285,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
             ):
                 _ensure_chatgpt_codex_home()
@@ -294,6 +299,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "codex login"):
@@ -319,6 +325,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
             ):
                 _ensure_chatgpt_codex_home()
@@ -485,6 +492,7 @@ class SyncRefreshedChatgptAuthTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
             ):
                 llm._ensure_chatgpt_codex_home()  # スナップショットを記録
@@ -523,6 +531,7 @@ class SyncRefreshedChatgptAuthTest(unittest.TestCase):
             with (
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
             ):
                 llm._ensure_chatgpt_codex_home()
@@ -563,6 +572,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "MINIMAX_API_KEY", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
             ):
                 home = _ensure_codex_home("gpt-5.6-luna")
@@ -593,6 +603,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(
@@ -619,6 +630,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "MINIMAX_API_KEY", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(
@@ -639,6 +651,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", "max"),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(
@@ -740,6 +753,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(llm.subprocess, "run") as run_mock,
@@ -764,6 +778,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(
@@ -817,6 +832,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(llm.subprocess, "run", side_effect=fake_run),
@@ -850,6 +866,7 @@ class CodexDualProviderTest(unittest.TestCase):
                 mock.patch.object(config, "CODEX_REASONING_EFFORT", ""),
                 mock.patch.object(config, "CODEX_REAL_HOME", real_home),
                 mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", Path(tmp) / "chatgpt-home.lock"),
                 mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", Path(tmp) / "backup-auth.json"),
                 mock.patch.object(config, "OUTPUT", Path(tmp)),
                 mock.patch.object(llm.subprocess, "run", side_effect=fake_run),
@@ -877,6 +894,128 @@ class CodexReasoningEffortValidationTest(unittest.TestCase):
             with self.subTest(value=value):
                 with mock.patch.object(config, "CODEX_REASONING_EFFORT", value):
                     config.validate_pipeline_backends()
+
+
+class ChatgptUntrustedWebLoadTimeValidationTest(unittest.TestCase):
+    def test_research_backend_codex_without_opt_in_fails_at_load_time(self) -> None:
+        # .env.exampleの一括切替ブロックをそのまま使うとこの組み合わせを踏む。
+        # run_codex()実行時ではなく設定読込時に気づけなければならない。
+        with (
+            mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"),
+            mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False),
+            mock.patch.object(config, "RESEARCH_BACKEND", "codex"),
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB"
+            ):
+                config.validate_pipeline_backends()
+
+    def test_factcheck_backend_codex_without_opt_in_fails_at_load_time(self) -> None:
+        with (
+            mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"),
+            mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False),
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            mock.patch.object(config, "FACTCHECK_BACKEND", "codex"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB"
+            ):
+                config.validate_pipeline_backends()
+
+    def test_passes_with_explicit_opt_in(self) -> None:
+        with (
+            mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"),
+            mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", True),
+            mock.patch.object(config, "RESEARCH_BACKEND", "codex"),
+            mock.patch.object(config, "FACTCHECK_BACKEND", "codex"),
+        ):
+            config.validate_pipeline_backends()
+
+    def test_passes_when_provider_is_minimax(self) -> None:
+        with (
+            mock.patch.object(config, "CODEX_PROVIDER", "minimax"),
+            mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False),
+            mock.patch.object(config, "RESEARCH_BACKEND", "codex"),
+            mock.patch.object(config, "FACTCHECK_BACKEND", "codex"),
+        ):
+            config.validate_pipeline_backends()
+
+    def test_passes_when_neither_backend_is_codex(self) -> None:
+        with (
+            mock.patch.object(config, "CODEX_PROVIDER", "chatgpt"),
+            mock.patch.object(config, "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False),
+            mock.patch.object(config, "RESEARCH_BACKEND", "opencode_go"),
+            mock.patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+        ):
+            config.validate_pipeline_backends()
+
+
+class ChatgptSecretPermissionsTest(unittest.TestCase):
+    def test_copied_auth_and_directories_are_created_private(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text(
+                _auth_json(account_id="acct-1", access_token="x"), encoding="utf-8"
+            )
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            backup = Path(tmp) / "backup-dir" / "auth.json"
+
+            with (
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
+            ):
+                _ensure_chatgpt_codex_home()
+
+            self.assertEqual(oct(chatgpt_home.stat().st_mode)[-3:], "700")
+            self.assertEqual(
+                oct((chatgpt_home / "auth.json").stat().st_mode)[-3:], "600"
+            )
+            self.assertEqual(oct(backup.parent.stat().st_mode)[-3:], "700")
+            self.assertEqual(oct(backup.stat().st_mode)[-3:], "600")
+
+    def test_minimax_config_toml_and_home_are_created_private(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex-home"
+            with (
+                mock.patch.object(config, "CODEX_HOME", codex_home),
+                mock.patch.object(config, "MINIMAX_API_KEY", "secret"),
+            ):
+                _ensure_codex_home("MiniMax-M3")
+
+            self.assertEqual(oct(codex_home.stat().st_mode)[-3:], "700")
+            self.assertEqual(
+                oct((codex_home / "config.toml").stat().st_mode)[-3:], "600"
+            )
+
+
+class ChatgptHomeLockTest(unittest.TestCase):
+    def test_lock_is_released_after_use_and_reacquirable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "chatgpt-home.lock"
+            with mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", lock_path):
+                with llm._chatgpt_home_lock():
+                    pass
+                with llm._chatgpt_home_lock():
+                    pass
+
+    def test_second_holder_times_out_while_first_holds_the_lock(self) -> None:
+        # 複数チャンネルのcronジョブが並行してCODEX_PROVIDER=chatgptを使う状況を
+        # 模す。先行側が保持している間、後発側は待ち続けた末にタイムアウトする
+        # （固定パスの隔離ホームをrmtreeで壊し合うのを防ぐのが目的）。
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "chatgpt-home.lock"
+            with (
+                mock.patch.object(config, "CODEX_CHATGPT_HOME_LOCK", lock_path),
+                mock.patch.object(llm, "_CHATGPT_HOME_LOCK_TIMEOUT_SECONDS", 0.3),
+                mock.patch.object(llm, "_CHATGPT_HOME_LOCK_RETRY_SECONDS", 0.05),
+            ):
+                with llm._chatgpt_home_lock():
+                    with self.assertRaisesRegex(RuntimeError, "隔離ホームlock"):
+                        with llm._chatgpt_home_lock():
+                            pass
 
 
 if __name__ == "__main__":

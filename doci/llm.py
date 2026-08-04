@@ -27,11 +27,14 @@ auth.json書き戻し前の検証(account_id一致)は別アカウントへの�
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import config
@@ -81,6 +84,23 @@ wire_api = "responses"
 _WEB_FETCH_RE = re.compile(r"curl|wget|https?://", re.IGNORECASE)
 
 
+def _write_secret_bytes(path: Path, data: bytes) -> None:
+    """0600で新規作成/上書きしてから書き込む。write→os.chmodの順序だと、umaskが
+    緩い環境(既定0o022ならファイルは0o644で作られる)で作成直後からchmodまでの間、
+    他ローカルユーザーから読める窓ができてしまう。os.openでモードを最初から
+    指定すれば、umaskはモードを緩める方向には働かないため確実に0600以下になる。"""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as file:
+        file.write(data)
+
+
+def _mkdir_private(path: Path) -> None:
+    """0700で作成する（既存ならそのまま）。同じ理由でumaskに緩められない
+    よう明示的に指定する。中身のファイルへの到達をディレクトリ実行権限の
+    レベルでも塞ぐ。"""
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+
+
 def _ensure_codex_home(model: str) -> Path:
     """CODEX_PROVIDER に応じた隔離 CODEX_HOME を用意する。
     minimax(既定): MiniMax 用 config.toml を毎回上書き生成する。
@@ -91,16 +111,15 @@ def _ensure_codex_home(model: str) -> Path:
     if not config.MINIMAX_API_KEY:
         raise RuntimeError("MINIMAX_API_KEY が未設定です（codex/minimaxバックエンドには必須）")
     home = config.CODEX_HOME
-    home.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(home)
     cfg_path = home / "config.toml"
-    cfg_path.write_text(
+    _write_secret_bytes(
+        cfg_path,
         _CODEX_CONFIG_TOML.format(
             model=model,
             base_url=config.CODEX_MINIMAX_BASE_URL,
-        ),
-        encoding="utf-8",
+        ).encode("utf-8"),
     )
-    os.chmod(cfg_path, 0o600)
     return home
 
 
@@ -148,18 +167,16 @@ def _ensure_chatgpt_codex_home() -> Path:
     backup = config.CODEX_CHATGPT_AUTH_BACKUP
     if not backup.exists():
         if _auth_tokens(current_bytes) is not None:
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            backup.write_bytes(current_bytes)
-            os.chmod(backup, 0o600)
+            _mkdir_private(backup.parent)
+            _write_secret_bytes(backup, current_bytes)
         else:
             _log("chatgptバックアップ: 実auth.jsonが不正な形式のため作成をスキップ")
     home = config.CODEX_CHATGPT_HOME
     if home.exists():
         shutil.rmtree(home)
-    home.mkdir(parents=True)
+    _mkdir_private(home)
     dest = home / "auth.json"
-    dest.write_bytes(current_bytes)
-    os.chmod(dest, 0o600)
+    _write_secret_bytes(dest, current_bytes)
     return home
 
 
@@ -254,8 +271,7 @@ def _sync_refreshed_chatgpt_auth(home: Path) -> None:
         )
         return
     tmp = real_auth.with_name(real_auth.name + ".doci-tmp")
-    tmp.write_bytes(new_bytes)
-    os.chmod(tmp, 0o600)
+    _write_secret_bytes(tmp, new_bytes)
     tmp.replace(real_auth)
     _log("chatgpt認証同期: リフレッシュされたauth.jsonを実ホームへ反映しました")
 
@@ -289,6 +305,42 @@ def _parse_codex_events(stdout: str) -> tuple[str, int]:
     return last_message, fetch_count
 
 
+_CHATGPT_HOME_LOCK_TIMEOUT_SECONDS = 3600.0
+_CHATGPT_HOME_LOCK_RETRY_SECONDS = 1.0
+
+
+@contextmanager
+def _chatgpt_home_lock():
+    """config.CODEX_CHATGPT_HOME(固定パス)への同時アクセスを直列化する。
+    TEXT_BACKEND=codexはtimeout=None(無制限)になり得るため、複数チャンネルの
+    cronジョブが並行してCODEX_PROVIDER=chatgptを使うと、後発プロセスの
+    _ensure_chatgpt_codex_home が先行プロセスの実行中ホーム(auth.json含む)を
+    rmtreeで破壊したり、両者の _sync_refreshed_chatgpt_auth が混線したりしうる。
+    ロック保持中は隔離ホームの用意〜認証同期までを1プロセスに限定する。
+    タイムアウトは通常の生成時間を十分に超える値にし、ロック保持者が異常終了
+    した場合等の最終的なフェイルセーフとしてのみ働かせる。"""
+    lock_path = config.CODEX_CHATGPT_HOME_LOCK
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + _CHATGPT_HOME_LOCK_TIMEOUT_SECONDS
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        while True:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "CODEX_PROVIDER=chatgpt の隔離ホームlockを"
+                        f"{_CHATGPT_HOME_LOCK_TIMEOUT_SECONDS:g}秒以内に取得できません"
+                        "（他のdociプロセスが使用中の可能性があります）"
+                    )
+                time.sleep(_CHATGPT_HOME_LOCK_RETRY_SECONDS)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetches: int = 1) -> str:
     """codex exec (--json) をヘッドレスで実行し、最終 agent_message の text を返す。
 
@@ -304,6 +356,10 @@ def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetche
     取り込む呼び出し）を既定で拒否する。ネットワーク有効サンドボックス内に実ChatGPT
     認証(auth.json)が置かれるため、プロンプトインジェクション経由でトークンを外部送信
     される経路になり得る。CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB=1で明示許可した場合のみ通す。
+
+    chatgptプロバイダは固定パスの隔離ホームを毎回作り直すため、複数チャンネルの
+    並行実行と衝突しないよう _chatgpt_home_lock で1プロセスに直列化する
+    （詳細はそのdocstringを参照）。
     """
     if (
         config.CODEX_PROVIDER == "chatgpt"
@@ -317,6 +373,15 @@ def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetche
             "外部送信されるリスクがあるためです。リスクを理解した上で使う場合のみ"
             "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB=1 を明示してください。"
         )
+    if config.CODEX_PROVIDER == "chatgpt":
+        with _chatgpt_home_lock():
+            return _run_codex_once(prompt, model, timeout, min_web_fetches)
+    return _run_codex_once(prompt, model, timeout, min_web_fetches)
+
+
+def _run_codex_once(
+    prompt: str, model: str, timeout: int | None, min_web_fetches: int
+) -> str:
     home = _ensure_codex_home(model)
     scratch = config.OUTPUT / "codex-scratch"
     scratch.mkdir(parents=True, exist_ok=True)

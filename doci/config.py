@@ -23,6 +23,10 @@ CODEX_REAL_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 # 攻撃までは防げないため、書き戻しで万一実ログインが壊れても手動復旧できるよう
 # 直前の正常な状態を残しておく。
 CODEX_CHATGPT_AUTH_BACKUP = ROOT / ".codex-doci-chatgpt-backup" / "auth.json"
+# CODEX_CHATGPT_HOME(固定パス)への同時アクセスを直列化するロックファイル。
+# 複数チャンネルのcronジョブが並行してCODEX_PROVIDER=chatgptを使うと、後発
+# プロセスのホーム再構築(rmtree)が先行プロセスの実行中ホームを破壊しうるため。
+CODEX_CHATGPT_HOME_LOCK = ROOT / ".codex-doci-chatgpt.lock"
 
 
 def _load_dotenv(path: Path) -> None:
@@ -214,6 +218,17 @@ def validate_pipeline_backends() -> None:
         raise ValueError(
             f"未対応の CODEX_REASONING_EFFORT です: {CODEX_REASONING_EFFORT}"
             f"（対応値: {', '.join(sorted(_SUPPORTED_CODEX_REASONING_EFFORTS))} または空文字）"
+        )
+    if (
+        CODEX_PROVIDER == "chatgpt"
+        and not CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB
+        and (RESEARCH_BACKEND == "codex" or FACTCHECK_BACKEND == "codex")
+    ):
+        raise ValueError(
+            "CODEX_PROVIDER=chatgpt で RESEARCH_BACKEND または FACTCHECK_BACKEND を"
+            " codex にする場合は CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB=1 の明示指定が"
+            "必須です（外部Webページの内容を取り込むプロンプトインジェクションで"
+            "実ChatGPT認証が外部送信されるリスクを理解した上で使う場合のみ）"
         )
 
 
