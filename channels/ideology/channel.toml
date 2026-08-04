@@ -31,3 +31,6 @@ token = "secrets/ideology/youtube_token.json"
 [pipeline]
 narration_opening_guard = true
 narration_pattern_check = true
+# corner_communism/corner_capitalismの「ショート動画用」という一般的な文言が
+# YouTube運用系チャンネル向けの厳格な出典検証(#81)に誤って引っかかるため明示的に無効化
+research_requires_youtube_case_studies = false
