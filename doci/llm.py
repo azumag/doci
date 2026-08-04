@@ -81,6 +81,8 @@ wire_api = "responses"
 """
 
 # command_execution の command にこれらが含まれれば「実際にWeb取得を試みた」とみなす。
+# シェル経由(MiniMax/minimax想定)の検出専用で、chatgptプロバイダの組み込みweb_search
+# ツール由来のitem(下記_parse_codex_events参照)は別途カウントする。
 _WEB_FETCH_RE = re.compile(r"curl|wget|https?://", re.IGNORECASE)
 
 
@@ -278,8 +280,23 @@ def _sync_refreshed_chatgpt_auth(home: Path) -> None:
 
 def _parse_codex_events(stdout: str) -> tuple[str, int]:
     """codex exec --json の JSONL 出力から (最終 agent_message の text, web fetch数) を取り出す。
-    不正な行はスキップする。web fetch数は command_execution(completed)のうち command に
-    curl/wget/URL が含まれる件数で、「検索したフリ」検出に使う。"""
+    不正な行はスキップする。web fetch数は「検索したフリ」検出に使い、次の2経路を合算する:
+    - command_execution(completed)のうち command に curl/wget/URL が含まれる件数
+      （シェル経由でのWeb取得。MiniMax等、組み込みWeb検索ツールを持たない構成向け）
+    - web_search(completed)のうちqueryが空でない件数（chatgptプロバイダ配下のモデルが
+      持つ組み込みWeb検索ツールの呼び出し。issue #82: 実ChatGPT認証経由のモデルはシェルの
+      curl/wgetでなくこのitem typeでWeb検索するため、command_executionだけを見ると常に
+      0件になる）。
+
+    注意: item.type=="web_search"というリテラルは、ローカルのcodex-cli 0.144.0バイナリの
+    埋め込み文字列（command_executionと同じsnake_case命名列に隣接して出現）と、
+    `codex app-server generate-json-schema`が出力するapp-server v2プロトコル
+    （camelCaseの"webSearch"、フィールドはid/query/action）を突き合わせた静的検証で
+    確認したものであり、CODEX_PROVIDER=chatgptの実ライブ出力(*.jsonl)で直接確認した
+    わけではない（実ChatGPT認証での実行はAPI利用を伴うため、無許可では行っていない）。
+    もしこのリテラルが誤っていた場合でも本分岐は単に発火せず、修正前と同じfetch_count=0の
+    挙動に留まるだけで新たな害はない。
+    """
     last_message = ""
     fetch_count = 0
     for line in stdout.splitlines():
@@ -301,6 +318,9 @@ def _parse_codex_events(stdout: str) -> tuple[str, int]:
         elif item_type == "command_execution":
             command = item.get("command") or ""
             if _WEB_FETCH_RE.search(command):
+                fetch_count += 1
+        elif item_type == "web_search":
+            if item.get("query"):
                 fetch_count += 1
     return last_message, fetch_count
 
@@ -349,8 +369,9 @@ def run_codex(prompt: str, model: str, timeout: int | None = 600, min_web_fetche
     無人実行が承認待ちで詰まらないよう毎回 `-c` で明示上書きする（対話用 config.toml の
     値に依存しない）。min_web_fetches=0（web取得を要求しない呼び出し）ではサンドボックスの
     ネットワークアクセスも無効化し、外部送信の経路自体を塞ぐ。
-    web fetch(curl/wget/URL実行)が min_web_fetches 未満なら「検索したフリ」とみなし ValueError
-    にする（呼び出し側の既存リトライ/劣化継続に乗せる）。
+    web fetch(curl/wget/URL実行、または組み込みweb_searchツール呼び出し。詳細は
+    _parse_codex_events参照)が min_web_fetches 未満なら「検索したフリ」とみなし
+    ValueError にする（呼び出し側の既存リトライ/劣化継続に乗せる）。
 
     CODEX_PROVIDER=chatgptでは、min_web_fetches>=1（外部Webページの内容をプロンプトへ
     取り込む呼び出し）を既定で拒否する。ネットワーク有効サンドボックス内に実ChatGPT
