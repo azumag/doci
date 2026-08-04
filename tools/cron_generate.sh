@@ -19,7 +19,7 @@ PROJ="${0:A:h:h}"
 #  - python: 下記 .venv-cron(uv管理standalone・内蔵)
 #  - opencode/codex/orb/Chrome は元から内蔵
 # /opt/homebrew(外付け) は最後＝フォールバックのみ（基本使わせない）。
-nvm_node_bins=(/Users/azumag/.nvm/versions/node/*/bin(N/on[-1]))
+nvm_node_bins=(/Users/azumag/.nvm/versions/node/*/bin(N/n[-1]))
 NVM_NODE_BIN="${nvm_node_bins[1]}"
 export PATH="$PROJ/tools/ffbin:${NVM_NODE_BIN:-/Users/azumag/.nvm/versions/node/v24.18.0/bin}:/Users/azumag/.local/bin:/Users/azumag/.opencode/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 
