@@ -116,6 +116,10 @@ def _log(msg: str) -> None:
 # プロセス起動後の最初の呼び出し時点(＝まだ何も破壊されていないはず)の状態だけを
 # 残すことで、この上書き競合を避ける。
 _chatgpt_auth_backed_up = False
+# 直近の _ensure_chatgpt_codex_home 呼び出しでコピーした時点の実auth.jsonの
+# バイト列。_sync_refreshed_chatgpt_auth が「コピー後に実ホーム側が変化していないか
+# (＝対話的codex利用等の並行更新がなかったか)」を確認するために使う。
+_chatgpt_auth_snapshot: bytes | None = None
 
 
 def _ensure_chatgpt_codex_home() -> Path:
@@ -126,30 +130,44 @@ def _ensure_chatgpt_codex_home() -> Path:
 
     プロセス内で最初の呼び出し時だけ、その時点の実auth.jsonを
     config.CODEX_CHATGPT_AUTH_BACKUPへ退避する（毎回上書きしない理由は
-    _chatgpt_auth_backed_up のコメントを参照）。_sync_refreshed_chatgpt_authの
-    検証（account_id一致）は、サンドボックス内でコマンドを実行できる攻撃者が
-    同一account_idを保ったままトークン値だけを壊す攻撃までは防げない。万一実
-    ログインが壊れても、このバックアップから手動で ~/.codex/auth.json を復元
-    できるようにしておく。"""
-    global _chatgpt_auth_backed_up
+    _chatgpt_auth_backed_up のコメントを参照）。バックアップ対象の実auth.jsonが
+    _auth_tokens で検証できない（前回実行で壊れた等）場合は、既存のバックアップを
+    保持する（壊れた内容で唯一の復旧手段を潰さないため）。
+
+    毎回、コピーした時点のバイト列を _chatgpt_auth_snapshot に記録する
+    （_sync_refreshed_chatgpt_auth が並行更新を検知するために使う）。
+
+    _sync_refreshed_chatgpt_authの検証（account_id一致）は、サンドボックス内で
+    コマンドを実行できる攻撃者が同一account_idを保ったままトークン値だけを壊す
+    攻撃までは防げない。万一実ログインが壊れても、このバックアップから手動で
+    ~/.codex/auth.json を復元できるようにしておく。"""
+    global _chatgpt_auth_backed_up, _chatgpt_auth_snapshot
     real_auth = config.CODEX_REAL_HOME / "auth.json"
     if not real_auth.exists():
         raise RuntimeError(
             f"{real_auth} が見つかりません。`codex login` でChatGPT認証を済ませてください"
             "（CODEX_PROVIDER=chatgpt には実 ~/.codex の認証が必須です）"
         )
+    current_bytes = real_auth.read_bytes()
+    _chatgpt_auth_snapshot = current_bytes
     if not _chatgpt_auth_backed_up:
-        backup = config.CODEX_CHATGPT_AUTH_BACKUP
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(real_auth, backup)
-        os.chmod(backup, 0o600)
+        if _auth_tokens(current_bytes) is not None:
+            backup = config.CODEX_CHATGPT_AUTH_BACKUP
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup.write_bytes(current_bytes)
+            os.chmod(backup, 0o600)
+        else:
+            _log(
+                "chatgptバックアップ: 実auth.jsonが不正な形式のためスキップ"
+                "（既存バックアップを保持）"
+            )
         _chatgpt_auth_backed_up = True
     home = config.CODEX_CHATGPT_HOME
     if home.exists():
         shutil.rmtree(home)
     home.mkdir(parents=True)
     dest = home / "auth.json"
-    shutil.copy(real_auth, dest)
+    dest.write_bytes(current_bytes)
     os.chmod(dest, 0o600)
     return home
 
@@ -199,7 +217,14 @@ def _sync_refreshed_chatgpt_auth(home: Path) -> None:
     _ensure_chatgpt_codex_home が実行直前の実auth.jsonを
     config.CODEX_CHATGPT_AUTH_BACKUP へ退避しており、万一破壊されても手動で
     復元できる。書き戻しをスキップした場合は理由をログに残す（無音で正規の
-    リフレッシュ結果を捨てると、ログイン切れの原因が追えなくなるため）。"""
+    リフレッシュ結果を捨てると、ログイン切れの原因が追えなくなるため）。
+
+    さらに、実ホームがコピー時点(_chatgpt_auth_snapshot)から変化していない
+    ことも確認してから書き戻す。TEXT_BACKEND=codexはtimeout=None(無制限)になり
+    得るため、doci実行中にユーザーが対話的にcodexを使い実ホーム側でトークンが
+    ローテーションされる可能性がある。その変化を無視して書き戻すと、対話
+    セッション側の新しいrefresh_tokenをdoci側の古い系列のトークンで上書きし、
+    このPRが防ごうとしている「ログイン破壊事故」を別経路で起こしてしまう。"""
     copied = home / "auth.json"
     try:
         new_bytes = copied.read_bytes()
@@ -217,6 +242,15 @@ def _sync_refreshed_chatgpt_auth(home: Path) -> None:
         _log(f"chatgpt認証同期: 実ホームのauth.jsonを読めずスキップ: {exc}")
         return
     if real_bytes == new_bytes:
+        return
+    if (
+        _chatgpt_auth_snapshot is not None
+        and real_bytes != _chatgpt_auth_snapshot
+    ):
+        _log(
+            "chatgpt認証同期: 実ホームのauth.jsonがコピー時点から変化しているため"
+            "スキップ（対話的codex利用等の並行更新の疑い）"
+        )
         return
     real_tokens = _auth_tokens(real_bytes)
     if real_tokens is None:

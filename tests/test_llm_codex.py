@@ -149,9 +149,11 @@ class CodexProviderConfigTest(unittest.TestCase):
 
 class ChatgptCodexHomeTest(unittest.TestCase):
     def setUp(self) -> None:
-        # プロセス内1回だけのバックアップ用フラグをテスト間で独立させる。
+        # プロセス内1回だけのバックアップ用フラグとスナップショットをテスト間で独立させる。
         llm._chatgpt_auth_backed_up = False
+        llm._chatgpt_auth_snapshot = None
         self.addCleanup(setattr, llm, "_chatgpt_auth_backed_up", False)
+        self.addCleanup(setattr, llm, "_chatgpt_auth_snapshot", None)
 
     def test_copies_only_auth_json_not_the_rest_of_real_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,7 +191,8 @@ class ChatgptCodexHomeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
-            (real_home / "auth.json").write_text('{"token": "pre-run"}', encoding="utf-8")
+            pre_run = _auth_json(account_id="acct-1", access_token="pre-run")
+            (real_home / "auth.json").write_text(pre_run, encoding="utf-8")
             backup = Path(tmp) / "backup-dir" / "auth.json"
 
             with (
@@ -199,7 +202,7 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             ):
                 _ensure_chatgpt_codex_home()
 
-            self.assertEqual(backup.read_text(encoding="utf-8"), '{"token": "pre-run"}')
+            self.assertEqual(backup.read_text(encoding="utf-8"), pre_run)
             self.assertEqual(oct(backup.stat().st_mode)[-3:], "600")
 
     def test_does_not_overwrite_backup_on_later_calls_within_the_same_process(
@@ -212,7 +215,8 @@ class ChatgptCodexHomeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
-            (real_home / "auth.json").write_text('{"token": "good"}', encoding="utf-8")
+            good = _auth_json(account_id="acct-1", access_token="good")
+            (real_home / "auth.json").write_text(good, encoding="utf-8")
             backup = Path(tmp) / "backup-dir" / "auth.json"
 
             with (
@@ -225,7 +229,29 @@ class ChatgptCodexHomeTest(unittest.TestCase):
                 (real_home / "auth.json").write_text('{"broken": true}', encoding="utf-8")
                 _ensure_chatgpt_codex_home()  # 2回目: 壊れた状態で呼ばれる
 
-            self.assertEqual(backup.read_text(encoding="utf-8"), '{"token": "good"}')
+            self.assertEqual(backup.read_text(encoding="utf-8"), good)
+
+    def test_does_not_back_up_a_malformed_real_auth_json(self) -> None:
+        # 前回実行で実auth.jsonそのものが壊れてしまっていた場合、次プロセスの
+        # 最初の呼び出しでその壊れた内容を「新しい正常なバックアップ」として
+        # 保存してしまうと、唯一の手動復旧手段が失われる。
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            (real_home / "auth.json").write_text('{"broken": true}', encoding="utf-8")
+            backup = Path(tmp) / "backup-dir" / "auth.json"
+            backup.parent.mkdir(parents=True)
+            good = _auth_json(account_id="acct-1", access_token="last-known-good")
+            backup.write_text(good, encoding="utf-8")
+
+            with (
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
+            ):
+                _ensure_chatgpt_codex_home()
+
+            self.assertEqual(backup.read_text(encoding="utf-8"), good)
 
     def test_raises_clearly_when_real_auth_json_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,6 +312,10 @@ def _auth_json(*, account_id: str, access_token: str, refresh_token: str = "rt")
 
 
 class SyncRefreshedChatgptAuthTest(unittest.TestCase):
+    def setUp(self) -> None:
+        llm._chatgpt_auth_snapshot = None
+        self.addCleanup(setattr, llm, "_chatgpt_auth_snapshot", None)
+
     def test_writes_back_a_same_account_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
@@ -403,11 +433,83 @@ class SyncRefreshedChatgptAuthTest(unittest.TestCase):
 
             self.assertFalse((real_home / "auth.json").exists())
 
+    def test_skips_write_back_when_real_home_changed_since_the_copy(self) -> None:
+        # TEXT_BACKEND=codexはtimeout=Noneになり得るため、doci実行中にユーザーが
+        # 対話的にcodexを使い実ホーム側でトークンがローテーションされることがある。
+        # その変化を無視して書き戻すと、対話セッション側の新しいトークンをdoci側の
+        # 古い系列のトークンで上書きしてしまう。
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            backup = Path(tmp) / "backup-dir" / "auth.json"
+
+            original = _auth_json(account_id="acct-1", access_token="original")
+            (real_home / "auth.json").write_text(original, encoding="utf-8")
+
+            with (
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
+            ):
+                llm._ensure_chatgpt_codex_home()  # スナップショットを記録
+
+            # doci実行中に対話的codexセッションが実ホーム側でトークンをローテーション。
+            interactive_refresh = _auth_json(
+                account_id="acct-1", access_token="from-interactive-session"
+            )
+            (real_home / "auth.json").write_text(interactive_refresh, encoding="utf-8")
+
+            # 隔離ホーム側(doci自身のcodex exec)も別のトークンにリフレッシュされた。
+            doci_refresh = _auth_json(account_id="acct-1", access_token="from-doci-run")
+            (chatgpt_home / "auth.json").write_text(doci_refresh, encoding="utf-8")
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            # 対話セッション側の新しいトークンが、doci側の古い系列の値で
+            # 上書きされていないこと。
+            self.assertEqual(
+                (real_home / "auth.json").read_text(encoding="utf-8"),
+                interactive_refresh,
+            )
+
+    def test_writes_back_when_real_home_unchanged_since_the_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            chatgpt_home = Path(tmp) / "chatgpt-codex-home"
+            chatgpt_home.mkdir()
+            backup = Path(tmp) / "backup-dir" / "auth.json"
+
+            original = _auth_json(account_id="acct-1", access_token="original")
+            (real_home / "auth.json").write_text(original, encoding="utf-8")
+
+            with (
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", chatgpt_home),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
+            ):
+                llm._ensure_chatgpt_codex_home()
+
+            doci_refresh = _auth_json(account_id="acct-1", access_token="from-doci-run")
+            (chatgpt_home / "auth.json").write_text(doci_refresh, encoding="utf-8")
+
+            with mock.patch.object(config, "CODEX_REAL_HOME", real_home):
+                llm._sync_refreshed_chatgpt_auth(chatgpt_home)
+
+            self.assertEqual(
+                (real_home / "auth.json").read_text(encoding="utf-8"), doci_refresh
+            )
+
 
 class CodexDualProviderTest(unittest.TestCase):
     def setUp(self) -> None:
         llm._chatgpt_auth_backed_up = False
+        llm._chatgpt_auth_snapshot = None
         self.addCleanup(setattr, llm, "_chatgpt_auth_backed_up", False)
+        self.addCleanup(setattr, llm, "_chatgpt_auth_snapshot", None)
 
     def _completed(self, text: str) -> subprocess.CompletedProcess:
         stdout = json.dumps(
