@@ -149,10 +149,9 @@ class CodexProviderConfigTest(unittest.TestCase):
 
 class ChatgptCodexHomeTest(unittest.TestCase):
     def setUp(self) -> None:
-        # プロセス内1回だけのバックアップ用フラグとスナップショットをテスト間で独立させる。
-        llm._chatgpt_auth_backed_up = False
+        # スナップショットをテスト間で独立させる（バックアップはファイル存在ベース
+        # なのでテストごとに別tmpパスを使う限り自然に独立する）。
         llm._chatgpt_auth_snapshot = None
-        self.addCleanup(setattr, llm, "_chatgpt_auth_backed_up", False)
         self.addCleanup(setattr, llm, "_chatgpt_auth_snapshot", None)
 
     def test_copies_only_auth_json_not_the_rest_of_real_home(self) -> None:
@@ -205,13 +204,13 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             self.assertEqual(backup.read_text(encoding="utf-8"), pre_run)
             self.assertEqual(oct(backup.stat().st_mode)[-3:], "600")
 
-    def test_does_not_overwrite_backup_on_later_calls_within_the_same_process(
-        self,
-    ) -> None:
+    def test_does_not_overwrite_backup_on_later_calls(self) -> None:
         # 全段(TEXT/RESEARCH/FACTCHECK/PLAN/CHART_BG)codex構成ではrun_codexが1
         # プロセス内で連続して呼ばれる。ある段でトークンが破壊され実ホームへ
         # 伝播した直後、後続段の呼び出しが破壊済みauth.jsonで正常なバックアップ
-        # を上書きしてはならない（それが唯一の手動復旧手段のため）。
+        # を上書きしてはならない（それが唯一の手動復旧手段のため）。バックアップは
+        # ファイルの存在だけで判定するため、プロセス境界を越えても同様に保護される
+        # （プロセスローカルなフラグには依存しない）。
         with tempfile.TemporaryDirectory() as tmp:
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
@@ -239,6 +238,41 @@ class ChatgptCodexHomeTest(unittest.TestCase):
             real_home = Path(tmp) / "real-codex-home"
             real_home.mkdir()
             (real_home / "auth.json").write_text('{"broken": true}', encoding="utf-8")
+            backup = Path(tmp) / "backup-dir" / "auth.json"
+            backup.parent.mkdir(parents=True)
+            good = _auth_json(account_id="acct-1", access_token="last-known-good")
+            backup.write_text(good, encoding="utf-8")
+
+            with (
+                mock.patch.object(config, "CODEX_REAL_HOME", real_home),
+                mock.patch.object(config, "CODEX_CHATGPT_HOME", Path(tmp) / "chatgpt-home"),
+                mock.patch.object(config, "CODEX_CHATGPT_AUTH_BACKUP", backup),
+            ):
+                _ensure_chatgpt_codex_home()
+
+            self.assertEqual(backup.read_text(encoding="utf-8"), good)
+
+    def test_does_not_overwrite_existing_backup_with_well_formed_but_corrupted_auth(
+        self,
+    ) -> None:
+        # 核心のシナリオ: 実auth.jsonが「_auth_tokens 検証は通過する」が実際には
+        # 汚染された内容（同一account_id・全フィールド非空文字列だがトークン値が
+        # 攻撃者の注入したデタラメな文字列）になっていても、既存の正常なバックアップ
+        # を上書きしてはならない。これは _sync_refreshed_chatgpt_auth の検証
+        # （形式・account_id一致）をすり抜けて実ホームへ伝播しうる汚染そのものであり、
+        # 「構文的に壊れたJSON」だけを弾く検証では防げない。バックアップはファイルの
+        # 存在だけで判定するため、このテストはプロセスを新たに起動した状況
+        # （どのプロセスローカル状態にも依存しない）でも保護されることを示す。
+        with tempfile.TemporaryDirectory() as tmp:
+            real_home = Path(tmp) / "real-codex-home"
+            real_home.mkdir()
+            corrupted_but_well_formed = _auth_json(
+                account_id="acct-1", access_token="garbage-injected-by-attacker"
+            )
+            (real_home / "auth.json").write_text(
+                corrupted_but_well_formed, encoding="utf-8"
+            )
+
             backup = Path(tmp) / "backup-dir" / "auth.json"
             backup.parent.mkdir(parents=True)
             good = _auth_json(account_id="acct-1", access_token="last-known-good")
@@ -506,9 +540,7 @@ class SyncRefreshedChatgptAuthTest(unittest.TestCase):
 
 class CodexDualProviderTest(unittest.TestCase):
     def setUp(self) -> None:
-        llm._chatgpt_auth_backed_up = False
         llm._chatgpt_auth_snapshot = None
-        self.addCleanup(setattr, llm, "_chatgpt_auth_backed_up", False)
         self.addCleanup(setattr, llm, "_chatgpt_auth_snapshot", None)
 
     def _completed(self, text: str) -> subprocess.CompletedProcess:

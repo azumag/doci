@@ -108,14 +108,6 @@ def _log(msg: str) -> None:
     print(f"[doci/llm] {msg}", flush=True)
 
 
-# プロセス内で一度だけ実auth.jsonをバックアップしたかどうか。
-# .env.example が推奨する全段(TEXT/RESEARCH/FACTCHECK/PLAN/CHART_BG)codex構成では
-# run_codexが1プロセス内で連続して呼ばれる。毎回無条件でバックアップを上書きすると、
-# ある段でトークンが破壊され実ホームへ伝播した直後、後続段の呼び出しがその破壊済み
-# auth.jsonで正常なバックアップを上書きしてしまい、復旧手段として機能しなくなる。
-# プロセス起動後の最初の呼び出し時点(＝まだ何も破壊されていないはず)の状態だけを
-# 残すことで、この上書き競合を避ける。
-_chatgpt_auth_backed_up = False
 # 直近の _ensure_chatgpt_codex_home 呼び出しでコピーした時点の実auth.jsonの
 # バイト列。_sync_refreshed_chatgpt_auth が「コピー後に実ホーム側が変化していないか
 # (＝対話的codex利用等の並行更新がなかったか)」を確認するために使う。
@@ -128,20 +120,23 @@ def _ensure_chatgpt_codex_home() -> Path:
     (codex execがサンドボックス内で書き込んだ config.toml 等)を次回実行が無検査で
     信用しないよう、隔離ホームは毎回完全に作り直す。
 
-    プロセス内で最初の呼び出し時だけ、その時点の実auth.jsonを
-    config.CODEX_CHATGPT_AUTH_BACKUPへ退避する（毎回上書きしない理由は
-    _chatgpt_auth_backed_up のコメントを参照）。バックアップ対象の実auth.jsonが
-    _auth_tokens で検証できない（前回実行で壊れた等）場合は、既存のバックアップを
-    保持する（壊れた内容で唯一の復旧手段を潰さないため）。
+    config.CODEX_CHATGPT_AUTH_BACKUP が存在しない場合に限り、その時点の実
+    auth.jsonをそこへ退避する。一度作成したバックアップは、以後(プロセスを
+    跨いでも)自動では二度と上書きしない。「_sync_refreshed_chatgpt_authの検証
+    （account_id一致等）は、サンドボックス内の攻撃者が同一account_idを保った
+    まま形式的に有効な偽トークンへ差し替える攻撃までは防げない」という前提の
+    もとでは、もし一度でも汚染された内容が実ホームへ伝播してしまうと、
+    「プロセス内1回だけ」のような時限式の保護では次のプロセス起動時にその
+    汚染済みauth.jsonを新しい正常なバックアップとして採用してしまい、唯一の
+    手動復旧手段を失う。ファイルの存在有無だけで判定することで、プロセス境界
+    を越えても最初に確認できた既知良好な状態を永続的に保持する。
+    （バックアップを更新したい場合はユーザーが手動でファイルを削除する）
+    実auth.jsonが _auth_tokens で検証できない（既に壊れている等）場合は
+    バックアップを作成しない。
 
     毎回、コピーした時点のバイト列を _chatgpt_auth_snapshot に記録する
-    （_sync_refreshed_chatgpt_auth が並行更新を検知するために使う）。
-
-    _sync_refreshed_chatgpt_authの検証（account_id一致）は、サンドボックス内で
-    コマンドを実行できる攻撃者が同一account_idを保ったままトークン値だけを壊す
-    攻撃までは防げない。万一実ログインが壊れても、このバックアップから手動で
-    ~/.codex/auth.json を復元できるようにしておく。"""
-    global _chatgpt_auth_backed_up, _chatgpt_auth_snapshot
+    （_sync_refreshed_chatgpt_auth が並行更新を検知するために使う）。"""
+    global _chatgpt_auth_snapshot
     real_auth = config.CODEX_REAL_HOME / "auth.json"
     if not real_auth.exists():
         raise RuntimeError(
@@ -150,18 +145,14 @@ def _ensure_chatgpt_codex_home() -> Path:
         )
     current_bytes = real_auth.read_bytes()
     _chatgpt_auth_snapshot = current_bytes
-    if not _chatgpt_auth_backed_up:
+    backup = config.CODEX_CHATGPT_AUTH_BACKUP
+    if not backup.exists():
         if _auth_tokens(current_bytes) is not None:
-            backup = config.CODEX_CHATGPT_AUTH_BACKUP
             backup.parent.mkdir(parents=True, exist_ok=True)
             backup.write_bytes(current_bytes)
             os.chmod(backup, 0o600)
         else:
-            _log(
-                "chatgptバックアップ: 実auth.jsonが不正な形式のためスキップ"
-                "（既存バックアップを保持）"
-            )
-        _chatgpt_auth_backed_up = True
+            _log("chatgptバックアップ: 実auth.jsonが不正な形式のため作成をスキップ")
     home = config.CODEX_CHATGPT_HOME
     if home.exists():
         shutil.rmtree(home)
