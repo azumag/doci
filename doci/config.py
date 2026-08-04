@@ -13,6 +13,20 @@ CONFIG_DIR = ROOT / "config"
 OUTPUT = ROOT / "output"
 # codex CLI 用の隔離ホーム。ユーザーの ~/.codex には一切触れない(ChatGPTログイン破壊事故を避けるため)。
 CODEX_HOME = ROOT / ".codex-doci"
+# CODEX_PROVIDER=chatgpt 用の隔離ホーム。実 ~/.codex の auth.json だけをコピーして使う
+# （プロジェクト一覧・MCP設定等の個人情報はコピーしない。露出面をトークン1件に絞る）。
+CODEX_CHATGPT_HOME = ROOT / ".codex-doci-chatgpt"
+# コピー元の実 ~/.codex。codex CLI 自身の解決規則(環境変数優先)に合わせる。
+CODEX_REAL_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+# 実行直前の実 auth.json の退避先。account_id一致検証だけでは、サンドボックス内で
+# コマンドを実行できる攻撃者が同一account_idを保ったままトークン値だけを壊す
+# 攻撃までは防げないため、書き戻しで万一実ログインが壊れても手動復旧できるよう
+# 直前の正常な状態を残しておく。
+CODEX_CHATGPT_AUTH_BACKUP = ROOT / ".codex-doci-chatgpt-backup" / "auth.json"
+# CODEX_CHATGPT_HOME(固定パス)への同時アクセスを直列化するロックファイル。
+# 複数チャンネルのcronジョブが並行してCODEX_PROVIDER=chatgptを使うと、後発
+# プロセスのホーム再構築(rmtree)が先行プロセスの実行中ホームを破壊しうるため。
+CODEX_CHATGPT_HOME_LOCK = ROOT / ".codex-doci-chatgpt.lock"
 
 
 def _load_dotenv(path: Path) -> None:
@@ -150,7 +164,30 @@ CHART_BG_BACKEND = get("CHART_BG_BACKEND", _AUX_BACKEND_DEFAULT)
 _RESEARCH_BACKEND_EXPLICIT = bool(get("RESEARCH_BACKEND"))
 _FACTCHECK_BACKEND_EXPLICIT = bool(get("FACTCHECK_BACKEND"))
 
+# codex バックエンドの接続先。minimax(既定・隔離ホームでMiniMax API鍵を使う) |
+# chatgpt(実 ~/.codex の auth.json だけをコピーした隔離ホームで実ChatGPT認証を使い、
+# 実OpenAIモデルを呼ぶ)。いずれも ~/.codex の設定ファイルは一切書き換えない（読むだけ）。
+CODEX_PROVIDER = get("CODEX_PROVIDER", "minimax")
+# codex実行時の reasoning effort の明示指定。空なら未指定（モデル/ユーザー既定に任せる）。
+CODEX_REASONING_EFFORT = get("CODEX_REASONING_EFFORT", "")
+# CODEX_PROVIDER=chatgpt で Web取得必須(min_web_fetches>=1、research/factcheck等)の
+# 呼び出しを許可するか。既定false: 外部Webページの内容をプロンプトへ取り込む段は、
+# プロンプトインジェクション経由で実ChatGPT認証(auth.json)をネットワーク送信されうる
+# ため既定で拒否する。MiniMax鍵と違い実アカウント認証は失効・再発行が容易でなく、
+# リスクを理解した上で使う場合だけ明示的に有効化させる。
+CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB = get_bool(
+    "CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB", False
+)
+_SUPPORTED_CODEX_PROVIDERS = frozenset({"minimax", "chatgpt"})
+_SUPPORTED_CODEX_REASONING_EFFORTS = frozenset(
+    {"low", "medium", "high", "xhigh", "ultra", "max"}
+)
+
 _SUPPORTED_PIPELINE_BACKENDS = frozenset({"codex", "opencode", "opencode_go", "claude"})
+# TEXT_BACKENDは補助段と値の語彙が異なる（claude系は claude_cli/anthropic の2択）。
+_SUPPORTED_TEXT_BACKENDS = frozenset(
+    {"codex", "opencode", "opencode_go", "claude_cli", "anthropic"}
+)
 
 
 def validate_pipeline_backends() -> None:
@@ -167,6 +204,32 @@ def validate_pipeline_backends() -> None:
     if invalid:
         details = ", ".join(f"{name}={value}" for name, value in invalid.items())
         raise ValueError(f"未対応のバックエンド設定です: {details}")
+    if TEXT_BACKEND not in _SUPPORTED_TEXT_BACKENDS:
+        raise ValueError(f"未対応の TEXT_BACKEND です: {TEXT_BACKEND}")
+    if CODEX_PROVIDER not in _SUPPORTED_CODEX_PROVIDERS:
+        raise ValueError(
+            f"未対応の CODEX_PROVIDER です: {CODEX_PROVIDER}"
+            f"（対応値: {', '.join(sorted(_SUPPORTED_CODEX_PROVIDERS))}）"
+        )
+    if (
+        CODEX_REASONING_EFFORT
+        and CODEX_REASONING_EFFORT not in _SUPPORTED_CODEX_REASONING_EFFORTS
+    ):
+        raise ValueError(
+            f"未対応の CODEX_REASONING_EFFORT です: {CODEX_REASONING_EFFORT}"
+            f"（対応値: {', '.join(sorted(_SUPPORTED_CODEX_REASONING_EFFORTS))} または空文字）"
+        )
+    if (
+        CODEX_PROVIDER == "chatgpt"
+        and not CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB
+        and (RESEARCH_BACKEND == "codex" or FACTCHECK_BACKEND == "codex")
+    ):
+        raise ValueError(
+            "CODEX_PROVIDER=chatgpt で RESEARCH_BACKEND または FACTCHECK_BACKEND を"
+            " codex にする場合は CODEX_CHATGPT_ALLOW_UNTRUSTED_WEB=1 の明示指定が"
+            "必須です（外部Webページの内容を取り込むプロンプトインジェクションで"
+            "実ChatGPT認証が外部送信されるリスクを理解した上で使う場合のみ）"
+        )
 
 
 validate_pipeline_backends()
