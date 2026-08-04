@@ -86,6 +86,99 @@ class ParseCodexEventsTest(unittest.TestCase):
         message, _ = _parse_codex_events(stdout)
         self.assertEqual(message, "最後のメッセージ")
 
+    def test_web_search_item_is_counted_as_fetch(self) -> None:
+        # issue #82: CODEX_PROVIDER=chatgpt配下のモデルは、シェルのcurl/wgetでなく
+        # 組み込みweb_searchツール(item.type=="web_search")でWeb検索する場合がある。
+        stdout = "\n".join(
+            [
+                _line(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_0",
+                            "type": "web_search",
+                            "query": "YouTube Studio 視聴維持率",
+                        },
+                    }
+                ),
+                _line(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": "回答"},
+                    }
+                ),
+            ]
+        )
+        message, fetch_count = _parse_codex_events(stdout)
+        self.assertEqual(message, "回答")
+        self.assertEqual(fetch_count, 1)
+
+    def test_web_search_item_with_empty_query_is_not_counted_as_fetch(self) -> None:
+        stdout = "\n".join(
+            [
+                _line(
+                    {
+                        "type": "item.completed",
+                        "item": {"id": "item_0", "type": "web_search", "query": ""},
+                    }
+                ),
+                _line(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": "回答"},
+                    }
+                ),
+            ]
+        )
+        message, fetch_count = _parse_codex_events(stdout)
+        self.assertEqual(message, "回答")
+        self.assertEqual(fetch_count, 0)
+
+    def test_web_search_and_curl_fetches_are_both_counted(self) -> None:
+        stdout = "\n".join(
+            [
+                _line(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_0",
+                            "type": "web_search",
+                            "query": "query1",
+                        },
+                    }
+                ),
+                _line(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_1",
+                            "type": "web_search",
+                            "query": "query2",
+                        },
+                    }
+                ),
+                _line(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "command_execution",
+                            "command": "curl -s https://example.com",
+                            "exit_code": 0,
+                        },
+                    }
+                ),
+                _line(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": "回答"},
+                    }
+                ),
+            ]
+        )
+        message, fetch_count = _parse_codex_events(stdout)
+        self.assertEqual(message, "回答")
+        self.assertEqual(fetch_count, 3)
+
     def test_command_execution_without_curl_is_not_counted_as_fetch(self) -> None:
         stdout = "\n".join(
             [
