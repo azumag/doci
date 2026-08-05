@@ -349,6 +349,139 @@ performance_eval_window_hours = 72
             spec = channel.load("sample", channels_dir=self.channels_dir)
         self.assertEqual(spec.pipeline_get("performance_eval_window_hours", 0), 0)
 
+    def test_performance_import_from_defaults_to_disabled(self) -> None:
+        self._write_channel()
+        with patch.object(config, "OUTPUT", self.root / "output"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertIsNone(spec.pipeline_get("performance_import_from"))
+
+    def test_loads_valid_performance_import_from(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_feedback = true
+performance_import_from = ["other-channel", "another-channel"]
+"""
+        )
+        with patch.object(config, "OUTPUT", self.root / "output"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertEqual(
+            spec.pipeline_get("performance_import_from"),
+            ["other-channel", "another-channel"],
+        )
+
+    def test_rejects_invalid_performance_import_from_type(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_feedback = true
+performance_import_from = "other-channel"
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_import_from"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_rejects_invalid_performance_import_from_channel_id(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_feedback = true
+performance_import_from = ["not a valid id!"]
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_import_from"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_rejects_duplicate_performance_import_from_entries(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_feedback = true
+performance_import_from = ["other-channel", "other-channel"]
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_import_from"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_rejects_performance_import_from_self_reference(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_feedback = true
+performance_import_from = ["sample"]
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_import_from"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_performance_import_from_requires_performance_feedback(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+performance_import_from = ["other-channel"]
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "performance_feedback"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\
 [channel]

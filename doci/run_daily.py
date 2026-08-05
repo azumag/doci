@@ -367,6 +367,7 @@ def _run_once(
                     spec,
                     corner.key,
                     performance_decision["decision_id"],
+                    hypothesis=performance.decision_hypothesis(performance_decision),
                 )
                 if performance_application_id:
                     reservation_state.update(

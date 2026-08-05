@@ -343,6 +343,11 @@ FEEDBACK_ISSUES_MAX_PER_WEEK = get_int("FEEDBACK_ISSUES_MAX_PER_WEEK", 3)
 FEEDBACK_ISSUES_HYPOTHESIS_COOLDOWN_DAYS = get_int(
     "FEEDBACK_ISSUES_HYPOTHESIS_COOLDOWN_DAYS", 30
 )
+# doci.performance（issue #77）: 他チャンネルへの実績施策横展開で、
+# 評価完了からこの日数を超えた実験は展開候補にしない（鮮度ガード）。
+PERFORMANCE_PROPAGATION_MAX_AGE_DAYS = get_int(
+    "PERFORMANCE_PROPAGATION_MAX_AGE_DAYS", 90
+)
 # ファクトチェックの再試行回数。MiniMax等が長い日本語JSONのエスケープを崩すことがあるため再試行する。
 SCRIPT_FACTCHECK_RETRIES = get_int("SCRIPT_FACTCHECK_RETRIES", 2)
 # MiniMax監査とQwen文章修正の全試行を合わせた総時間上限。0は無制限。

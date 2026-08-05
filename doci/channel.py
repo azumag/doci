@@ -179,6 +179,7 @@ _PIPELINE_KEYS = {
     "max_uploads_per_day",
     "performance_eval_window_hours",
     "performance_gated_publish",
+    "performance_import_from",
     "feedback_repository",
     "youtube_auto_playlist",
     "youtube_auto_engagement_comment",
@@ -679,6 +680,31 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
             "pipeline.performance_gated_publish requires "
             "pipeline.performance_feedback = true"
         )
+    performance_import_from = pipeline.get("performance_import_from")
+    if performance_import_from is not None:
+        if not isinstance(performance_import_from, list) or not all(
+            isinstance(item, str) for item in performance_import_from
+        ):
+            raise ChannelConfigError(
+                "pipeline.performance_import_from must be a list of strings"
+            )
+        if not all(_CHANNEL_ID_RE.fullmatch(item) for item in performance_import_from):
+            raise ChannelConfigError(
+                "pipeline.performance_import_from entries must be valid channel ids"
+            )
+        if len(set(performance_import_from)) != len(performance_import_from):
+            raise ChannelConfigError(
+                "pipeline.performance_import_from must not contain duplicates"
+            )
+        if spec_id in performance_import_from:
+            raise ChannelConfigError(
+                "pipeline.performance_import_from must not include the channel itself"
+            )
+        if not performance_feedback:
+            raise ChannelConfigError(
+                "pipeline.performance_import_from requires "
+                "pipeline.performance_feedback = true"
+            )
     feedback_repository = pipeline.get("feedback_repository", "")
     if not isinstance(feedback_repository, str):
         raise ChannelConfigError("pipeline.feedback_repository must be a string")
