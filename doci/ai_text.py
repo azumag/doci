@@ -1023,6 +1023,74 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
     }
 
 
+_ENGAGEMENT_COMMENT_PROMPT = """\
+あなたはこのチャンネルの運営者本人として、公開直後のYouTubeショート動画へ
+寄せるトップレベルコメントを1つ書いてください。目的は、視聴者がコメント欄で
+反応・議論したくなる「ちょっとだけ隙のある」一言を残し、コメント欄への
+滞在時間を延ばすことです。
+
+ルール:
+- 日本語で1〜2文、40〜80文字程度
+- 動画の主題に関係する内容にする（無関係な話題や単なる宣伝は禁止）
+- 断定しすぎず、視聴者が「いや、それは違う」「自分はこう思う」と
+  言いたくなる程度の余白を残す（例:「〜だよね？」「〜な気がする」）
+- 差別的・攻撃的・扇動的な表現、事実に反する断定は禁止
+- 絵文字は0〜1個まで
+
+コーナー: {corner_label}
+動画タイトル: {title}
+動画ナレーション（冒頭抜粋）: {narration_excerpt}
+
+出力はコメント本文のみ（説明・引用符・コードフェンス禁止）:
+"""
+_MAX_ENGAGEMENT_COMMENT_LENGTH = 200
+# URLらしき文字列を含む出力は迷惑投稿の疑いとして安全側にスキップする。
+# プロンプト指示だけに頼らない最低限の出力側ガード（完全なコンテンツ
+# モデレーションではない。差別的・扇動的表現の有無までは機械的に判定できない
+# ため、投稿ログの全文記録と固定作業時の目視確認を前提にしている）。
+_ENGAGEMENT_COMMENT_URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+# 先頭/末尾のコードフェンスを除去する。```json のような言語タグ付きの場合、
+# タグ行ごと落とさないと本文に「json」等が残ったまま公開投稿されてしまう。
+_LEADING_CODE_FENCE_RE = re.compile(r"^```[^\n]*\n?")
+_TRAILING_CODE_FENCE_RE = re.compile(r"\n?```$")
+
+
+def generate_engagement_comment(corner: CornerSpec, script: dict) -> str | None:
+    """討論を誘発する自作コメント文を生成する(issue #86)。
+
+    通信・応答不良時、およびURLらしき出力を含む場合はNoneを返し、
+    呼び出し側でコメント投稿をスキップさせる（動画生成・投稿本体は止めない）。
+    YouTube Data APIにコメントの「固定」を行うエンドポイントは無いため、
+    投稿後の固定は手動操作が必要（youtube.post_comment参照）。
+    """
+    title = str(script.get("title") or "").strip()
+    narration = str(script.get("narration") or "").strip()
+    if not title and not narration:
+        return None
+    prompt = _ENGAGEMENT_COMMENT_PROMPT.format(
+        corner_label=corner.label,
+        title=title[:100],
+        narration_excerpt=narration[:300],
+    )
+    try:
+        text = _dispatch(prompt, timeout=60)
+    except (
+        ValueError,
+        TimeoutError,
+        subprocess.TimeoutExpired,
+        RuntimeError,
+        OSError,
+    ):
+        return None
+    text = text.strip()
+    text = _LEADING_CODE_FENCE_RE.sub("", text)
+    text = _TRAILING_CODE_FENCE_RE.sub("", text)
+    text = text.strip("\"'").strip()
+    if not text or _ENGAGEMENT_COMMENT_URL_RE.search(text):
+        return None
+    return text[:_MAX_ENGAGEMENT_COMMENT_LENGTH]
+
+
 def _validate(script: dict) -> dict:
     for k in REQUIRED_KEYS:
         if k not in script:

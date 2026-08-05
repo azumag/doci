@@ -27,7 +27,7 @@ from . import (
     topic_ledger,
     voicevox,
 )
-from .channel import ChannelSpec
+from .channel import ChannelSpec, CornerSpec
 
 
 def _workdir_name(day: str, corner_key: str, hhmmss: str) -> str:
@@ -230,6 +230,54 @@ def _apply_ambiguous_date_title_check(spec: ChannelSpec, script: dict) -> None:
             f"「{script.get('title', '')}」({'/'.join(match['matched_texts'])}) "
             f"不足根拠: {', '.join(match['missing']) or match['reason']}"
         )
+
+
+def _apply_youtube_engagement_actions(
+    spec: ChannelSpec, corner: CornerSpec, script: dict, video_id: str
+) -> None:
+    """公開直後のYouTube動画に再生リスト追加・討論誘発コメント投稿を行う(issue #86)。
+
+    いずれもpipeline設定で個別に無効化でき、失敗しても動画生成・投稿本体は
+    止めない(ソフトフェイル)。コメントの「固定」自体はYouTube Data APIに
+    無いため、投稿はできても固定は手動操作が必要(youtube.post_commentのdocstring参照)。
+    """
+    from . import youtube
+
+    if spec.pipeline_get("youtube_auto_playlist", False):
+        try:
+            playlist_id = youtube.ensure_playlist(
+                corner.label,
+                token_file=spec.publish.youtube.token,
+                client_secret_file=spec.publish.youtube.client_secret,
+            )
+            result = youtube.add_video_to_playlist(
+                playlist_id,
+                video_id,
+                token_file=spec.publish.youtube.token,
+                client_secret_file=spec.publish.youtube.client_secret,
+            )
+            _log(f"再生リスト追加 ({corner.label}): {result}")
+        except Exception as e:  # noqa: BLE001 - 非致命的な後処理
+            _log(f"再生リスト追加失敗（投稿は継続）: {e}")
+
+    if spec.pipeline_get("youtube_auto_engagement_comment", False):
+        try:
+            comment_text = ai_text.generate_engagement_comment(corner, script)
+            if not comment_text:
+                _log("討論誘発コメント生成に失敗→投稿スキップ")
+            else:
+                youtube.post_comment(
+                    video_id,
+                    comment_text,
+                    token_file=spec.publish.youtube.token,
+                    client_secret_file=spec.publish.youtube.client_secret,
+                )
+                _log(
+                    f"討論誘発コメント投稿: {comment_text}"
+                    "（固定はYouTube Studioで手動操作してください）"
+                )
+        except Exception as e:  # noqa: BLE001 - 非致命的な後処理
+            _log(f"コメント投稿失敗（投稿は継続）: {e}")
 
 
 def _run_once(
@@ -791,6 +839,8 @@ def _run_once(
         # queued予約をcancelしない。公開済み題材の再投稿防止を優先する。
         if any(result.status == "ok" for result in pub_results):
             reservation_state["external_published"] = True
+        if video_id:
+            _apply_youtube_engagement_actions(spec, corner, script, video_id)
     else:
         _log("アップロードはスキップ (--no-upload)")
 

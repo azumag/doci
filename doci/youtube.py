@@ -725,6 +725,213 @@ def update_title_description(
     return "updated"
 
 
+def ensure_playlist(
+    title: str,
+    *,
+    description: str = "",
+    privacy: str = "unlisted",
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> str:
+    """titleと同名の再生リストのIDを返す。無ければ作成する(issue #86)。"""
+    if not title.strip():
+        raise ValueError("title を空文字にはできません")
+    if privacy not in {"public", "unlisted", "private"}:
+        raise ValueError(f"invalid YouTube privacy: {privacy!r}")
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=MANAGE_SCOPES,
+    )
+    service = _build_service(creds)
+    page_token = None
+    while True:
+        resp = (
+            service.playlists()
+            .list(part="snippet", mine=True, maxResults=50, pageToken=page_token)
+            .execute()
+        )
+        for item in resp.get("items") or []:
+            if (item.get("snippet") or {}).get("title") == title:
+                return item["id"]
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    created = (
+        service.playlists()
+        .insert(
+            part="snippet,status",
+            body={
+                "snippet": {"title": title, "description": description},
+                "status": {"privacyStatus": privacy},
+            },
+        )
+        .execute()
+    )
+    return created["id"]
+
+
+def playlist_video_ids(
+    playlist_id: str,
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> set[str]:
+    """再生リストに現在含まれる動画IDの集合を返す（変更なし）。"""
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ACCOUNT_SCOPES,
+    )
+    service = _build_service(creds)
+    video_ids: set[str] = set()
+    page_token = None
+    while True:
+        resp = (
+            service.playlistItems()
+            .list(
+                part="contentDetails",
+                playlistId=playlist_id,
+                maxResults=50,
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        for item in resp.get("items") or []:
+            video_id = (item.get("contentDetails") or {}).get("videoId")
+            if video_id:
+                video_ids.add(video_id)
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return video_ids
+
+
+def add_video_to_playlist(
+    playlist_id: str,
+    video_id: str,
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> str:
+    """再生リストに動画を追加する。既に含まれていれば何もしない(issue #86)。"""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+        raise ValueError(f"invalid YouTube video id: {video_id!r}")
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=MANAGE_SCOPES,
+    )
+    service = _build_service(creds)
+    existing = (
+        service.playlistItems()
+        .list(part="id", playlistId=playlist_id, videoId=video_id)
+        .execute()
+    )
+    if existing.get("items"):
+        return "already_present"
+    service.playlistItems().insert(
+        part="snippet",
+        body={
+            "snippet": {
+                "playlistId": playlist_id,
+                "resourceId": {"kind": "youtube#video", "videoId": video_id},
+            }
+        },
+    ).execute()
+    return "added"
+
+
+_MAX_CHANNEL_KEYWORDS_LENGTH = 500
+
+
+def set_channel_keywords(
+    keywords: list[str],
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> str:
+    """チャンネルのbrandingSettings.channel.keywordsを設定する(issue #86)。
+
+    channel配下のtitle等、およびimage/hints等の兄弟オブジェクトを含む
+    brandingSettings全体を現状値のまま保持し、channel.keywordsだけ
+    空白区切り(スペースを含む語は引用符で囲む)の1文字列にして上書きする。
+    YouTubeのkeywords引用符構文にエスケープ機構は無いため、語に含まれる
+    `"` はそのまま送ると構文が壊れる。エスケープではなく除去することで
+    安全側に倒す。
+    """
+    if not keywords:
+        raise ValueError("keywords を空にはできません")
+    sanitized = [kw.replace('"', "") for kw in keywords]
+    joined = " ".join(f'"{kw}"' if " " in kw else kw for kw in sanitized)
+    if len(joined) > _MAX_CHANNEL_KEYWORDS_LENGTH:
+        raise ValueError(
+            f"keywords は{_MAX_CHANNEL_KEYWORDS_LENGTH}文字以内にしてください: {len(joined)}文字"
+        )
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=MANAGE_SCOPES,
+    )
+    service = _build_service(creds)
+    current = service.channels().list(part="brandingSettings", mine=True).execute()
+    items = current.get("items") or []
+    if len(items) != 1:
+        raise RuntimeError("YouTubeチャンネルが見つかりません")
+    branding = dict(items[0].get("brandingSettings") or {})
+    channel_branding = dict(branding.get("channel") or {})
+    channel_branding["keywords"] = joined
+    branding["channel"] = channel_branding
+    service.channels().update(
+        part="brandingSettings",
+        body={"id": items[0]["id"], "brandingSettings": branding},
+    ).execute()
+    return "updated"
+
+
+def post_comment(
+    video_id: str,
+    text: str,
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> str:
+    """動画へトップレベルコメントを投稿し、コメントIDを返す(issue #86)。
+
+    YouTube Data APIにコメントを「固定」するエンドポイントは無いため、
+    投稿後の固定はYouTube Studioから手動で行う必要がある。
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+        raise ValueError(f"invalid YouTube video id: {video_id!r}")
+    if not text.strip():
+        raise ValueError("text を空文字にはできません")
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=MANAGE_SCOPES,
+    )
+    service = _build_service(creds)
+    resp = (
+        service.commentThreads()
+        .insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "videoId": video_id,
+                    "topLevelComment": {"snippet": {"textOriginal": text}},
+                }
+            },
+        )
+        .execute()
+    )
+    return resp["id"]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="YouTube アップロード")
     ap.add_argument("--auth", action="store_true", help="初回OAuth同意してtokenを保存")
@@ -761,6 +968,28 @@ def main() -> None:
         "--expected-title",
         help="現在のタイトルがこれと一致するときだけ更新する（競合検出）",
     )
+    ap.add_argument(
+        "--ensure-playlist",
+        metavar="TITLE",
+        help="同名の再生リストのIDを表示する。無ければ作成する",
+    )
+    ap.add_argument(
+        "--add-to-playlist",
+        metavar="PLAYLIST_ID",
+        help="--video-id で指定した動画をこの再生リストに追加する",
+    )
+    ap.add_argument("--video-id", help="--add-to-playlist で追加する対象動画ID")
+    ap.add_argument(
+        "--set-channel-keywords",
+        metavar="KEYWORDS",
+        help="カンマ区切りのキーワードでチャンネルのbrandingSettingsを更新する",
+    )
+    ap.add_argument(
+        "--post-comment",
+        metavar="VIDEO_ID",
+        help="指定した動画にトップレベルコメントを投稿する（--comment-text必須）。固定は手動",
+    )
+    ap.add_argument("--comment-text", help="--post-comment で投稿する本文")
     args = ap.parse_args()
     privacy = config.YOUTUBE_PRIVACY
     token_file = Path(config.YOUTUBE_TOKEN_FILE)
@@ -820,6 +1049,45 @@ def main() -> None:
             client_secret_file=client_secret_file,
         )
         print(f"{args.update_video}: {result}")
+        return
+    if args.ensure_playlist:
+        playlist_id = ensure_playlist(
+            args.ensure_playlist,
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+        )
+        print(f"playlist_id={playlist_id}")
+        return
+    if args.add_to_playlist:
+        if not args.video_id:
+            raise SystemExit("--add-to-playlist には --video-id が必要です")
+        result = add_video_to_playlist(
+            args.add_to_playlist,
+            args.video_id,
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+        )
+        print(f"{args.video_id} -> {args.add_to_playlist}: {result}")
+        return
+    if args.set_channel_keywords:
+        keywords = [kw.strip() for kw in args.set_channel_keywords.split(",") if kw.strip()]
+        result = set_channel_keywords(
+            keywords,
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+        )
+        print(f"keywords: {result}")
+        return
+    if args.post_comment:
+        if not args.comment_text:
+            raise SystemExit("--post-comment には --comment-text が必要です")
+        comment_id = post_comment(
+            args.post_comment,
+            args.comment_text,
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+        )
+        print(f"comment_id={comment_id}（固定はYouTube Studioで手動操作してください）")
         return
     if args.video:
         upload(

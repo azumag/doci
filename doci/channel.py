@@ -180,6 +180,8 @@ _PIPELINE_KEYS = {
     "performance_eval_window_hours",
     "performance_gated_publish",
     "feedback_repository",
+    "youtube_auto_playlist",
+    "youtube_auto_engagement_comment",
 }
 _STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
@@ -606,6 +608,16 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
     ):
         raise ChannelConfigError(
             "pipeline.research_requires_youtube_case_studies must be a boolean"
+        )
+    youtube_auto_playlist = pipeline.get("youtube_auto_playlist")
+    if youtube_auto_playlist is not None and not isinstance(youtube_auto_playlist, bool):
+        raise ChannelConfigError("pipeline.youtube_auto_playlist must be a boolean")
+    youtube_auto_engagement_comment = pipeline.get("youtube_auto_engagement_comment")
+    if youtube_auto_engagement_comment is not None and not isinstance(
+        youtube_auto_engagement_comment, bool
+    ):
+        raise ChannelConfigError(
+            "pipeline.youtube_auto_engagement_comment must be a boolean"
         )
     title_pattern_check = pipeline.get("title_pattern_check")
     if title_pattern_check is not None and not isinstance(title_pattern_check, bool):

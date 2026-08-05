@@ -223,6 +223,66 @@ research_requires_youtube_case_studies = false
             spec.pipeline_get("research_requires_youtube_case_studies")
         )
 
+    def test_rejects_invalid_youtube_auto_playlist_switch(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+youtube_auto_playlist = "yes"
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "youtube_auto_playlist"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_rejects_invalid_youtube_auto_engagement_comment_switch(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+youtube_auto_engagement_comment = "yes"
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "youtube_auto_engagement_comment"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_loads_youtube_engagement_pipeline_flags(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+youtube_auto_playlist = true
+youtube_auto_engagement_comment = true
+"""
+        )
+        spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertTrue(spec.pipeline_get("youtube_auto_playlist"))
+        self.assertTrue(spec.pipeline_get("youtube_auto_engagement_comment"))
+
     def test_rejects_invalid_plan_topic_retries(self) -> None:
         self._write_channel(
             toml="""\

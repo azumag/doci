@@ -43,7 +43,7 @@ filter = "eq=saturation=1.05:contrast=1.03"
 
 [style.bgm]
 dir = "bgm"
-volume = 0.14
+volume = 0.18
 rotation = "fixed"
 
 [publish]
@@ -67,3 +67,5 @@ max_uploads_per_day = 1
 performance_eval_window_hours = 72
 performance_gated_publish = true
 feedback_repository = "azumag/doci"
+youtube_auto_playlist = true
+youtube_auto_engagement_comment = true
