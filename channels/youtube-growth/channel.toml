@@ -67,3 +67,6 @@ performance_gated_publish = true
 feedback_repository = "azumag/doci"
 youtube_auto_playlist = true
 youtube_auto_engagement_comment = true
+# 動画が紹介するYouTube運用施策(viewer_action)を検知し、適用要否の判断は人間に
+# 委ねるためGitHub issueとして通知する。適用の自動化は行わない(issue #90)。
+tactic_issues = true

@@ -343,6 +343,14 @@ FEEDBACK_ISSUES_MAX_PER_WEEK = get_int("FEEDBACK_ISSUES_MAX_PER_WEEK", 3)
 FEEDBACK_ISSUES_HYPOTHESIS_COOLDOWN_DAYS = get_int(
     "FEEDBACK_ISSUES_HYPOTHESIS_COOLDOWN_DAYS", 30
 )
+# doci.tactic_issues（issue #90）: 動画が紹介するYouTube運用施策(viewer_action)を
+# GitHub issue化する際の上限・cooldown。feedback_issuesの週次枠を食い潰さないよう独立させる。
+TACTIC_ISSUES_MAX_PER_RUN = get_int("TACTIC_ISSUES_MAX_PER_RUN", 1)
+TACTIC_ISSUES_MAX_PER_WEEK = get_int("TACTIC_ISSUES_MAX_PER_WEEK", 2)
+# 同一施策(正規化したviewer_action)を再度issue化するまでの最短間隔。
+TACTIC_ISSUES_ACTION_COOLDOWN_DAYS = get_int("TACTIC_ISSUES_ACTION_COOLDOWN_DAYS", 30)
+# 候補として遡って走査するhistory.jsonlの範囲（日数）。
+TACTIC_ISSUES_LOOKBACK_DAYS = get_int("TACTIC_ISSUES_LOOKBACK_DAYS", 14)
 # doci.performance（issue #77）: 他チャンネルへの実績施策横展開で、
 # 評価完了からこの日数を超えた実験は展開候補にしない（鮮度ガード）。
 PERFORMANCE_PROPAGATION_MAX_AGE_DAYS = get_int(

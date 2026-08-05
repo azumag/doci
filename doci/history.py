@@ -222,6 +222,8 @@ _TOPIC_METADATA_FIELDS = (
     "viewpoint",
     "novelty_axis",
     "comparison_key",
+    "youtube_creator_problem",
+    "viewer_action",
 )
 _GENERIC_CANONICAL_THEMES = frozenset(
     {
@@ -341,6 +343,10 @@ def topic_metadata(
         "viewpoint": text("viewpoint", 160),
         "novelty_axis": text("novelty_axis", 40),
         "comparison_key": text("comparison_key", 200),
+        # issue #90: 動画が視聴者に提示する具体的なYouTube運用施策。
+        # doci運用への適用要否は人間が判断する(tactic_issues.py参照)。
+        "youtube_creator_problem": text("youtube_creator_problem", 200),
+        "viewer_action": text("viewer_action", 300),
     }
 
 
@@ -452,6 +458,8 @@ def _row_topic_metadata(
                     ("viewpoint", "viewpoint"),
                     ("novelty_axis", "novelty_axis"),
                     ("comparison_key", "comparison_key"),
+                    ("youtube_creator_problem", "youtube_creator_problem"),
+                    ("viewer_action", "viewer_action"),
                 ):
                     if (
                         source_key in research
