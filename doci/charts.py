@@ -37,7 +37,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import config
+from . import config, style_themes
 from .channel import ChartStyle
 
 _MULT = {"兆": 1e12, "億": 1e8, "万": 1e4, "千": 1e3}
@@ -843,7 +843,9 @@ def _page(
     h: int = 1920,
     style: ChartStyle | None = None,
 ) -> str:
-    css = _BASE_CSS.replace("__GRAIN__", _GRAIN)
+    css = _BASE_CSS.replace("__GRAIN__", _GRAIN) + style_themes.get(
+        style.theme if style else None
+    ).chart_css
     # 背景画像があれば body 背景に敷き、暗幕(scrim)で文字可読性を確保する。
     body_attr = f" style=\"background:#0a0a0c url('file://{bg}') center/cover no-repeat\"" if bg else ""
     scrim = "<div class='scrim'></div>" if bg else ""

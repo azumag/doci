@@ -17,6 +17,11 @@ persona = "prompts/persona_american.md"
 corner = "prompts/corner_capitalism.md"
 voice = "american_ai"
 
+[style]
+# テーマ: 墨地+ゴールド+明朝のアーカイブ/印刷物調(思想史コンテンツに合わせた既定デザイン)。
+# テーマ一覧とスタイル対応方針はREADME「チャンネル別デザインテーマ」参照。
+theme = "classic"
+
 [style.bgm]
 dir = "bgm"
 
