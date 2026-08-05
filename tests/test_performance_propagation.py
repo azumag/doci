@@ -196,9 +196,13 @@ class CrossChannelPropagationTest(unittest.TestCase):
         trait: str = "chart:present",
         effective: bool = True,
         hypothesis_source: str = "local",
-        ts: str = "2026-07-20T00:00:00+00:00",
+        ts: str | None = None,
         application_id: str = "source-app-1",
     ) -> dict:
+        # 固定の絶対時刻にすると、鮮度ガード(PERFORMANCE_PROPAGATION_MAX_AGE_DAYS)
+        # が実時刻と比較するため将来偽陽性で失敗する時限爆弾になる
+        # (PRレビュー指摘)。実行時刻からの相対時刻で生成する。
+        ts = ts or (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
         return {
             "ts": ts,
             "channel": "channel-a",
