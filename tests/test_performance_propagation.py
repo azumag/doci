@@ -399,6 +399,92 @@ class CrossChannelPropagationTest(unittest.TestCase):
             )
         self.assertEqual(other_corner["status"], "insufficient_data")
 
+    def test_end_to_end_local_experiment_propagates_via_real_pipeline(self) -> None:
+        """PRレビュー指摘の検証: 展開元の仮説を手書き辞書ではなく、実際の
+        build_decision/decision_hypothesis/reserve_performance_decision/
+        complete_performance_evaluationのパイプラインを通して生成し、
+        それが横展開されることを確認する(hand-authoredな辞書だけでは
+        `decision_hypothesis`の`source`デフォルト等の回帰を検出できないため)。
+        """
+        videos = []
+        for index in range(8):
+            upper = index >= 6
+            videos.append(
+                {
+                    "video_id": f"id-{index}",
+                    "corner": "video",
+                    "format_traits": (
+                        ["tier:long_short", "duration:60_to_179s", "chart:present"]
+                        if upper
+                        else ["tier:long_short", "duration:60_to_179s", "chart:absent"]
+                    ),
+                    "privacy_status": "unlisted",
+                    "data_api": {"views": 100},
+                    "analytics": {
+                        "views": 100,
+                        "average_view_percentage": 40 + index * 5,
+                    },
+                }
+            )
+        snapshot = {"collected_at": "2026-07-26T00:00:00+00:00", "videos": videos}
+
+        local_decision = performance.build_decision(
+            self.source, snapshot, corner_key="video"
+        )
+        self.assertEqual(local_decision["status"], "active")
+        self.assertEqual(local_decision["positive_traits"], ["chart:present"])
+
+        application_id = history.reserve_performance_decision(
+            self.source,
+            "video",
+            local_decision["decision_id"],
+            hypothesis=performance.decision_hypothesis(local_decision),
+        )
+        self.assertIsNotNone(application_id)
+        history.apply_performance_decision(
+            self.source,
+            "video",
+            local_decision["decision_id"],
+            str(application_id),
+            "id-7",
+        )
+
+        # 評価閾値に到達したsnapshotを与え、実際の_experiment_resultに
+        # 有効性を判定させる(id-7が最高スコアなのでeffective=True)。
+        evaluated_snapshot = json.loads(json.dumps(snapshot))
+        evaluated_snapshot["collected_at"] = "2026-07-26T06:00:00+00:00"
+        evaluated = performance.build_decision(
+            self.source, evaluated_snapshot, corner_key="video"
+        )
+        self.assertEqual(evaluated["status"], "active")  # 次の実験へ解禁済み
+        self.assertIsNone(
+            history.active_performance_experiment(self.source, "video")
+        )
+
+        rows = [
+            json.loads(line)
+            for line in self.source.history_file.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        evaluated_row = next(
+            row for row in rows if row.get("status") == "performance_evaluated"
+        )
+        self.assertTrue(evaluated_row["performance_result"]["effective"])
+        self.assertEqual(evaluated_row["performance_hypothesis"]["source"], "local")
+
+        # 展開先が、実パイプラインで生成された展開元の実験を輸入できる。
+        with patch.object(
+            performance.channel, "load", side_effect=lambda cid: self.source
+        ):
+            imported = performance.build_decision(
+                self.dest, self.insufficient_snapshot, corner_key="video"
+            )
+        self.assertEqual(imported["status"], "active")
+        self.assertEqual(imported["source"], "cross_channel")
+        self.assertEqual(imported["positive_traits"], ["chart:present"])
+        self.assertEqual(imported["origin"]["application_id"], application_id)
+
     def test_cancelled_import_can_be_reoffered_with_same_decision_id(self) -> None:
         """PRレビュー指摘の検証: cross_channelのdecision_idは決定的ハッシュだが、
         予約がcancelされた場合は(ローカル仮説と同様)同じdecision_idで
