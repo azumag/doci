@@ -36,6 +36,9 @@ _TACTIC_MARKER_RE = re.compile(r"<!--\s*doci-tactic:([0-9a-f]{16})\s*-->")
 _ACTION_MARKER_RE = re.compile(r"<!--\s*doci-tactic-action:([0-9a-f]{16})\s*-->")
 _LOCK_WAIT_TIMEOUT_SECONDS = 30.0
 _LOCK_RETRY_SECONDS = 0.25
+# "tactic"ラベルは事前に対象repoへ作成しておく必要がある(`gh label create tactic`)。
+# 未作成だと`gh issue create`が失敗し続け、run_daily側のソフトフェイルで
+# ログ1行のみになる(feedback_issues.pyの"feedback"ラベルも同様の前提、既存踏襲)。
 _ISSUE_LABELS = ("enhancement", "tactic")
 # gh issue list の --json body は /search/issues と異なり結果整合ラグがないREST/
 # GraphQL経由。件数がこの上限に達したら安全側で停止する。
@@ -214,10 +217,20 @@ def _recent_same_action(records: list[dict], action_key: str, now: datetime) -> 
 
 
 def _local_terminal_record(records: list[dict], fp: str) -> dict | None:
+    """このfingerprint(動画+施策)を今後スキップしてよいか判定する。
+
+    "duplicate_action"(同一施策が他動画でcooldown中)もここに含める:
+    TACTIC_ISSUES_LOOKBACK_DAYS(既定14日)がTACTIC_ISSUES_ACTION_COOLDOWN_DAYS
+    (既定30日)より短いため、このcandidateがcooldown失効まで生き残ることは
+    構造的にない(lookbackを外れて候補から消えるのが先)。恒久スキップにしても
+    再挑戦の機会を失わず、無駄なgh照会とJSONL追記の増殖を防げる
+    (PR #91 レビュー指摘)。
+    """
     for row in reversed(records):
         if row.get("fingerprint") == fp and row.get("status") in (
             "created",
             "duplicate",
+            "duplicate_action",
         ):
             return row
     return None

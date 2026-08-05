@@ -220,6 +220,31 @@ class TacticIssuesTest(unittest.TestCase):
             result = tactic_issues.run(self.spec, apply=True, now=self.now)
         self.assertEqual(len(result["created"]), 1)
 
+    def test_remote_action_duplicate_is_locally_terminal_on_rerun(self) -> None:
+        # PR #91 レビュー指摘の回帰テスト: duplicate_action_remoteを検出した
+        # 候補は、以後の再実行でgh呼び出し無しにローカルだけでスキップされる
+        # べき(lookback<cooldownのため再挑戦の機会は元々失われない)。
+        self._write_published_row(video_id="v1")
+        action_key = tactic_issues._action_key(
+            tactic_issues._candidate_rows(self.spec, now=self.now)[0]
+        )
+        recent = (self.now - timedelta(days=1)).isoformat()
+        other_action_hash = tactic_issues._action_hash(action_key)
+        other_body = f"<!-- doci-tactic-action:{other_action_hash} -->\n本文"
+        with patch.object(tactic_issues, "_run_gh") as mock_run_gh:
+            mock_run_gh.side_effect = [
+                _search_response(
+                    [_issue_row(number=95, body=other_body, state="OPEN", created_at=recent)]
+                )
+            ]
+            first = tactic_issues.run(self.spec, apply=True, now=self.now)
+        self.assertEqual(first["skipped"][0]["skip_reason"], "duplicate_action_remote")
+
+        with patch.object(tactic_issues, "_run_gh") as mock_run_gh2:
+            second = tactic_issues.run(self.spec, apply=True, now=self.now)
+        mock_run_gh2.assert_not_called()
+        self.assertEqual(second["skipped"][0]["skip_reason"], "local_duplicate_action")
+
     # 6. 週次上限(ローカル/リモート双方)
 
     def test_apply_respects_weekly_limit(self) -> None:
