@@ -58,52 +58,6 @@ def _publish_result_summary(results: list) -> list[dict[str, object]]:
     ][:12]
 
 
-def _finalize_performance_application(
-    spec: ChannelSpec,
-    corner_key: str,
-    decision_id: str,
-    application_id: str | None,
-    video_id: str | None,
-    reservation_state: dict,
-) -> str | None:
-    if not application_id:
-        return None
-    if video_id:
-        # 外部投稿済みの事実を、失敗し得る履歴書込みより先に立てる。
-        # 書込み失敗時にapplicationをcancelして同じ仮説を再投稿しない。
-        reservation_state["external_published"] = True
-        history.apply_performance_decision(
-            spec,
-            corner_key,
-            decision_id,
-            application_id,
-            video_id,
-        )
-        return application_id
-    if reservation_state.get("external_unknown"):
-        # 投稿結果不明（タイムアウト等）は実際には公開済みの可能性があるため、
-        # topic_ledgerのpublishing状態と同様に取り消さず手動確認まで保留する。
-        # 解消するまでcornerの次実験は適用されない
-        # （performance_gated_publishのチャンネルは新規動画が公開されなくなる）。
-        _log(
-            "実績適用の結果が不明のため保留（要手動復旧）: "
-            f"application_id={application_id} corner={corner_key} "
-            "`python -m doci.run_daily --channel <id> "
-            f"--recover-performance-application {application_id} "
-            "--recovery-status <cancelled|published> [--recovery-video-id <id>]`"
-        )
-        return application_id
-    history.cancel_performance_decision(
-        spec,
-        corner_key,
-        decision_id,
-        application_id,
-        "YouTube投稿が成功しなかったため仮説を未消費に戻す",
-    )
-    reservation_state.pop("performance_application_id", None)
-    return None
-
-
 def _credits(spec: ChannelSpec, corner) -> str:
     """概要欄に付ける素材クレジット。VOICEVOX はキャラ名込みで表記必須（利用規約）。
     Pexels は必須ではないが明記する。"""
@@ -315,51 +269,11 @@ def _run_once(
         raise ValueError(f"unknown corner for channel {spec.id}: {corner_key}")
     if real_publish:
         topic_ledger.ensure_daily_capacity(spec)
-    corner_candidates = (
-        [spec.corners[corner_key]]
+    corner = (
+        spec.corners[corner_key]
         if corner_key
-        else corners.rotation_order(spec, history.last_corner(spec))
+        else corners.pick_corner(spec, history.last_corner(spec))
     )
-    eval_window_hours = 0
-    if real_publish and spec.pipeline_get("performance_feedback", False):
-        eval_window_hours = int(
-            spec.pipeline_get("performance_eval_window_hours", 0) or 0
-        )
-    corner = None
-    eval_window_check = None
-    last_skip_exc: history.PerformanceEvalWindowSkip | None = None
-    for candidate in corner_candidates:
-        if eval_window_hours <= 0:
-            corner = candidate
-            break
-        try:
-            eval_window_check = history.ensure_corner_eval_capacity(
-                spec, candidate.key, eval_window_hours
-            )
-        except history.PerformanceEvalWindowSkip as exc:
-            last_skip_exc = exc
-            continue
-        corner = candidate
-        break
-    if corner is None:
-        # corner_keyを明示した場合はcandidatesが1件のため単純に再送出。
-        # 自動選択の場合はrotation全corner分（各cornerは独立した実験を
-        # 持つ）を試したうえで、それでも空きが無いときだけスキップする
-        # （評価待ちの1cornerだけで他cornerの投稿枠まで奪わないため）。
-        _log(
-            f"実験評価期間スキップ: rotation全{len(corner_candidates)}corner中"
-            f"評価期間内でないcornerが無い（最後に確認: {last_skip_exc.reason}）"
-        )
-        raise last_skip_exc
-    if (
-        eval_window_check is not None
-        and eval_window_check["active"]
-        and eval_window_check["elapsed_hours"] is None
-    ):
-        _log(
-            f"実験評価期間チェック: corner={corner.key} "
-            f"ts不明のため経過時間を判定できず生成を継続"
-        )
     voice = spec.voice_for(corner)
     workdir = spec.output_dir / _workdir_name(
         day, corner.key, datetime.now().strftime("%H%M%S")
@@ -372,53 +286,10 @@ def _run_once(
     )
     _log(
         "投稿頻度policy: "
-        f"max_uploads_per_day={max_uploads_per_day if max_uploads_per_day is not None else '無制限'} "
-        f"performance_eval_window_hours={spec.pipeline_get('performance_eval_window_hours', 0)}"
+        f"max_uploads_per_day={max_uploads_per_day if max_uploads_per_day is not None else '無制限'}"
     )
 
     # 1) 台本
-    performance_decision = None
-    performance_application_id: str | None = None
-    if spec.pipeline_get("performance_feedback", False):
-        try:
-            from . import performance
-
-            performance_decision = performance.refresh(spec, corner_key=corner.key)
-            if performance_decision["status"] == "active" and real_publish:
-                performance_application_id = history.reserve_performance_decision(
-                    spec,
-                    corner.key,
-                    performance_decision["decision_id"],
-                    hypothesis=performance.decision_hypothesis(performance_decision),
-                )
-                if performance_application_id:
-                    reservation_state.update(
-                        {
-                            "performance_spec": spec,
-                            "performance_corner": corner.key,
-                            "performance_decision_id": performance_decision[
-                                "decision_id"
-                            ],
-                            "performance_application_id": performance_application_id,
-                        }
-                    )
-                else:
-                    performance_decision = {
-                        **performance_decision,
-                        "status": "waiting",
-                        "reason": (
-                            "同じdecisionは別runが適用予約済み。新しい指標snapshotを待つ"
-                        ),
-                        "guidance": "",
-                    }
-            _log(
-                "実績フィードバック: "
-                f"{performance_decision['status']} "
-                f"(decision={performance_decision['decision_id']}; "
-                f"{performance_decision['reason']})"
-            )
-        except Exception as exc:  # readback不調でも通常生成は継続
-            _log(f"実績フィードバック取得失敗→なしで継続: {str(exc)[:240]}")
     _log("台本生成 (OpenCode Go / qwen3.7-plus)…")
     cooldown_days = int(
         spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
@@ -544,7 +415,6 @@ def _run_once(
         recent_titles_for_prompt,
         topic_guard=reserve_selected_topic,
         topic_metadata_guard=capture_topic_metadata,
-        performance_decision=performance_decision,
         recent_openings=recent_openings_for_prompt,
     )
     _apply_title_pattern_check(
@@ -552,46 +422,19 @@ def _run_once(
     )
     _apply_narration_pattern_check(spec, script, recent_openings_for_prompt)
     _apply_ambiguous_date_title_check(spec, script)
-    if eval_window_check is not None:
-        script["_performance_eval_window"] = eval_window_check
-    if spec.pipeline_get("performance_gated_publish", False):
-        theme_assessment = None
-        youtube_privacy = "public" if performance_application_id else "unlisted"
-        script["_performance_gated_publish"] = {
-            "applied": bool(performance_application_id),
-            "privacy": youtube_privacy,
-            "decision_id": (
-                performance_decision.get("decision_id")
-                if performance_decision
-                else None
-            ),
-        }
-        if performance_application_id:
-            _log(
-                "実績フィードバック公開ゲート: 施策適用runのためpublic "
-                f"(decision={script['_performance_gated_publish']['decision_id']})"
-            )
-        else:
-            status = performance_decision.get("status") if performance_decision else None
-            reason = performance_decision.get("reason") if performance_decision else None
-            _log(
-                "実績フィードバック公開ゲート: 施策未適用のためunlisted "
-                f"(status={status}; {reason})"
-            )
-    else:
-        from . import youtube_review
+    from . import youtube_review
 
-        youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)
-        if theme_assessment is not None:
-            script["_youtube_theme_review"] = theme_assessment.to_dict()
-            if theme_assessment.eligible_for_public:
-                _log("YouTube主題ガード: 3項目と主題適合が明確→public")
-            else:
-                _log(
-                    "YouTube主題ガード: "
-                    + " / ".join(theme_assessment.reasons)
-                    + "→unlisted"
-                )
+    youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)
+    if theme_assessment is not None:
+        script["_youtube_theme_review"] = theme_assessment.to_dict()
+        if theme_assessment.eligible_for_public:
+            _log("YouTube主題ガード: 3項目と主題適合が明確→public")
+        else:
+            _log(
+                "YouTube主題ガード: "
+                + " / ".join(theme_assessment.reasons)
+                + "→unlisted"
+            )
     (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
 
@@ -849,15 +692,6 @@ def _run_once(
             # APIが受理した直後のタイムアウトも含め、成功IDが無い限り
             # publishingを解除しない。重複投稿より手動確認を優先する。
             reservation_state["external_unknown"] = True
-        if performance_application_id and performance_decision:
-            performance_application_id = _finalize_performance_application(
-                spec,
-                corner.key,
-                performance_decision["decision_id"],
-                performance_application_id,
-                video_id,
-                reservation_state,
-            )
         # 外部投稿が1件でも成功した後は、後続の履歴詳細保存が失敗しても
         # queued予約をcancelしない。公開済み題材の再投稿防止を優先する。
         if any(result.status == "ok" for result in pub_results):
@@ -907,12 +741,6 @@ def _run_once(
             ),
             "reservation_id": reservation_id,
             "topic_ledger_reservation_id": topic_ledger_reservation_id,
-            "performance_decision_id": (
-                performance_decision["decision_id"]
-                if performance_application_id and performance_decision
-                else None
-            ),
-            "performance_application_id": performance_application_id,
             "workdir": str(workdir),
             "description": script.get("description", ""),
             "duration_sec": round(tts.duration, 1),
@@ -1076,26 +904,6 @@ def run(
                 )
             except Exception as cleanup_exc:  # 元の制作失敗を隠さない
                 _log(f"チャネル題材履歴の取消失敗: {cleanup_exc}")
-        performance_application_id = reservation_state.get(
-            "performance_application_id"
-        )
-        if (
-            performance_application_id
-            and not reservation_state.get("finalized")
-            and not reservation_state.get("external_published")
-            and not reservation_state.get("external_unknown")
-            and reservation_state.get("topic_stage") != "publishing"
-        ):
-            try:
-                history.cancel_performance_decision(
-                    reservation_state["performance_spec"],
-                    reservation_state["performance_corner"],
-                    reservation_state["performance_decision_id"],
-                    performance_application_id,
-                    reason,
-                )
-            except Exception as cleanup_exc:  # 元の制作失敗を隠さない
-                _log(f"実績仮説の取消失敗: {cleanup_exc}")
         raise
 
 
@@ -1148,10 +956,7 @@ def _run_all_channels(
             results.append(
                 {"channel": channel_id, "status": "ok", "result": result}
             )
-        except (
-            history.TopicCooldownSkip,
-            history.PerformanceEvalWindowSkip,
-        ) as exc:
+        except history.TopicCooldownSkip as exc:
             results.append(
                 {
                     "channel": channel_id,
@@ -1215,18 +1020,10 @@ def main() -> int:
     ap.add_argument("--no-upload", action="store_true", help="生成のみ（アップロードしない）")
     ap.add_argument("--video-scenes", type=int, default=config.MINIMAX_VIDEO_SCENES)
     ap.add_argument(
-        "--recover-performance-application",
-        metavar="APPLICATION_ID",
-        help=(
-            "外部結果を運用者が確認済みの実績適用（--channel必須）を終端化。"
-            "投稿結果不明のまま残った予約を解消し、cornerの次実験を再度許可する"
-        ),
-    )
-    ap.add_argument(
         "--recovery-status",
         choices=("cancelled", "published"),
         default="cancelled",
-        help="publishing/実績適用復旧の終端状態（--recover-publishing/--recover-performance-application専用）",
+        help="publishing復旧の終端状態（--recover-publishing専用）",
     )
     ap.add_argument(
         "--recovery-video-id",
@@ -1254,23 +1051,6 @@ def main() -> int:
             return 1
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    if args.recover_performance_application:
-        if not args.channel:
-            ap.error("--recover-performance-application には --channel が必要です")
-        try:
-            spec = channel.load(args.channel)
-            result = history.recover_performance_application(
-                spec,
-                args.recover_performance_application,
-                status=args.recovery_status,
-                video_id=args.recovery_video_id,
-                reason=args.recovery_reason,
-            )
-        except Exception as exc:
-            _log(f"実績適用復旧失敗: {exc}")
-            return 1
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
     if args.all_channels:
         if args.corner:
             ap.error("--corner は --all-channels と同時に指定できません")
@@ -1290,10 +1070,7 @@ def main() -> int:
             do_upload=not args.no_upload,
             video_scenes=args.video_scenes,
         )
-    except (
-        history.TopicCooldownSkip,
-        history.PerformanceEvalWindowSkip,
-    ) as exc:
+    except history.TopicCooldownSkip as exc:
         print(
             json.dumps(
                 {

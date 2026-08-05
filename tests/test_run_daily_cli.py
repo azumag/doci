@@ -104,30 +104,6 @@ class RunDailyCliTest(unittest.TestCase):
         self.assertEqual(summary["channels"][0]["status"], "skipped")
         self.assertIn("過去30日以内", summary["channels"][0]["reason"])
 
-    def test_all_channels_treats_performance_eval_window_as_normal_skip(self) -> None:
-        skip = history.PerformanceEvalWindowSkip(
-            "alpha", "video", "app-1", "id-7", 72, 10.0
-        )
-        with (
-            patch.object(run_daily.channel, "discover", return_value=["alpha"]),
-            patch.object(
-                run_daily.channel,
-                "load",
-                return_value=SimpleNamespace(id="alpha"),
-            ),
-            patch.object(run_daily, "run", side_effect=skip),
-        ):
-            summary, exit_code = run_daily._run_all_channels(
-                "2026-07-17", do_upload=True, video_scenes=0
-            )
-
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(summary["succeeded"], 0)
-        self.assertEqual(summary["skipped"], 1)
-        self.assertEqual(summary["failed"], 0)
-        self.assertEqual(summary["channels"][0]["status"], "skipped")
-        self.assertIn("評価期間72時間内", summary["channels"][0]["reason"])
-
     def test_run_cancels_active_reservation_when_production_fails(self) -> None:
         spec = SimpleNamespace(id="alpha")
         state = {
@@ -135,10 +111,6 @@ class RunDailyCliTest(unittest.TestCase):
             "corner": "video",
             "topic": "失敗した題材",
             "reservation_id": "reservation",
-            "performance_spec": spec,
-            "performance_corner": "video",
-            "performance_decision_id": "decision",
-            "performance_application_id": "application",
         }
 
         def fail_once(*args):
@@ -148,21 +120,12 @@ class RunDailyCliTest(unittest.TestCase):
         with (
             patch.object(run_daily, "_run_once", side_effect=fail_once),
             patch.object(run_daily.history, "cancel_topic") as cancel_mock,
-            patch.object(
-                run_daily.history,
-                "cancel_performance_decision",
-            ) as cancel_performance_mock,
         ):
             with self.assertRaisesRegex(RuntimeError, "tts failed"):
                 run_daily.run(spec, "2026-07-17", "video", True, 0)
 
         cancel_mock.assert_called_once()
         self.assertEqual(cancel_mock.call_args.args[3], "reservation")
-        cancel_performance_mock.assert_called_once()
-        self.assertEqual(
-            cancel_performance_mock.call_args.args[3],
-            "application",
-        )
 
     def test_run_keeps_queue_when_external_publish_already_succeeded(self) -> None:
         spec = SimpleNamespace(id="alpha")
@@ -174,10 +137,6 @@ class RunDailyCliTest(unittest.TestCase):
                     "corner": "video",
                     "topic": "公開済み題材",
                     "reservation_id": "reservation",
-                    "performance_spec": spec,
-                    "performance_corner": "video",
-                    "performance_decision_id": "decision",
-                    "performance_application_id": "application",
                     "external_published": True,
                 }
             )
@@ -186,16 +145,11 @@ class RunDailyCliTest(unittest.TestCase):
         with (
             patch.object(run_daily, "_run_once", side_effect=fail_after_publish),
             patch.object(run_daily.history, "cancel_topic") as cancel_mock,
-            patch.object(
-                run_daily.history,
-                "cancel_performance_decision",
-            ) as cancel_performance_mock,
         ):
             with self.assertRaisesRegex(OSError, "history write failed"):
                 run_daily.run(spec, "2026-07-17", "video", True, 0)
 
         cancel_mock.assert_not_called()
-        cancel_performance_mock.assert_not_called()
 
     def test_run_keeps_publishing_reservations_when_result_is_interrupted(self) -> None:
         spec = SimpleNamespace(id="alpha")
@@ -212,10 +166,6 @@ class RunDailyCliTest(unittest.TestCase):
                     "topic_ledger_topic": "中断時も結果確認が必要な題材",
                     "topic_ledger_reservation_id": "ledger-reservation",
                     "topic_stage": "publishing",
-                    "performance_spec": spec,
-                    "performance_corner": "video",
-                    "performance_decision_id": "decision",
-                    "performance_application_id": "application",
                 }
             )
             raise KeyboardInterrupt()
@@ -224,71 +174,12 @@ class RunDailyCliTest(unittest.TestCase):
             patch.object(run_daily, "_run_once", side_effect=interrupt_after_publish_stage),
             patch.object(run_daily.topic_ledger, "cancel") as ledger_cancel_mock,
             patch.object(run_daily.history, "cancel_topic") as history_cancel_mock,
-            patch.object(
-                run_daily.history,
-                "cancel_performance_decision",
-            ) as performance_cancel_mock,
         ):
             with self.assertRaises(KeyboardInterrupt):
                 run_daily.run(spec, "2026-07-17", "video", True, 0)
 
         ledger_cancel_mock.assert_not_called()
         history_cancel_mock.assert_not_called()
-        performance_cancel_mock.assert_not_called()
-
-    def test_performance_publish_marks_external_before_history_write(self) -> None:
-        spec = SimpleNamespace(id="alpha")
-        state = {"performance_application_id": "application"}
-
-        with (
-            patch.object(
-                run_daily.history,
-                "apply_performance_decision",
-                side_effect=OSError("history write failed"),
-            ),
-            patch.object(
-                run_daily.history,
-                "cancel_performance_decision",
-            ) as cancel_mock,
-        ):
-            with self.assertRaisesRegex(OSError, "history write failed"):
-                run_daily._finalize_performance_application(
-                    spec,
-                    "video",
-                    "decision",
-                    "application",
-                    "youtube-video",
-                    state,
-                )
-
-        self.assertTrue(state["external_published"])
-        cancel_mock.assert_not_called()
-
-    def test_performance_application_survives_unknown_publish_result(self) -> None:
-        spec = SimpleNamespace(id="alpha")
-        state = {
-            "performance_application_id": "application",
-            "external_unknown": True,
-        }
-
-        with (
-            patch.object(run_daily.history, "apply_performance_decision") as apply_mock,
-            patch.object(
-                run_daily.history, "cancel_performance_decision"
-            ) as cancel_mock,
-        ):
-            result = run_daily._finalize_performance_application(
-                spec,
-                "video",
-                "decision",
-                "application",
-                None,
-                state,
-            )
-
-        self.assertEqual(result, "application")
-        apply_mock.assert_not_called()
-        cancel_mock.assert_not_called()
 
     def test_list_channels_includes_last_run_and_isolates_bad_config(self) -> None:
         alpha = SimpleNamespace(id="alpha", name="Alpha")
@@ -407,61 +298,6 @@ class RunDailyCliTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         log_mock.assert_called_once()
         self.assertIn("video_idが必要", log_mock.call_args.args[0])
-
-    def test_main_recovers_performance_application_as_cancelled(self) -> None:
-        spec = SimpleNamespace(id="alpha")
-        recovery = {
-            "channel": "alpha",
-            "application_id": "app-1",
-            "status": "cancelled",
-            "idempotent": False,
-        }
-        with (
-            patch(
-                "sys.argv",
-                [
-                    "doci.run_daily",
-                    "--channel",
-                    "alpha",
-                    "--recover-performance-application",
-                    "app-1",
-                    "--recovery-reason",
-                    "タイムアウト後に未投稿を確認",
-                ],
-            ),
-            patch.object(run_daily.channel, "load", return_value=spec),
-            patch.object(
-                run_daily.history,
-                "recover_performance_application",
-                return_value=recovery,
-            ) as recover_mock,
-            contextlib.redirect_stdout(io.StringIO()) as stdout,
-        ):
-            exit_code = run_daily.main()
-
-        self.assertEqual(exit_code, 0)
-        recover_mock.assert_called_once_with(
-            spec,
-            "app-1",
-            status="cancelled",
-            video_id=None,
-            reason="タイムアウト後に未投稿を確認",
-        )
-        self.assertEqual(json.loads(stdout.getvalue()), recovery)
-
-    def test_main_requires_channel_for_performance_application_recovery(self) -> None:
-        with (
-            patch(
-                "sys.argv",
-                [
-                    "doci.run_daily",
-                    "--recover-performance-application",
-                    "app-1",
-                ],
-            ),
-            self.assertRaises(SystemExit),
-        ):
-            run_daily.main()
 
     def test_main_list_channels_does_not_require_default_channel(self) -> None:
         with (

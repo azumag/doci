@@ -18,8 +18,12 @@ def pick_corner(spec: ChannelSpec, last_corner: str | None) -> CornerSpec:
 def rotation_order(spec: ChannelSpec, last_corner: str | None) -> list[CornerSpec]:
     """`pick_corner`と同じ起点からrotationを一周ぶん返す。
 
-    先頭は`pick_corner`と同じコーナー。先頭候補が評価期間ゲート等で
-    使えない場合に、他のコーナーへ順にフォールバックする用途で使う。
+    先頭は`pick_corner`と同じコーナー。先頭候補が何らかの理由で使えない
+    場合に、他のコーナーへ順にフォールバックする用途向けのユーティリティ
+    （`run_daily.py`は現在`pick_corner`を直接使い、フォールバックは行わない。
+    以前は`performance_eval_window_hours`によるcorner毎の評価期間ゲートの
+    フォールバックにこの関数を使っていたが、実績フィードバックの自動適用
+    撤去(issue #92)に伴いその用途は無くなった）。
     """
     start = (
         (spec.rotation.index(last_corner) + 1) % len(spec.rotation)
@@ -48,7 +52,6 @@ def build_prompt(
     past_topics: list[str],
     research: dict | None = None,
     plan: dict | None = None,
-    performance_guidance: str = "",
     recent_openings: list[str] | None = None,
 ) -> str:
     """persona / 出力規則 / チャンネル追加規則 / corner を結合する。"""
@@ -72,13 +75,6 @@ def build_prompt(
             "\n## 直近の書き出し（これらと同じ型で始めない）\n"
             f"{numbered}\n"
             "上記と同じ修辞の型（反語疑問・定型的な前置き等）を連続させないこと。\n"
-        )
-    if performance_guidance:
-        prompt += (
-            "\n## このチャンネル自身の実績から得た形式仮説\n"
-            f"{performance_guidance}\n"
-            "題材の再利用ではなく、次回1本の形式実験にだけ使うこと。"
-            "最近の題材とtopic cooldownを必ず優先する。\n"
         )
     if research:
         from . import research as research_mod
