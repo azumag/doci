@@ -290,6 +290,61 @@ youtube_auto_engagement_comment = true
         self.assertTrue(spec.pipeline_get("youtube_auto_playlist"))
         self.assertTrue(spec.pipeline_get("youtube_auto_engagement_comment"))
 
+    def test_rejects_invalid_tactic_issues_switch(self) -> None:
+        # issue #90
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+tactic_issues = "yes"
+"""
+        )
+        with self.assertRaisesRegex(channel.ChannelConfigError, "tactic_issues"):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_loads_tactic_issues_flag(self) -> None:
+        # issue #90
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+tactic_issues = true
+"""
+        )
+        spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertTrue(spec.pipeline_get("tactic_issues"))
+
+    def test_tactic_issues_defaults_to_disabled(self) -> None:
+        # issue #90
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+"""
+        )
+        spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertIsNone(spec.pipeline_get("tactic_issues"))
+
     def test_rejects_invalid_plan_topic_retries(self) -> None:
         self._write_channel(
             toml="""\

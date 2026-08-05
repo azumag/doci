@@ -193,6 +193,7 @@ _PIPELINE_KEYS = {
     "feedback_repository",
     "youtube_auto_playlist",
     "youtube_auto_engagement_comment",
+    "tactic_issues",
 }
 _STYLE_KEYS = {"theme", "subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
@@ -648,6 +649,9 @@ def load(channel_id: str, *, channels_dir: Path | None = None) -> ChannelSpec:
         raise ChannelConfigError(
             "pipeline.youtube_auto_engagement_comment must be a boolean"
         )
+    tactic_issues = pipeline.get("tactic_issues")
+    if tactic_issues is not None and not isinstance(tactic_issues, bool):
+        raise ChannelConfigError("pipeline.tactic_issues must be a boolean")
     title_pattern_check = pipeline.get("title_pattern_check")
     if title_pattern_check is not None and not isinstance(title_pattern_check, bool):
         raise ChannelConfigError("pipeline.title_pattern_check must be a boolean")

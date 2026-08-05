@@ -539,6 +539,61 @@ class TopicCooldownTest(unittest.TestCase):
         )
         self.assertEqual(metadata["audience"], "初めて投稿するYouTube制作者")
 
+    def test_topic_metadata_saves_viewer_action_and_creator_problem(self) -> None:
+        # issue #90: 動画が視聴者に提示する具体的な施策(viewer_action)を
+        # history.jsonlへ永続化するための入り口。
+        metadata = history.topic_metadata(
+            "オートダビングで海外需要を測る",
+            {
+                "youtube_creator_problem": "海外視聴の需要を判断したい課題",
+                "viewer_action": "オートダビングを1本の動画で有効にして確認する",
+            },
+        )
+        self.assertEqual(
+            metadata["youtube_creator_problem"], "海外視聴の需要を判断したい課題"
+        )
+        self.assertEqual(
+            metadata["viewer_action"], "オートダビングを1本の動画で有効にして確認する"
+        )
+
+    def test_topic_metadata_defaults_viewer_action_to_empty_string(self) -> None:
+        # ideology等、youtube_creator系フィールドを持たないチャンネルでも
+        # 欠落時は空文字になり無害であることを固定する。
+        metadata = history.topic_metadata("共産主義ネタの題材", {})
+        self.assertEqual(metadata["youtube_creator_problem"], "")
+        self.assertEqual(metadata["viewer_action"], "")
+
+    def test_row_topic_metadata_recovers_viewer_action_from_legacy_script(self) -> None:
+        # issue #90: topic_metadataに未保存の旧history行でも、workdirの
+        # script.jsonの_researchからviewer_actionを復元できることを固定する。
+        workdir = self.root / "old-tactic-run"
+        workdir.mkdir()
+        (workdir / "script.json").write_text(
+            json.dumps(
+                {
+                    "_research": {
+                        "youtube_creator_problem": "海外視聴の需要を判断したい課題",
+                        "viewer_action": "オートダビングを1本の動画で有効にして確認する",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        row = {
+            "topic": "オートダビングで海外需要を測る",
+            "workdir": str(workdir),
+        }
+
+        metadata = history._row_topic_metadata(row)
+
+        self.assertEqual(
+            metadata["youtube_creator_problem"], "海外視聴の需要を判断したい課題"
+        )
+        self.assertEqual(
+            metadata["viewer_action"], "オートダビングを1本の動画で有効にして確認する"
+        )
+
     def test_rotation_ignores_queue_skip_and_cancel_events(self) -> None:
         self._append(
             {

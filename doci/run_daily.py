@@ -280,6 +280,28 @@ def _apply_youtube_engagement_actions(
             _log(f"コメント投稿失敗（投稿は継続）: {e}")
 
 
+def _apply_tactic_issue_detection(spec: ChannelSpec, video_id: str) -> None:
+    """公開直後の動画が紹介するYouTube運用施策(viewer_action)を検知し、
+    GitHub issueとして通知する(issue #90)。
+
+    施策をdoci運用へ自動適用するのはリスクが高いため行わない。検知のみ自動化し、
+    適用の要否判断と実装は人間に委ねる。失敗しても動画生成・投稿本体は止めない
+    (ソフトフェイル)。history.jsonl走査型のため、gh障害等で見送った候補も
+    lookback期間内なら次回投稿時に自動リカバリされる。
+    """
+    if not video_id or not spec.pipeline_get("tactic_issues", False):
+        return
+    try:
+        from . import tactic_issues
+
+        result = tactic_issues.run(spec, apply=True)
+        created = result.get("created") or []
+        skipped = result.get("skipped") or []
+        _log(f"施策issue: 作成{len(created)}件 見送り{len(skipped)}件")
+    except Exception as exc:  # noqa: BLE001 - 非致命的な後処理
+        _log(f"施策issue作成失敗（投稿は継続）: {exc}")
+
+
 def _run_once(
     spec: ChannelSpec,
     day: str,
@@ -903,6 +925,7 @@ def _run_once(
             ),
         },
     )
+    _apply_tactic_issue_detection(spec, video_id)
     media_cleanup: dict[str, object]
     from . import output_cleanup
 
