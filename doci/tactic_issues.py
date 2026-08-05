@@ -140,7 +140,11 @@ def _issue_title(candidate: dict, fp: str) -> str:
     corner = candidate.get("corner") or "unknown"
     action = str(candidate.get("viewer_action") or "")
     snippet = action if len(action) <= 40 else action[:40] + "…"
-    return f"[tactic] {corner}: {snippet} ({fp[:8]})"
+    # 動画リサーチ由来の信頼できないテキストを、指示ではなく引用だと分かる
+    # ようタイトル内でも「」で明示する(本文側の_fenced/_inline_codeと同じ
+    # 意図。バッククォートはissueタイトルではコード表記として描画されない
+    # ためここでは使わない、PR #91 レビュー指摘)。
+    return f"[tactic] {corner}: 「{snippet}」 ({fp[:8]})"
 
 
 def _fenced(text: str) -> str:

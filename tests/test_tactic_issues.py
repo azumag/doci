@@ -307,6 +307,15 @@ class TacticIssuesTest(unittest.TestCase):
         # バッククォートを含むタイトルでもインラインコードの囲みが壊れない。
         self.assertIn("`バッククォート｀混入｀タイトル`", candidate["body"])
 
+    def test_issue_title_quotes_untrusted_snippet(self) -> None:
+        # 2巡目レビュー指摘の回帰テスト: issueタイトルはgh issue create上で
+        # コード表記されないため、代わりに「」で引用であることを明示する。
+        self._write_published_row(video_id="v1", viewer_action="施策テキスト")
+        candidate = tactic_issues.build_candidate(
+            tactic_issues._candidate_rows(self.spec, now=self.now)[0]
+        )
+        self.assertIn("「施策テキスト」", candidate["title"])
+
     # 6. 週次上限(ローカル/リモート双方)
 
     def test_apply_respects_weekly_limit(self) -> None:
