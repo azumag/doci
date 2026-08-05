@@ -4,7 +4,6 @@ import contextlib
 import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,7 +14,6 @@ from doci import (
     config,
     corners,
     history,
-    performance,
     publish,
     run_daily,
     topic_ledger,
@@ -281,23 +279,12 @@ factcheck = false
                 "2026-07-16",
                 [],
                 topic_guard=guarded_topics.append,
-                performance_decision={
-                    "decision_id": "decision-1",
-                    "guidance": "retention形式を1変数だけ試す",
-                },
             )
 
         self.assertEqual(script["_channel"], "alpha")
         self.assertEqual(script["_corner"], "a")
         self.assertEqual(script["_speaker"], 41)
         self.assertEqual(guarded_topics, ["Title Description"])
-        self.assertEqual(
-            script["_performance_feedback"]["decision_id"], "decision-1"
-        )
-        self.assertIn(
-            "retention形式を1変数だけ試す",
-            dispatch_mock.call_args.args[0],
-        )
 
     def test_generate_does_not_fallback_to_claude_after_primary_failure(self) -> None:
         spec = self._make_spec(
@@ -822,7 +809,6 @@ factcheck = false
         publish_unknown: bool = False,
         publish_results: list[publish.PublishResult] | None = None,
         generate_side_effect=None,
-        performance_decision: dict | None = None,
     ):
         def fake_fetch_image(_prompt, out_path, **_kwargs):
             Path(out_path).write_bytes(b"image")
@@ -883,12 +869,6 @@ factcheck = false
             history_reserve_mock = enter(
                 patch.object(history, "reserve_topic", wraps=history.reserve_topic)
             )
-            if performance_decision is not None:
-                enter(
-                    patch.object(
-                        performance, "refresh", return_value=performance_decision
-                    )
-                )
             result = run_daily.run(
                 spec,
                 "2026-07-26",
@@ -927,26 +907,7 @@ factcheck = false
         channel_id: str,
         *,
         max_uploads_per_day: int = 1,
-        performance_gated_publish: bool = False,
-        performance_eval_window_hours: int = 0,
     ) -> channel.ChannelSpec:
-        review_section = (
-            ""
-            if performance_gated_publish
-            else "[publish.youtube.review]\nenabled = true\n"
-        )
-        needs_performance_feedback = (
-            performance_gated_publish or performance_eval_window_hours > 0
-        )
-        gated_lines = (
-            "performance_feedback = true\n" if needs_performance_feedback else ""
-        )
-        if performance_gated_publish:
-            gated_lines += "performance_gated_publish = true\n"
-        if performance_eval_window_hours > 0:
-            gated_lines += (
-                f"performance_eval_window_hours = {performance_eval_window_hours}\n"
-            )
         return self._make_spec(
             channel_id,
             pipeline=f"""\
@@ -958,194 +919,16 @@ privacy = "unlisted"
 client_secret = "client.json"
 token = "token.json"
 
-{review_section}
+[publish.youtube.review]
+enabled = true
+
 [pipeline]
 research = false
 plan = false
 factcheck = false
 max_uploads_per_day = {max_uploads_per_day}
-{gated_lines}""",
+""",
         )
-
-    def test_run_daily_eval_window_skip_blocks_generation_before_ai_text(self) -> None:
-        """issue #38: real_publish + performance_feedback + window>0 の配線が
-        実際にensure_corner_eval_capacityを呼び、生成(ai_text.generate)より前に
-        PerformanceEvalWindowSkipを送出することを確認する統合テスト
-        （review指摘: 単体テストのみではこの配線の退行を検知できない）。"""
-        spec = self._review_spec(
-            "eval-window-skip", performance_eval_window_hours=72
-        )
-        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        with patch.object(config, "OUTPUT", self.output_dir):
-            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
-            spec.history_file.write_text(
-                json.dumps(
-                    {
-                        "ts": recent_ts,
-                        "channel": spec.id,
-                        "corner": "a",
-                        "video_id": "prior-video",
-                        "status": "performance_applied",
-                        "performance_decision_id": "dec-1",
-                        "performance_application_id": "app-1",
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-        with (
-            patch.object(config, "OUTPUT", self.output_dir),
-            patch.object(config, "PUBLISH_DRY_RUN", False),
-            patch.object(ai_text, "generate") as generate_mock,
-        ):
-            with self.assertRaises(history.PerformanceEvalWindowSkip):
-                run_daily.run(
-                    spec,
-                    "2026-07-26",
-                    "a",
-                    do_upload=True,
-                    video_scenes=0,
-                )
-
-        generate_mock.assert_not_called()
-
-    def test_run_daily_falls_back_to_next_corner_when_one_is_eval_blocked(
-        self,
-    ) -> None:
-        """review指摘: 評価期間ゲートはcorner単位の実験を独立に扱うはずが、
-        1cornerの評価期間中に自動選択が他cornerの生成まで止めていた。
-        rotationの次候補（corner b）が空いていればそちらへフォールバック
-        し、rotation全体は止まらないことを確認する。"""
-        spec = self._review_spec(
-            "eval-window-fallback", performance_eval_window_hours=72
-        )
-        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        old_ts = (datetime.now(timezone.utc) - timedelta(hours=200)).isoformat()
-        with patch.object(config, "OUTPUT", self.output_dir):
-            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
-            rows = [
-                {
-                    "ts": old_ts,
-                    "channel": spec.id,
-                    "corner": "b",
-                    "video_id": "prior-b-video",
-                    "status": "published",
-                },
-                {
-                    "ts": recent_ts,
-                    "channel": spec.id,
-                    "corner": "a",
-                    "video_id": "prior-a-video",
-                    "status": "performance_applied",
-                    "performance_decision_id": "dec-1",
-                    "performance_application_id": "app-1",
-                },
-            ]
-            with spec.history_file.open("w", encoding="utf-8") as file:
-                for row in rows:
-                    file.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-        script = self._review_script(
-            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
-        )
-        result, publish_mock, _, _ = self._run_review_pipeline(
-            spec,
-            script,
-            "fallback-video1",
-            corner_key=None,
-        )
-
-        self.assertEqual(result["corner"], "b")
-        self.assertEqual(result["video_id"], "fallback-video1")
-        publish_mock.assert_called_once()
-
-    def test_run_daily_all_corners_blocked_raises_skip(self) -> None:
-        spec = self._review_spec(
-            "eval-window-all-blocked", performance_eval_window_hours=72
-        )
-        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        with patch.object(config, "OUTPUT", self.output_dir):
-            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
-            rows = [
-                {
-                    "ts": recent_ts,
-                    "channel": spec.id,
-                    "corner": "a",
-                    "video_id": "prior-a-video",
-                    "status": "performance_applied",
-                    "performance_decision_id": "dec-1",
-                    "performance_application_id": "app-1",
-                },
-                {
-                    "ts": recent_ts,
-                    "channel": spec.id,
-                    "corner": "b",
-                    "video_id": "prior-b-video",
-                    "status": "performance_applied",
-                    "performance_decision_id": "dec-2",
-                    "performance_application_id": "app-2",
-                },
-            ]
-            with spec.history_file.open("w", encoding="utf-8") as file:
-                for row in rows:
-                    file.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-        with (
-            patch.object(config, "OUTPUT", self.output_dir),
-            patch.object(config, "PUBLISH_DRY_RUN", False),
-            patch.object(ai_text, "generate") as generate_mock,
-        ):
-            with self.assertRaises(history.PerformanceEvalWindowSkip):
-                run_daily.run(
-                    spec,
-                    "2026-07-26",
-                    None,
-                    do_upload=True,
-                    video_scenes=0,
-                )
-
-        generate_mock.assert_not_called()
-
-    def test_run_daily_queued_experiment_without_video_does_not_block_generation(
-        self,
-    ) -> None:
-        """review指摘: 投稿結果unknownで保留された performance_queued 行
-        （video_id未確定）には評価期間ゲートを適用しないため、生成
-        (ai_text.generate) は正常に進む（動画が無く保護対象が無いため）。"""
-        spec = self._review_spec(
-            "eval-window-queued", performance_eval_window_hours=72
-        )
-        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        with patch.object(config, "OUTPUT", self.output_dir):
-            spec.history_file.parent.mkdir(parents=True, exist_ok=True)
-            spec.history_file.write_text(
-                json.dumps(
-                    {
-                        "ts": recent_ts,
-                        "channel": spec.id,
-                        "corner": "a",
-                        "video_id": None,
-                        "status": "performance_queued",
-                        "performance_decision_id": "dec-1",
-                        "performance_application_id": "app-1",
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-        script = self._review_script(
-            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
-        )
-        result, publish_mock, _, _ = self._run_review_pipeline(
-            spec,
-            script,
-            "queued-no-video1",
-        )
-
-        self.assertEqual(result["video_id"], "queued-no-video1")
-        publish_mock.assert_called_once()
 
     def test_run_daily_choose_privacy_unlisted_when_theme_incomplete(self) -> None:
         spec = self._review_spec("review-unlisted")
@@ -1184,58 +967,6 @@ max_uploads_per_day = {max_uploads_per_day}
             "public",
         )
         self.assertEqual(result["youtube_privacy"], "public")
-
-    def test_run_daily_performance_gate_publishes_when_experiment_applied(self) -> None:
-        spec = self._review_spec("gate-public", performance_gated_publish=True)
-        script = self._review_script(viewer_action="")
-
-        result, publish_mock, _, _ = self._run_review_pipeline(
-            spec,
-            script,
-            "gate-public1",
-            performance_decision={
-                "status": "active",
-                "decision_id": "dec-1",
-                "reason": "",
-            },
-        )
-
-        self.assertEqual(
-            publish_mock.call_args.kwargs["youtube_privacy"],
-            "public",
-        )
-        self.assertEqual(result["youtube_privacy"], "public")
-        gate_record = json.loads(
-            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
-        )["_performance_gated_publish"]
-        self.assertTrue(gate_record["applied"])
-        self.assertEqual(gate_record["privacy"], "public")
-        self.assertEqual(gate_record["decision_id"], "dec-1")
-
-    def test_run_daily_performance_gate_keeps_unlisted_when_no_experiment(self) -> None:
-        spec = self._review_spec("gate-unlisted", performance_gated_publish=True)
-        script = self._review_script(viewer_action="")
-
-        result, publish_mock, _, _ = self._run_review_pipeline(
-            spec,
-            script,
-            "gate-unlisted1",
-            performance_decision={
-                "status": "insufficient_data",
-                "decision_id": "dec-2",
-                "reason": "比較可能な動画が2本。最低8本必要",
-            },
-        )
-
-        self.assertEqual(
-            publish_mock.call_args.kwargs["youtube_privacy"],
-            "unlisted",
-        )
-        self.assertEqual(result["youtube_privacy"], "unlisted")
-        gate_record = json.loads(
-            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
-        )["_performance_gated_publish"]
-        self.assertFalse(gate_record["applied"])
 
     def test_global_publish_dry_run_does_not_queue_topic_reservations(self) -> None:
         spec = self._review_spec("review-dry-run")

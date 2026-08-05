@@ -123,8 +123,6 @@ voice = "narrator"
         self.assertTrue(spec.pipeline_get("performance_feedback"))
         self.assertTrue(spec.pipeline_get("title_pattern_check"))
         self.assertEqual(spec.pipeline_get("max_uploads_per_day"), 1)
-        self.assertEqual(spec.pipeline_get("performance_eval_window_hours"), 72)
-        self.assertTrue(spec.pipeline_get("performance_gated_publish"))
         self.assertEqual(
             spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS),
             30,
@@ -365,7 +363,11 @@ plan_topic_retries = 0
         ):
             channel.load("sample", channels_dir=self.channels_dir)
 
-    def test_rejects_invalid_performance_eval_window_hours(self) -> None:
+    def test_removed_performance_keys_now_warn_as_unknown(self) -> None:
+        """実績フィードバックの自動適用撤去に伴い、performance_eval_window_hours/
+        performance_gated_publish/performance_import_from はpipelineキーとして
+        認識しなくなった。存在しても読み込みを失敗させず、未知キー警告のみ出す
+        （値そのものは他の未知キーと同様にdictへ素通しされる）。"""
         self._write_channel(
             toml="""\
 [channel]
@@ -377,172 +379,21 @@ persona = "prompts/persona.md"
 corner = "prompts/corner.md"
 voice = "narrator"
 [pipeline]
-performance_eval_window_hours = -1
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_eval_window_hours"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_performance_eval_window_hours_requires_performance_feedback(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
+performance_feedback = true
 performance_eval_window_hours = 72
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_feedback"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_performance_eval_window_hours_defaults_to_disabled(self) -> None:
-        self._write_channel()
-        with patch.object(config, "OUTPUT", self.root / "output"):
-            spec = channel.load("sample", channels_dir=self.channels_dir)
-        self.assertEqual(spec.pipeline_get("performance_eval_window_hours", 0), 0)
-
-    def test_performance_import_from_defaults_to_disabled(self) -> None:
-        self._write_channel()
-        with patch.object(config, "OUTPUT", self.root / "output"):
-            spec = channel.load("sample", channels_dir=self.channels_dir)
-        self.assertIsNone(spec.pipeline_get("performance_import_from"))
-
-    def test_loads_valid_performance_import_from(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
-performance_feedback = true
-performance_import_from = ["other-channel", "another-channel"]
-"""
-        )
-        with patch.object(config, "OUTPUT", self.root / "output"):
-            spec = channel.load("sample", channels_dir=self.channels_dir)
-        self.assertEqual(
-            spec.pipeline_get("performance_import_from"),
-            ["other-channel", "another-channel"],
-        )
-
-    def test_rejects_invalid_performance_import_from_type(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
-performance_feedback = true
-performance_import_from = "other-channel"
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_import_from"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_rejects_invalid_performance_import_from_channel_id(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
-performance_feedback = true
-performance_import_from = ["not a valid id!"]
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_import_from"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_rejects_duplicate_performance_import_from_entries(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
-performance_feedback = true
-performance_import_from = ["other-channel", "other-channel"]
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_import_from"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_rejects_performance_import_from_self_reference(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
-performance_feedback = true
-performance_import_from = ["sample"]
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_import_from"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_performance_import_from_requires_performance_feedback(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
+performance_gated_publish = true
 performance_import_from = ["other-channel"]
 """
         )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_feedback"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with patch.object(config, "OUTPUT", self.root / "output"):
+                spec = channel.load("sample", channels_dir=self.channels_dir)
+        warned = "\n".join(str(item.message) for item in caught)
+        self.assertIn("performance_eval_window_hours", warned)
+        self.assertIn("performance_gated_publish", warned)
+        self.assertIn("performance_import_from", warned)
+        self.assertEqual(spec.id, "sample")
 
     def test_reports_missing_required_key(self) -> None:
         self._write_channel(toml='''\
@@ -843,76 +694,6 @@ enabled = true
             spec = channel.load("sample", channels_dir=self.channels_dir)
 
         self.assertEqual(spec.publish.youtube.privacy, "unlisted")
-
-    def test_rejects_invalid_performance_gated_publish(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
-performance_feedback = true
-performance_gated_publish = "yes"
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_gated_publish"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_performance_gated_publish_defaults_to_disabled(self) -> None:
-        self._write_channel()
-        with patch.object(config, "OUTPUT", self.root / "output"):
-            spec = channel.load("sample", channels_dir=self.channels_dir)
-        self.assertFalse(spec.pipeline_get("performance_gated_publish", False))
-
-    def test_performance_gated_publish_requires_performance_feedback(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[pipeline]
-performance_gated_publish = true
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_feedback"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
-
-    def test_performance_gated_publish_rejects_enabled_review(self) -> None:
-        self._write_channel(
-            toml="""\
-[channel]
-id = "sample"
-name = "Sample"
-[corners.main]
-label = "Main"
-persona = "prompts/persona.md"
-corner = "prompts/corner.md"
-voice = "narrator"
-[publish.youtube.review]
-enabled = true
-[pipeline]
-performance_feedback = true
-performance_gated_publish = true
-"""
-        )
-        with self.assertRaisesRegex(
-            channel.ChannelConfigError, "performance_gated_publish"
-        ):
-            channel.load("sample", channels_dir=self.channels_dir)
 
     def test_ideology_uses_legacy_youtube_files_until_migrated(self) -> None:
         self._write_channel(

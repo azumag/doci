@@ -351,10 +351,16 @@ TACTIC_ISSUES_MAX_PER_WEEK = get_int("TACTIC_ISSUES_MAX_PER_WEEK", 2)
 TACTIC_ISSUES_ACTION_COOLDOWN_DAYS = get_int("TACTIC_ISSUES_ACTION_COOLDOWN_DAYS", 30)
 # 候補として遡って走査するhistory.jsonlの範囲（日数）。
 TACTIC_ISSUES_LOOKBACK_DAYS = get_int("TACTIC_ISSUES_LOOKBACK_DAYS", 14)
-# doci.performance（issue #77）: 他チャンネルへの実績施策横展開で、
-# 評価完了からこの日数を超えた実験は展開候補にしない（鮮度ガード）。
-PERFORMANCE_PROPAGATION_MAX_AGE_DAYS = get_int(
-    "PERFORMANCE_PROPAGATION_MAX_AGE_DAYS", 90
+# doci.performance_report（issue #92）: 実績フィードバックの自動適用撤去に伴う
+# 3日毎のレポートissueサイクル。毎日起動のlaunchdジョブ内でこの時間未経過なら
+# チャンネルの当該runをskipし、実質「3日に1回程度」の頻度に保つ。
+PERFORMANCE_REPORT_MIN_INTERVAL_HOURS = get_int(
+    "PERFORMANCE_REPORT_MIN_INTERVAL_HOURS", 72
+)
+# 提案した形式仮説(trait)が、この日数以内に同じcornerで投稿された動画へ
+# 出現しなければ、その提案は"expired"として打ち切る。
+PERFORMANCE_EXPERIMENT_MAX_AGE_DAYS = get_int(
+    "PERFORMANCE_EXPERIMENT_MAX_AGE_DAYS", 30
 )
 # ファクトチェックの再試行回数。MiniMax等が長い日本語JSONのエスケープを崩すことがあるため再試行する。
 SCRIPT_FACTCHECK_RETRIES = get_int("SCRIPT_FACTCHECK_RETRIES", 2)

@@ -571,7 +571,6 @@ class ResearchPromptTest(unittest.TestCase):
             label="テスト",
             channel_guidance="",
             past="",
-            performance_guidance="",
             web_howto="",
             video_case_study_rule="",
             extra_rules="",
@@ -1195,7 +1194,6 @@ class ResearchPromptTest(unittest.TestCase):
                 result = research.web_research(
                     corner,
                     [],
-                    performance_guidance="decision abc: retention形式を1変数だけ試す",
                     focus_text="既存台本: 視聴維持率の確認手順です。",
                 )
 
@@ -1217,7 +1215,6 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertIn("単なる言い換えは選ばない", prompt)
         self.assertIn("分野名・チャンネル名だけにせず", prompt)
         self.assertIn("迷った場合は必ず ambiguous", prompt)
-        self.assertIn("decision abc", prompt)
         self.assertIn("既存台本: 視聴維持率の確認手順です。", prompt)
         self.assertEqual(result["topic"], "題材")
         self.assertEqual(len(result["facts"]), 3)

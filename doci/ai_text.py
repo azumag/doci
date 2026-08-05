@@ -1258,12 +1258,8 @@ def generate(
     past_topics: list[str],
     topic_guard: Callable[[str], None] | None = None,
     topic_metadata_guard: Callable[[dict], None] | None = None,
-    performance_decision: dict | None = None,
     recent_openings: list[str] | None = None,
 ) -> dict:
-    performance_guidance = str(
-        (performance_decision or {}).get("guidance") or ""
-    )
     # 1) 前段リサーチ（issue #6）: 題材選定＋Web裏取り。失敗してもリサーチ無しで続行。
     research = None
     research_enabled = spec.pipeline_get("research", config.SCRIPT_RESEARCH)
@@ -1277,7 +1273,6 @@ def generate(
                 corner,
                 past_topics,
                 spec,
-                performance_guidance=performance_guidance,
                 require_structured_novelty=True,
             )
             if research:
@@ -1400,7 +1395,6 @@ def generate(
         past_topics,
         research=research,
         plan=plan,
-        performance_guidance=performance_guidance,
         recent_openings=recent_openings if opening_guard_enabled else None,
     )
     script = None
@@ -1535,7 +1529,6 @@ def generate(
                 corner,
                 past_topics,
                 spec,
-                performance_guidance=performance_guidance,
                 backend_override=config.FACTCHECK_BACKEND,
                 model_override=config.FACTCHECK_MODEL,
                 model_explicit_override=config._FACTCHECK_MODEL_EXPLICIT,
@@ -1576,8 +1569,6 @@ def generate(
     script["_date"] = day
     if research:
         script["_research"] = research
-    if performance_decision:
-        script["_performance_feedback"] = performance_decision
     return script
 
 

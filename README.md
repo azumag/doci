@@ -192,7 +192,7 @@ token = "secrets/sample/youtube_token.json"
 |---|---|
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
-| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `title_pattern_check`, `plan_topic_retries`, `max_uploads_per_day`, `performance_eval_window_hours`, `performance_gated_publish` |
+| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `research_requires_youtube_case_studies`, `title_pattern_check`, `narration_opening_guard`, `narration_pattern_check`, `ambiguous_date_title_check`, `plan_topic_retries`, `max_uploads_per_day`, `feedback_repository`, `youtube_auto_playlist`, `youtube_auto_engagement_comment`, `tactic_issues` |
 | `style` | `theme` |
 | `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio`, `box_radius` |
 | `style.thumbnail` | `font_family`, `title_color` |
@@ -274,76 +274,69 @@ python -m doci.run_daily --recover-publishing <reservation-id> \
   --recovery-reason "YouTube Studioで投稿済みを確認"
 ```
 `pipeline.performance_feedback = true` は投稿履歴の動画をYouTube Data APIで
-read-only同期し、十分な比較標本がある場合だけ相対的な形式仮説を次回promptへ渡す。
+read-only同期し、十分な比較標本がある場合だけ相対的な形式仮説を作る。
 retention等のAnalytics指標には、OAuthクライアントのGoogle Cloud projectで
 YouTube Analytics APIを有効化したうえで追加scopeが必要。明示的に許可する場合のみ
 `python -m doci.youtube --auth --analytics --channel <id>` で再認証する。APIやscopeが
 未設定でもData API snapshotを残し、指標を推測せず通常生成を継続する。
 `python -m doci.performance --sync --channel <id> --corner <key>` でreadbackと判断根拠を
-確認できる。仮説は同一corner・同一尺・同一tierの最低8本を比較し、1回に1形式だけを
-YouTube投稿成功1本へ適用する。その動画が評価閾値に届くまで同じcornerの次実験は待機する。
-`pipeline.performance_eval_window_hours`（既定0＝無効、`performance_feedback = true`
-必須。設定時に無ければ`ChannelConfigError`）を設定したチャンネルは、閾値
-到達だけで評価完了とせず、適用時刻からこの時間が経過するまで同じcornerの次実験生成を
-`PerformanceEvalWindowSkip`として通常スキップする（初動データが育つ前に次の実験が
-投稿されるのを防ぐ、issue #38）。`youtube-growth`は72時間を設定している。
-このゲートは動画IDが確定した実験（`performance_applied`/`published`）だけに適用され、
-video_id未確定のまま保留された`performance_queued`行（下記の投稿結果`unknown`保留分）
-には適用しない。保護すべき公開済み動画が存在しないうえ、適用してしまうと復旧まで
-生成自体が最長window_hours分だけ止まってしまうため。
+確認できる。仮説は同一corner・同一尺・同一tierの最低8本を比較して1回に1形式だけを提案する。
 
-実験はcorner単位で独立しているため、`--corner`未指定の自動選択では、rotationの
-次候補が評価期間内でブロックされていても、そこで諦めずrotationの他のcornerを
-順に試す（`corners.rotation_order`）。全cornerが評価期間内のときだけ、その回を
-通常どおりスキップする。1つのcornerの評価待ちだけで、無関係な他cornerの投稿枠
-まで奪わないための挙動。
+**この仮説は自動適用されない**（issue #92）。実際の生成プロンプトへ反映する作業は
+運用者が手動で行う。かわりに`doci.performance_report`（後述）が3日に1回程度、
+チャンネルごとに実績を分析し、調査内容・実験内容・前回提案の効果検証を1つの
+GitHub issueにまとめて報告する。`run_daily`の投稿フローは実績フィードバックを
+一切参照しない（完全に分離）。
 
-YouTube投稿結果が`unknown`（タイムアウト等でAPI受理の可否が不明）の場合、実際には
-公開済みの可能性があるため実績適用（`performance_application_id`）は自動で取り消さず、
-`topic_ledger`の`publishing`予約と同様に運用者確認まで保留する。保留したままだと
-`active_performance_experiment`がこのapplicationを返し続け、そのcornerの次実験が
-永久に適用されなくなる（`performance_gated_publish`のチャンネルは新規動画が
-永久にunlistedのままになる）ため、外部状態を確認したら明示的に終端化する。
+### 実績レポートissue（3日毎、issue #92）
 
 ```bash
-# 外部投稿が発生していないことを確認した後
-python -m doci.run_daily --channel <id> \
-  --recover-performance-application <application-id> \
-  --recovery-status cancelled --recovery-reason "YouTube Studioで投稿なしを確認"
-
-# 投稿済み動画を確認した場合
-python -m doci.run_daily --channel <id> \
-  --recover-performance-application <application-id> \
-  --recovery-status published --recovery-video-id <video-id> \
-  --recovery-reason "YouTube Studioで投稿済みを確認"
+python -m doci.performance_report --channel youtube-growth   # dry-run（readbackと候補表示のみ）
+python -m doci.performance_report --apply                    # 全チャンネルへ実際にissue作成
+tools/install_performance_launchd.sh                         # launchdへ登録
 ```
+
+dry-run（既定）は実績readback（`performance.jsonl`。`--sync`単体実行と同じ副作用）と
+issue候補の表示までは行うが、実験状態(`performance_experiments.jsonl`)の記録・
+intervalタイマーの更新・GitHub issueの作成は一切行わない。
+
+`pipeline.performance_feedback = true`かつ`pipeline.feedback_repository`
+（`owner/repo`）を設定したチャンネルが対象。チャンネル内の全corner分を
+1つのissueにまとめ、corner毎に次の3節を書く:
+
+- **調査内容**: 今回のreadback分析（指標・cohort・対象本数・上位/下位video_id）
+- **実験内容**: 新しい単一trait仮説（cooldown中や比較標本不足の場合は「新仮説なし」）
+- **前回提案の効果検証**: 前回提案したtraitが、その後投稿された動画の
+  `format_traits`に実際に出現したかを自動検知し（`_detect_applied_video`）、
+  出現した最初の動画を「適用済み」とみなして`_experiment_result`で事後評価する。
+  自動適用をしないため、明示的な予約ではなくこの出現検知で代替している。
+  提案から`PERFORMANCE_EXPERIMENT_MAX_AGE_DAYS`（既定30日）以内に出現しなければ
+  `expired`として打ち切る。
+
+状態は`output/<channel>/performance_experiments.jsonl`に`proposed → applied →
+evaluated → reported`（または`expired`）として追記される。全cornerが「新仮説なし
+かつ未報告の検証結果なし」ならissue作成自体をスキップする（無内容issueの防止）。
+
+起動間隔は`StartInterval=86400`（毎日）でlaunchdジョブを登録し、Python側の
+`PERFORMANCE_REPORT_MIN_INTERVAL_HOURS`（既定72時間）ゲートで実質「3日に1回程度」
+に保つ。`StartInterval`を3日(259200秒)に直接設定しない理由は、スリープ/再起動で
+launchdのタイマーがリセットされ、間隔が長いほど実行そのものが遅延・脱落しやすい
+ため。毎日起動＋ソフトゲートの方が確実に間隔を守れる。issueのレート制御・
+重複防止・週次上限は`doci.feedback_issues`（チャンネル単位で週
+`FEEDBACK_ISSUES_MAX_PER_WEEK`件、既定3件）がそのまま担う。
 
 ### YouTube攻略Ch の公開判定
 
 `youtube-growth` は `max_uploads_per_day = 1` とし、JSTで1日1本だけ実投稿する。
 GitHub Issueでの人手承認・ラベル待ち・reconcileの仕組みは廃止した。人手ラベルや
-限定公開からの経過時間は公開可否に一切関与しない。
+限定公開からの経過時間は公開可否に一切関与しない。実績フィードバックとも無関係で、
+`publish.youtube.privacy = "unlisted"` の静的な値をそのまま使う。
 
-`pipeline.performance_gated_publish = true`（`performance_feedback = true` が前提。
-`publish.youtube.review.enabled` との併用は設定エラー）を設定したチャンネルは、
-実績フィードバックの単一変数施策（`performance_feedback`のdecision）を実際に
-予約・適用できたrunの動画だけを `public` で投稿し、それ以外は全て `unlisted` の
-まま投稿する。適用有無は生成時点で確定しており、後からの承認・切り替えは無い。
-判定結果は `script["_performance_gated_publish"]`（`applied`/`privacy`/`decision_id`）
-に記録される。
-
-稼働初期など、`performance_feedback` の比較標本が十分に育つまでは（相対比較には
-最低8本の動画が必要）、実験が `active` にならず全動画が `unlisted` のままになる。
-これは意図した挙動であり、既存の公開済み動画が十分に蓄積すると解消する。
-
-`pipeline.performance_eval_window_hours` の72時間ゲート（前節）は、次の実験生成
-自体を抑制する仕組みとしてそのまま併存する。
-
-`performance_gated_publish` を使わないチャンネル（`ideology` 等）は、従来どおり
-`publish.youtube.review.enabled` の有無で `doci.youtube_review.choose_privacy()` が
-動く。`enabled=false` なら `publish.youtube.privacy` の静的な値をそのまま使い、
-`enabled=true` なら企画の主題適合（対象者・課題・視聴後操作の3点＋主題適合が
-すべて明確か）を都度判定して `public`/`unlisted` を決める。
+`publish.youtube.review.enabled = true` を設定したチャンネルは、
+`doci.youtube_review.choose_privacy()` が企画の主題適合（対象者・課題・視聴後操作の
+3点＋主題適合がすべて明確か）を都度判定して `public`/`unlisted` を決める。
+`enabled`未設定/`false`のチャンネル（`ideology`等）は、この判定を経由せず
+`publish.youtube.privacy`の静的な値（`ideology`は`public`固定）をそのまま使う。
 
 個別レイヤのテスト:
 ```bash
@@ -362,6 +355,10 @@ launchd エージェント（`com.azumag.doci.generate`）を現在のプロジ�
 既定ジョブは `--all-channels` を逐次実行する。第2引数にチャンネルを指定すると
 `com.azumag.doci.generate.<id>` を登録する。プロジェクトを移動した場合は再実行すれば復旧する。
 
+実績レポートissue（前節）は別ジョブ `com.azumag.doci.performance` として
+`tools/install_performance_launchd.sh` で登録する（動画生成の投稿フローとは
+完全に独立しており、`tools/install_launchd.sh`とは別に実行が必要）。
+
 ## クラウド移行
 ローカル依存は **VOICEVOX のみ**。`.github/workflows/daily.yml` が雛形:
 VOICEVOX を service container（2話者内蔵・常時稼働不要）で起動し、台本・文章修正は
@@ -379,6 +376,10 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/youtube_review.py` 主題適合の自動判定（テーマガード）
 - `doci/gh_cli.py` gh CLIの薄い共有ラッパー（secret除去）
 - `doci/topic_ledger.py` 全チャネル共通の日次投稿枠・投稿状態管理（題材の跨ぎ照合はしない）
+- `doci/performance.py` 実績readbackと形式仮説の生成（自動適用はしない）
+- `doci/performance_report.py` 3日毎の実績レポートissueサイクル（issue #92、`run_daily`とは独立）
+- `doci/feedback_issues.py` issueの重複防止・週次レート制御・GitHub I/O基盤
+- `doci/tactic_issues.py` 動画が紹介するYouTube運用施策(viewer_action)の検知・issue化（issue #90）
 - `channels/<id>/` チャンネル定義・ペルソナ・声・BGM
 - `doci/prompts/output_rules.md` 全チャンネル共通の出力規則
 - `doci/run_daily.py` オーケストレータ

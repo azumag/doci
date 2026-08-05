@@ -5,8 +5,6 @@
 `review.enabled = false` のチャンネルは常に `publish.youtube.privacy` の
 静的な値をそのまま使う。`review.enabled = true` のチャンネルは、この主題判定
 （`assess()`）の結果だけでpublic/unlistedを都度決める。
-`youtube-growth` の公開判定は `pipeline.performance_gated_publish` により
-`doci/run_daily.py` 側で行い、この主題ガードは経由しない。
 """
 from __future__ import annotations
 
