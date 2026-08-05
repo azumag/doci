@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import charts, config
+from . import charts, config, style_themes
 from .channel import ChartStyle
 
 _XFADE = 0.6  # 背景切替のクロスフェード秒
@@ -120,7 +120,8 @@ def _overlay_html(
         f"border-right:{head_w}vh solid transparent;border-top:{head_h}vh solid #f0b450;margin-top:-.1vh}}"
         f".counter{{position:fixed;bottom:6vh;left:0;right:0;text-align:center;color:#caa05a;"
         f"font-size:{counter_fs}vh;letter-spacing:.4em}}"
-        "</style></head><body>"
+        + style_themes.get(style.theme if style else None).overlay_css
+        + "</style></head><body>"
         "<div class='scrim'></div><div class='frame'></div>"
         "<div class='stage' id='stage'></div>"
         "<div class='arrow' id='arrow'><div class='stem' id='stem'></div><div class='head'></div></div>"

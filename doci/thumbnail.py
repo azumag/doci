@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from . import style_themes
 from .channel import ThumbnailStyle
 from .charts import _chrome_shot
 
@@ -85,10 +86,14 @@ def _display_text(title: str, *, max_len: int = 24) -> str:
 
 def _style_css(style: ThumbnailStyle | None) -> str:
     style = style or ThumbnailStyle()
-    return _CSS.replace(
-        "'Hiragino Mincho ProN','Hiragino Mincho Pro',serif",
-        style.font_family,
-    ).replace("#f6efe1", style.title_color)
+    return (
+        _CSS.replace(
+            "'Hiragino Mincho ProN','Hiragino Mincho Pro',serif",
+            style.font_family,
+        )
+        .replace("#f6efe1", style.title_color)
+        + style_themes.get(style.theme).thumbnail_css
+    )
 
 
 def _html_doc(

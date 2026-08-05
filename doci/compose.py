@@ -274,7 +274,7 @@ def _render_caption_png(
     stroke_rgb = ImageColor.getrgb(subtitle.stroke)
     draw.rounded_rectangle(
         [x0, y0, x0 + box_w, y0 + box_h],
-        radius=int(size * 0.35),
+        radius=int(size * subtitle.box_radius),
         fill=(*box_rgb, round(subtitle.box_alpha * 255)),
     )
     stroke = max(2, size // 12)

@@ -80,6 +80,7 @@ voice = "narrator"
         self.assertEqual(spec.voice_for("communism").speaker, 109)
         self.assertEqual(spec.voices_path, spec.root / "voices.json")
         self.assertEqual(spec.style.bgm.dir, spec.root / "bgm")
+        self.assertEqual(spec.style.theme, "classic")
         self.assertEqual(
             spec.publish.youtube.token,
             (config.ROOT / "secrets/ideology/youtube_token.json").resolve(),
@@ -103,6 +104,12 @@ voice = "narrator"
         )
         self.assertEqual(spec.voice_for("shorts").speaker, 13)
         self.assertEqual(spec.style.bgm.dir, spec.root / "bgm")
+        self.assertEqual(spec.style.theme, "tech")
+        self.assertEqual(
+            spec.style.chart.palette,
+            ("#ff3b30", "#2563eb", "#f59e0b", "#22c55e", "#e2e8f0"),
+        )
+        self.assertEqual(spec.style.subtitle.box_radius, 0.0)
         self.assertEqual(spec.publish.platforms, ("youtube",))
         self.assertEqual(spec.publish.youtube.privacy, "unlisted")
         self.assertFalse(spec.publish.youtube.review.enabled)
@@ -605,6 +612,89 @@ template = "{voicevox_credit} / {asset_credit}"
         self.assertEqual(spec.style.bgm.volume, 0.12)
         self.assertEqual(spec.style.bgm.rotation, "daily")
         self.assertIn("{voicevox_credit}", spec.style.credits.template)
+
+    def test_style_theme_defaults_to_classic(self) -> None:
+        self._write_channel()
+        with patch.object(config, "OUTPUT", self.root / "output"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertEqual(spec.style.theme, "classic")
+        self.assertEqual(spec.style.chart.theme, "classic")
+        self.assertEqual(spec.style.thumbnail.theme, "classic")
+
+    def test_loads_style_theme_tech_and_applies_theme_defaults(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[style]
+theme = "tech"
+"""
+        )
+        with patch.object(config, "OUTPUT", self.root / "output"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertEqual(spec.style.theme, "tech")
+        self.assertEqual(spec.style.chart.theme, "tech")
+        self.assertEqual(spec.style.thumbnail.theme, "tech")
+        # 未指定キーはテーマ既定値(style_themes.THEMES["tech"])から注入される。
+        self.assertEqual(
+            spec.style.thumbnail.font_family,
+            "'Hiragino Kaku Gothic ProN','Hiragino Sans',sans-serif",
+        )
+        self.assertEqual(spec.style.thumbnail.title_color, "#ffffff")
+        self.assertEqual(
+            spec.style.chart.palette,
+            ("#ff3b30", "#2563eb", "#f59e0b", "#22c55e", "#e2e8f0"),
+        )
+        self.assertEqual(spec.style.video.pad_color, "0x07111f")
+        self.assertEqual(spec.style.subtitle.box_radius, 0.0)
+
+    def test_explicit_style_values_override_theme_defaults(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[style]
+theme = "tech"
+[style.chart]
+palette = ["#000001", "#000002"]
+[style.subtitle]
+box_radius = 0.5
+"""
+        )
+        with patch.object(config, "OUTPUT", self.root / "output"):
+            spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertEqual(spec.style.chart.palette, ("#000001", "#000002"))
+        self.assertEqual(spec.style.subtitle.box_radius, 0.5)
+
+    def test_rejects_unknown_style_theme(self) -> None:
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[style]
+theme = "no-such-theme"
+"""
+        )
+        with self.assertRaisesRegex(channel.ChannelConfigError, "style.theme"):
+            channel.load("sample", channels_dir=self.channels_dir)
 
     def test_loads_channel_publish_accounts_with_repo_relative_paths(self) -> None:
         self._write_channel(toml='''\

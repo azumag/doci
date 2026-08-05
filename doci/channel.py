@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import config, voices
+from . import config, style_themes, voices
 
 
 class ChannelConfigError(ValueError):
@@ -40,18 +40,21 @@ class SubtitleStyle:
     box_color: str = "#000000"
     box_alpha: float = 0.45
     position_ratio: float = 0.64
+    box_radius: float = 0.35
 
 
 @dataclass(frozen=True)
 class ThumbnailStyle:
     font_family: str = "'Hiragino Mincho ProN','Hiragino Mincho Pro',serif"
     title_color: str = "#f6efe1"
+    theme: str = "classic"
 
 
 @dataclass(frozen=True)
 class ChartStyle:
     palette: tuple[str, ...] = ()
     font: Path | None = None
+    theme: str = "classic"
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,13 @@ class CreditsStyle:
 
 @dataclass(frozen=True)
 class StyleSpec:
-    """チャンネルの見た目・聞こえ方。全フィールドは現行値が既定。"""
+    """チャンネルの見た目・聞こえ方。全フィールドは現行値が既定。
+
+    `theme`(issue #76)はチャンネル別デザインテーマの選択で、`doci.style_themes`が
+    定義するCSS追記とスタイル既定値のセットを指す。`subtitle`/`video`は個別キーの
+    まま(既定値のみテーマから注入)、`thumbnail`/`chart`は実際にテーマCSSを適用する
+    レンダラへ渡るよう各自`theme`を保持する。
+    """
 
     subtitle: SubtitleStyle = field(default_factory=SubtitleStyle)
     thumbnail: ThumbnailStyle = field(default_factory=ThumbnailStyle)
@@ -82,6 +91,7 @@ class StyleSpec:
     video: VideoStyle = field(default_factory=VideoStyle)
     bgm: BgmStyle = field(default_factory=BgmStyle)
     credits: CreditsStyle = field(default_factory=CreditsStyle)
+    theme: str = "classic"
 
 
 @dataclass(frozen=True)
@@ -184,7 +194,7 @@ _PIPELINE_KEYS = {
     "youtube_auto_playlist",
     "youtube_auto_engagement_comment",
 }
-_STYLE_KEYS = {"subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
+_STYLE_KEYS = {"theme", "subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
     "font",
     "fill",
@@ -192,6 +202,7 @@ _SUBTITLE_STYLE_KEYS = {
     "box_color",
     "box_alpha",
     "position_ratio",
+    "box_radius",
 }
 _THUMBNAIL_STYLE_KEYS = {"font_family", "title_color"}
 _CHART_STYLE_KEYS = {"palette", "font"}
@@ -300,6 +311,12 @@ def _resolve_style_dir(channel_root: Path, value: str) -> Path:
 
 def _load_style(data: dict[str, Any], channel_root: Path) -> StyleSpec:
     _warn_unknown(data, _STYLE_KEYS, "style.")
+    theme_key = _string(data, "theme", "classic", "style.")
+    if theme_key not in style_themes.THEMES:
+        raise ChannelConfigError(
+            f"style.theme must be one of {sorted(style_themes.THEMES)}: {theme_key!r}"
+        )
+    theme = style_themes.get(theme_key)
     subtitle = _style_table(data, "subtitle")
     thumbnail = _style_table(data, "thumbnail")
     chart = _style_table(data, "chart")
@@ -313,7 +330,8 @@ def _load_style(data: dict[str, Any], channel_root: Path) -> StyleSpec:
     _warn_unknown(bgm, _BGM_STYLE_KEYS, "style.bgm.")
     _warn_unknown(credits, _CREDITS_STYLE_KEYS, "style.credits.")
 
-    palette = chart.get("palette", [])
+    # 未指定ならテーマ既定のパレットを使う。明示指定は常にテーマより優先する。
+    palette = chart.get("palette", list(theme.chart_palette))
     if not isinstance(palette, list) or not all(isinstance(item, str) for item in palette):
         raise ChannelConfigError("style.chart.palette must be a list of colors")
     rotation = _string(bgm, "rotation", "fixed", "style.bgm.")
@@ -347,26 +365,35 @@ def _load_style(data: dict[str, Any], channel_root: Path) -> StyleSpec:
                 "style.subtitle.",
                 maximum=1.0,
             ),
+            box_radius=_number(
+                subtitle,
+                "box_radius",
+                theme.subtitle_box_radius,
+                "style.subtitle.",
+                maximum=1.0,
+            ),
         ),
         thumbnail=ThumbnailStyle(
             font_family=_string(
                 thumbnail,
                 "font_family",
-                "'Hiragino Mincho ProN','Hiragino Mincho Pro',serif",
+                theme.thumbnail_font_family,
                 "style.thumbnail.",
             ),
             title_color=_string(
-                thumbnail, "title_color", "#f6efe1", "style.thumbnail."
+                thumbnail, "title_color", theme.thumbnail_title_color, "style.thumbnail."
             ),
+            theme=theme_key,
         ),
         chart=ChartStyle(
             palette=tuple(palette),
             font=_optional_file(
                 channel_root, chart.get("font", ""), "style.chart.font"
             ),
+            theme=theme_key,
         ),
         video=VideoStyle(
-            pad_color=_string(video, "pad_color", "0x0a0a0c", "style.video."),
+            pad_color=_string(video, "pad_color", theme.video_pad_color, "style.video."),
             filter=_string(video, "filter", "", "style.video."),
         ),
         bgm=BgmStyle(
@@ -383,6 +410,7 @@ def _load_style(data: dict[str, Any], channel_root: Path) -> StyleSpec:
         credits=CreditsStyle(
             template=_string(credits, "template", "", "style.credits.")
         ),
+        theme=theme_key,
     )
 
 

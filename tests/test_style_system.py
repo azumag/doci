@@ -7,7 +7,7 @@ import warnings
 from pathlib import Path
 from unittest.mock import patch
 
-from doci import channel, charts, compose, run_daily, thumbnail
+from doci import channel, charts, chart_seq, compose, run_daily, style_themes, thumbnail
 from doci.channel import (
     BgmStyle,
     ChannelSpec,
@@ -19,6 +19,13 @@ from doci.channel import (
     ThumbnailStyle,
     VideoStyle,
 )
+
+_STAT_SPEC = {
+    "type": "stat",
+    "title": "テーマ比較",
+    "value": "42",
+    "caption": "説明文",
+}
 
 
 class StyleSystemTest(unittest.TestCase):
@@ -76,9 +83,114 @@ class StyleSystemTest(unittest.TestCase):
         self.assertEqual(style.subtitle.fill, "#ffffff")
         self.assertEqual(style.subtitle.stroke, "#000000")
         self.assertEqual(style.subtitle.position_ratio, 0.64)
+        self.assertEqual(style.subtitle.box_radius, 0.35)
         self.assertEqual(style.thumbnail.title_color, "#f6efe1")
+        self.assertEqual(style.thumbnail.theme, "classic")
+        self.assertEqual(style.chart.theme, "classic")
+        self.assertEqual(style.theme, "classic")
         self.assertEqual(style.video.pad_color, "0x0a0a0c")
         self.assertEqual(style.bgm.rotation, "fixed")
+
+    def test_classic_theme_output_is_byte_identical_to_no_style(self) -> None:
+        """issue #76: `classic`テーマ(既定)導入前後で出力が変わらないことの回帰テスト。"""
+        baseline_chart = charts.chart_html(_STAT_SPEC)
+        classic_chart = charts.chart_html(_STAT_SPEC, style=ChartStyle(theme="classic"))
+        self.assertEqual(baseline_chart, classic_chart)
+
+        baseline_thumb = thumbnail._html_doc("見出し", None)
+        classic_thumb = thumbnail._html_doc(
+            "見出し", None, ThumbnailStyle(theme="classic")
+        )
+        self.assertEqual(baseline_thumb, classic_thumb)
+
+        baseline_overlay = chart_seq._overlay_html(
+            {"events": [{"year": "1", "label": "出来事"}]}, 1080, 1920
+        )
+        classic_overlay = chart_seq._overlay_html(
+            {"events": [{"year": "1", "label": "出来事"}]},
+            1080,
+            1920,
+            ChartStyle(theme="classic"),
+        )
+        self.assertEqual(baseline_overlay, classic_overlay)
+
+    def test_tech_theme_differentiates_chart_thumbnail_and_overlay(self) -> None:
+        """issue #76: `tech`テーマが構造要素の非表示・書体・レイアウトを差し替える。"""
+        tech_chart = charts.chart_html(_STAT_SPEC, style=ChartStyle(theme="tech"))
+        self.assertIn(".grain,.frame,.frame::after,.star-bg{display:none}", tech_chart)
+        # classicの明朝見出しには無いtech固有の書体指定(極太ゴシック)で判定する。
+        # ("Hiragino Kaku Gothic ProN"はclassicのbody font-familyにも既に含まれ
+        # 判定に使えないため避ける)
+        self.assertIn("font-weight:900;letter-spacing:0;color:#f2f6fb", tech_chart)
+
+        classic_thumb = thumbnail._html_doc("見出し", None, ThumbnailStyle(theme="classic"))
+        tech_thumb = thumbnail._html_doc("見出し", None, ThumbnailStyle(theme="tech"))
+        self.assertNotEqual(classic_thumb, tech_thumb)
+        self.assertIn("justify-content:flex-end", tech_thumb)
+
+        tech_overlay = chart_seq._overlay_html(
+            {"events": [{"year": "1", "label": "出来事"}]},
+            1080,
+            1920,
+            ChartStyle(theme="tech"),
+        )
+        self.assertIn(".frame{display:none}", tech_overlay)
+
+    def test_tech_theme_timeline_head_overrides_inline_border_color(self) -> None:
+        """自己レビュー指摘: `_timeline`ビルダーは`.tl-head`のborder-topを
+        インラインstyleで書くため、テーマCSSの通常上書きでは負ける。
+        `!important`で確実に上書きされることを検証する。"""
+        timeline_spec = {
+            "type": "timeline",
+            "title": "年表",
+            "events": [
+                {"year": "1", "label": "出来事1"},
+                {"year": "2", "label": "出来事2"},
+            ],
+        }
+        tech_chart = charts.chart_html(timeline_spec, style=ChartStyle(theme="tech"))
+        self.assertIn(".tl-head{border-top-color:#f4c25c!important}", tech_chart)
+        # インラインstyleの旧ゴールド値がまだ残っている(!importantで上書きされる前提)ことを確認。
+        self.assertIn("border-top:", tech_chart)
+
+    def test_tech_theme_palette_recolors_theme_css_literals(self) -> None:
+        """テーマCSSが`_DONUT_COLORS`リテラルを使う箇所は、channelパレットで
+        自動的に再着色される(`charts._apply_style_html`の既存置換機構を再利用)。"""
+        chart_html = charts.chart_html(
+            _STAT_SPEC,
+            style=ChartStyle(theme="tech", palette=("#00aa00", "#1122ff")),
+        )
+        self.assertIn(".trule{height:.55vh;width:8vw;border-radius:0;background:#00aa00", chart_html)
+        self.assertNotIn("#f4c25c", chart_html)
+
+    def test_unknown_theme_falls_back_to_classic(self) -> None:
+        self.assertIs(style_themes.get("no-such-theme"), style_themes.THEMES["classic"])
+        self.assertIs(style_themes.get(None), style_themes.THEMES["classic"])
+
+    def test_subtitle_box_radius_default_and_square(self) -> None:
+        rounded = self.root / "rounded.png"
+        square = self.root / "square.png"
+        base = StyleSpec(
+            subtitle=SubtitleStyle(box_color="#0000ff", box_alpha=1.0, position_ratio=0.1)
+        )
+        if not compose._render_caption_png("角丸比較", rounded, 400, 800, base):
+            self.skipTest("Japanese font or Pillow unavailable")
+        square_style = StyleSpec(
+            subtitle=SubtitleStyle(
+                box_color="#0000ff", box_alpha=1.0, position_ratio=0.1, box_radius=0.0
+            )
+        )
+        compose._render_caption_png("角丸比較", square, 400, 800, square_style)
+
+        from PIL import Image
+
+        # 角丸(既定0.35)は左上隅が透明、角形(0.0)は左上隅まで不透明になる。
+        r_img = Image.open(rounded).convert("RGBA")
+        s_img = Image.open(square).convert("RGBA")
+        r_bbox = r_img.getchannel("A").getbbox()
+        s_bbox = s_img.getchannel("A").getbbox()
+        self.assertEqual(r_img.getpixel((r_bbox[0], r_bbox[1]))[3], 0)
+        self.assertEqual(s_img.getpixel((s_bbox[0], s_bbox[1]))[3], 255)
 
     def test_bgm_fixed_daily_and_per_corner_are_deterministic(self) -> None:
         bgm_dir = self.root / "bgm"

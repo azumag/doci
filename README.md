@@ -193,7 +193,8 @@ token = "secrets/sample/youtube_token.json"
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
 | `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `title_pattern_check`, `plan_topic_retries`, `max_uploads_per_day`, `performance_eval_window_hours`, `performance_gated_publish` |
-| `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio` |
+| `style` | `theme` |
+| `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio`, `box_radius` |
 | `style.thumbnail` | `font_family`, `title_color` |
 | `style.chart` | `palette`, `font` |
 | `style.video` | `pad_color`, `filter` |
@@ -204,6 +205,25 @@ token = "secrets/sample/youtube_token.json"
 | `publish.youtube.review` | `enabled` |
 | `publish.tiktok` | `token`, `privacy` |
 | `publish.instagram` | `user_id`, `access_token_env` |
+
+### チャンネル別デザインテーマ(`style.theme`)
+
+字幕・サムネイル・図表の色/フォントだけでは「同じ投稿者」に見えてしまう問題
+（issue #76）に対応するため、`style.theme`でレイアウト構造・装飾モチーフごと
+切り替えられる名前付きテーマを選べる。既存の`style.subtitle.*`等の個別キーは
+テーマの上への上書きとして機能する（優先順位: テーマ既定値 < channel.tomlの
+個別キー明示値）。
+
+| テーマ | トーン | 用途の目安 |
+|---|---|---|
+| `classic`（既定） | 墨地+ゴールド+明朝。額縁・グレイン・星型モチーフの印刷物/アーカイブ調 | 思想史・教養系など、ナレーション主体のコンテンツ |
+| `tech` | ネイビー+赤青アクセント+極太ゴシック。フラット矩形のダッシュボード調 | 実務・データ系など、数値・図表主体のコンテンツ |
+
+現行チャンネルの対応: `ideology`=`classic`（思想史コンテンツのアーカイブ調に合わせて明示指定）、
+`youtube-growth`=`tech`（実務・データ系のダッシュボード調に合わせて指定）。
+
+新しいテーマの追加は `doci/style_themes.py` の `THEMES` 辞書に `DesignTheme` を
+追加する（同モジュールのdocstring参照）。
 
 優先順位は「CLIの実行対象指定 → channel.toml → `.env` のグローバル既定値」。
 `PUBLISH_*=0` と `PUBLISH_DRY_RUN=1` は安全弁として常に優先する。
