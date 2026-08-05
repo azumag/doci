@@ -399,6 +399,55 @@ class CrossChannelPropagationTest(unittest.TestCase):
             )
         self.assertEqual(other_corner["status"], "insufficient_data")
 
+    def test_cancelled_import_can_be_reoffered_with_same_decision_id(self) -> None:
+        """PRレビュー指摘の検証: cross_channelのdecision_idは決定的ハッシュだが、
+        予約がcancelされた場合は(ローカル仮説と同様)同じdecision_idで
+        再提示できる。`_performance_decision_used_rows`は最新行が
+        `performance_cancelled`のapplication_idを使用済みに数えないため、
+        恒久ブロックは発生しない。"""
+        _write_rows(self.source.history_file, [self._source_evaluated_row()])
+
+        with patch.object(
+            performance.channel, "load", side_effect=lambda cid: self.source
+        ):
+            decision = performance.build_decision(
+                self.dest, self.insufficient_snapshot, corner_key="video"
+            )
+        self.assertEqual(decision["status"], "active")
+
+        application_id = history.reserve_performance_decision(
+            self.dest,
+            "video",
+            decision["decision_id"],
+            hypothesis=performance.decision_hypothesis(decision),
+        )
+        self.assertIsNotNone(application_id)
+        history.cancel_performance_decision(
+            self.dest,
+            "video",
+            decision["decision_id"],
+            str(application_id),
+            "generation failed",
+        )
+
+        with patch.object(
+            performance.channel, "load", side_effect=lambda cid: self.source
+        ):
+            reoffered = performance.build_decision(
+                self.dest, self.insufficient_snapshot, corner_key="video"
+            )
+        self.assertEqual(reoffered["status"], "active")
+        self.assertEqual(reoffered["decision_id"], decision["decision_id"])
+
+        retry_application_id = history.reserve_performance_decision(
+            self.dest,
+            "video",
+            reoffered["decision_id"],
+            hypothesis=performance.decision_hypothesis(reoffered),
+        )
+        self.assertIsNotNone(retry_application_id)
+        self.assertNotEqual(retry_application_id, application_id)
+
     def test_imports_when_local_signal_is_insufficient(self) -> None:
         """ローカルで比較可能な動画は十分でも、上位・下位を分ける単一
         traitがない(insufficient_signal)場合にも横展開が発動する。"""
