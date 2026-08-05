@@ -1364,6 +1364,42 @@ max_uploads_per_day = {max_uploads_per_day}
         self.assertTrue(result["video_retained"])
         self.assertEqual(result["media_cleanup"]["status"], "retained")
 
+    def test_youtube_engagement_actions_called_after_successful_upload(self) -> None:
+        """review指摘(issue #86): _run_once→_apply_youtube_engagement_actionsの
+        配線(video_id確定時のみ呼ぶこと)が単体テストだけでは検証できていなかった。
+        _apply_youtube_engagement_actions自体はtest_youtube_engagement_hook.pyで
+        単体検証済みのため、ここでは呼び出しの有無・引数のみを検証する。"""
+        spec = self._review_spec("review-engagement-called")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+        with patch.object(
+            run_daily, "_apply_youtube_engagement_actions"
+        ) as engagement_mock:
+            self._run_review_pipeline(spec, script, "engagement123")
+        engagement_mock.assert_called_once()
+        called_spec, called_corner, called_script, called_video_id = (
+            engagement_mock.call_args.args
+        )
+        self.assertEqual(called_spec.id, spec.id)
+        self.assertEqual(called_corner.key, "a")
+        self.assertEqual(called_script["title"], script["title"])
+        self.assertEqual(called_video_id, "engagement123")
+
+    def test_youtube_engagement_actions_not_called_for_dry_run_publish(self) -> None:
+        """video_idが確定しない(dry_run等)公開ではフックを呼ばないこと。"""
+        spec = self._review_spec("review-engagement-dry-run")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+        with patch.object(
+            run_daily, "_apply_youtube_engagement_actions"
+        ) as engagement_mock:
+            self._run_review_pipeline(
+                spec, script, "engagement456", publish_dry_run=True
+            )
+        engagement_mock.assert_not_called()
+
     def test_plan_topic_duplicate_skip_releases_daily_slot_for_next_candidate(
         self,
     ) -> None:

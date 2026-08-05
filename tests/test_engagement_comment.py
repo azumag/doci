@@ -24,6 +24,15 @@ def _corner() -> CornerSpec:
 
 
 class GenerateEngagementCommentTest(unittest.TestCase):
+    def test_strips_language_tagged_code_fences(self) -> None:
+        with patch.object(
+            ai_text, "_dispatch", return_value="```json\nバスタオルは週1で洗うよね？\n```"
+        ):
+            result = ai_text.generate_engagement_comment(
+                _corner(), {"title": "タイトル", "narration": "ナレーション本文"}
+            )
+        self.assertEqual(result, "バスタオルは週1で洗うよね？")
+
     def test_strips_quotes_and_code_fences(self) -> None:
         with patch.object(ai_text, "_dispatch", return_value='```\n"バスタオルは週1で洗うよね？"\n```'):
             result = ai_text.generate_engagement_comment(

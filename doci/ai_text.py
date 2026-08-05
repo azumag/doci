@@ -1049,6 +1049,10 @@ _MAX_ENGAGEMENT_COMMENT_LENGTH = 200
 # モデレーションではない。差別的・扇動的表現の有無までは機械的に判定できない
 # ため、投稿ログの全文記録と固定作業時の目視確認を前提にしている）。
 _ENGAGEMENT_COMMENT_URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+# 先頭/末尾のコードフェンスを除去する。```json のような言語タグ付きの場合、
+# タグ行ごと落とさないと本文に「json」等が残ったまま公開投稿されてしまう。
+_LEADING_CODE_FENCE_RE = re.compile(r"^```[^\n]*\n?")
+_TRAILING_CODE_FENCE_RE = re.compile(r"\n?```$")
 
 
 def generate_engagement_comment(corner: CornerSpec, script: dict) -> str | None:
@@ -1079,8 +1083,8 @@ def generate_engagement_comment(corner: CornerSpec, script: dict) -> str | None:
     ):
         return None
     text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`").strip()
+    text = _LEADING_CODE_FENCE_RE.sub("", text)
+    text = _TRAILING_CODE_FENCE_RE.sub("", text)
     text = text.strip("\"'").strip()
     if not text or _ENGAGEMENT_COMMENT_URL_RE.search(text):
         return None
