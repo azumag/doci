@@ -184,6 +184,10 @@ def build_candidate(
     title/body/hypothesis_key を持つ。"""
     if decision is None:
         return None, "no_decision"
+    if decision.get("source") == "cross_channel":
+        # 横展開decision(issue #77)はローカル観測の記述が前提のissue文面に
+        # 合わないためissue化しない。提示はdecision JSON/run logで足りる。
+        return None, "cross_channel_decision"
     if corner_key and decision.get("corner") != corner_key:
         return None, "corner_mismatch"
     latest_snapshot_at = _latest_snapshot_at(spec)

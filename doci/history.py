@@ -982,6 +982,68 @@ def active_performance_experiment(
     return _active_performance_experiment_rows(_read_all(spec), corner)
 
 
+def performance_experiment_rows(spec: ChannelSpec) -> list[dict]:
+    """application_idごとの最新状態行を、古い→新しい順で返す(issue #77)。
+
+    展開先の試行済みtrait・消費済みorigin収集や、展開元の
+    有効実験(`performance_evaluated`かつ`effective`)抽出に使う汎用ヘルパー。
+    `_active_performance_experiment_rows`と異なり corner を絞らず、
+    `performance_evaluated`済みの行も含む。
+
+    `performance_hypothesis`は予約(`performance_queued`)行にしか書かれない。
+    評価完了前(`performance_applied`/`published`)の最新行をそのまま返すと
+    hypothesisを持たず、評価待ち中の実験のtrait/originが横展開の重複
+    チェック(展開先の`tested_traits`/`used_origins`収集)から漏れて
+    同一originが複数cornerへ重複展開されうる。そのためqueued行から
+    復元して補う。`performance_cancelled`は実際には試行していないため
+    補わない(cancel後の再提示を許す既存セマンティクスを維持)。
+    """
+    rows = _read_all(spec)
+    latest: dict[str, dict] = {}
+    order: list[str] = []
+    for row in rows:
+        application_id = str(row.get("performance_application_id") or "")
+        if not application_id:
+            continue
+        if str(row.get("status") or "") not in {
+            "performance_queued",
+            "performance_applied",
+            "performance_cancelled",
+            "performance_evaluated",
+            "published",
+        }:
+            continue
+        if application_id not in latest:
+            order.append(application_id)
+        latest[application_id] = row
+    results: list[dict] = []
+    for application_id in order:
+        row = latest[application_id]
+        if (
+            row.get("performance_hypothesis") is None
+            and str(row.get("status") or "") != "performance_cancelled"
+        ):
+            hypothesis = _application_hypothesis(rows, application_id)
+            if hypothesis is not None:
+                row = {**row, "performance_hypothesis": hypothesis}
+        results.append(row)
+    return results
+
+
+def _application_hypothesis(
+    rows: list[dict],
+    application_id: str,
+) -> dict | None:
+    """application_idの`performance_queued`行からhypothesisを復元する。"""
+    for row in rows:
+        if str(row.get("performance_application_id") or "") != application_id:
+            continue
+        hypothesis = row.get("performance_hypothesis")
+        if hypothesis is not None:
+            return hypothesis
+    return None
+
+
 def experiment_elapsed_hours(
     row: dict,
     now: datetime | None = None,
@@ -1054,8 +1116,15 @@ def reserve_performance_decision(
     spec: ChannelSpec,
     corner: str,
     decision_id: str,
+    *,
+    hypothesis: dict | None = None,
 ) -> str | None:
-    """同一decisionを複数runへ適用しないよう、原子的に適用枠を予約する。"""
+    """同一decisionを複数runへ適用しないよう、原子的に適用枠を予約する。
+
+    `hypothesis`（issue #77、何を試すかのスナップショット）を渡すと
+    `performance_queued`行に保存し、評価完了時の追跡や横展開の
+    候補選定で復元できるようにする。
+    """
     path = spec.history_file
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as file:
@@ -1083,6 +1152,8 @@ def reserve_performance_decision(
             "performance_decision_id": decision_id,
             "performance_application_id": application_id,
         }
+        if hypothesis is not None:
+            row["performance_hypothesis"] = hypothesis
         file.seek(0, 2)
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
         file.flush()
@@ -1224,20 +1295,37 @@ def recover_performance_application(
 def complete_performance_evaluation(
     spec: ChannelSpec,
     applied: dict,
+    *,
+    result: dict | None = None,
 ) -> None:
-    """評価閾値に到達した実験を完了し、cornerの次実験を解禁する。"""
+    """評価閾値に到達した実験を完了し、cornerの次実験を解禁する。
+
+    `result`（有効性判定、issue #77）は`performance_evaluated`行にそのまま
+    記録する。`hypothesis`（何を試したか）は同じapplication_idの
+    `performance_queued`行から復元して同じ行に含め、
+    「何を試して、効いたか」が1行で追跡できるようにする。
+    """
+    application_id = applied.get("performance_application_id")
+    hypothesis = (
+        _application_hypothesis(_read_all(spec), str(application_id or ""))
+        if application_id
+        else None
+    )
+    extra: dict[str, object] = {
+        "status": "performance_evaluated",
+        "performance_decision_id": applied.get("performance_decision_id"),
+        "performance_application_id": application_id,
+    }
+    if result is not None:
+        extra["performance_result"] = result
+    if hypothesis is not None:
+        extra["performance_hypothesis"] = hypothesis
     record(
         spec,
         str(applied.get("corner") or ""),
         "",
         str(applied.get("video_id") or "") or None,
-        extra={
-            "status": "performance_evaluated",
-            "performance_decision_id": applied.get("performance_decision_id"),
-            "performance_application_id": applied.get(
-                "performance_application_id"
-            ),
-        },
+        extra=extra,
     )
 
 

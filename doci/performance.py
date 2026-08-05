@@ -4,11 +4,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import statistics
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import channel, history, youtube
+from . import channel, config, history, youtube
 from .channel import ChannelSpec
 
 SCHEMA_VERSION = 1
@@ -17,6 +18,7 @@ MIN_ANALYTICS_VIEWS = 20
 MIN_PUBLIC_VIEWS = 50
 MIN_GROUP_SIZE = 2
 MIN_TRAIT_SUPPORT = 2
+MIN_EVAL_PEERS = 4  # 2 * MIN_GROUP_SIZE。medianとの相対比較に最低限必要なpeer数
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -353,6 +355,214 @@ def _has_evaluation_result(snapshot: dict, video_id: str) -> bool:
     )
 
 
+def _experiment_result(
+    snapshot: dict,
+    corner_key: str | None,
+    video_id: str,
+) -> dict:
+    """適用動画の指標を同一cohort内peerのmedianと比較し、有効性を判定する。
+
+    `build_decision`の仮説生成と同じcohort・同じ指標選択(`_ranked_rows`)で
+    比較することで、「同じ指標で再評価する」というguidanceと整合させる。
+    比較材料が不足する場合はfail-closed(`effective: False`)とし、
+    誤って逆効果の施策を横展開する事故を避ける。
+
+    既知の制約: cohortは`duration:*`/`tier:*`で定義されるため、
+    まさにこれらを変更する実験は適用動画がcohort外に出て
+    `insufficient_comparison`(fail-closed)に必ずなる。安全側だが、
+    duration/tier仮説は横展開元にはなれない。
+    """
+    ranked, metric, format_cohort = _ranked_rows(snapshot, corner_key=corner_key)
+    applied = next(
+        (row for row in ranked if str(row.get("video_id") or "") == video_id),
+        None,
+    )
+    if applied is None:
+        return {
+            "effective": False,
+            "metric": metric,
+            "format_cohort": format_cohort,
+            "score": None,
+            "peer_median": None,
+            "peers": 0,
+            "reason": "insufficient_comparison",
+        }
+    peer_scores = [
+        row["_score"]
+        for row in ranked
+        if str(row.get("video_id") or "") != video_id
+    ]
+    if len(peer_scores) < MIN_EVAL_PEERS:
+        return {
+            "effective": False,
+            "metric": metric,
+            "format_cohort": format_cohort,
+            "score": applied["_score"],
+            "peer_median": None,
+            "peers": len(peer_scores),
+            "reason": "insufficient_comparison",
+        }
+    peer_median = statistics.median(peer_scores)
+    return {
+        "effective": applied["_score"] > peer_median,
+        "metric": metric,
+        "format_cohort": format_cohort,
+        "score": applied["_score"],
+        "peer_median": peer_median,
+        "peers": len(peer_scores),
+        "reason": "",
+    }
+
+
+def decision_hypothesis(decision: dict) -> dict:
+    """予約行(`history.jsonl`)へ保存する、boundedな仮説スナップショット(issue #77)。
+
+    decision本体は`performance_decision.json`が都度上書きするため、
+    予約時点でtrait等を履歴行へ複製し、評価完了時に何を試したか
+    復元できるようにする。
+    """
+    return {
+        "positive_traits": list(decision.get("positive_traits") or []),
+        "negative_traits": list(decision.get("negative_traits") or []),
+        "metric": str(decision.get("metric") or ""),
+        "format_cohort": str(decision.get("format_cohort") or ""),
+        "source": str(decision.get("source") or "local"),
+        "origin": decision.get("origin"),
+    }
+
+
+def _cross_channel_candidate(
+    spec: ChannelSpec,
+    corner_key: str | None,
+    *,
+    now: datetime | None = None,
+) -> dict | None:
+    """展開元チャンネルの有効実験から、このchannel/corner向けdecisionを組み立てる(issue #77)。
+
+    ローカルで仮説が立てられない(insufficient_data/insufficient_signal)場合のみ
+    `build_decision`から呼ばれる。誤展開を防ぐため以下をすべて満たす候補だけを返す:
+    - `channel.toml`の`pipeline.performance_import_from`で明示された展開元由来
+    - 展開元で`performance_evaluated`かつ`performance_result.effective`
+    - 展開元の仮説自体がローカル起源(`hypothesis.source == "local"`。孫展開禁止)
+    - trait がちょうど1つ(「一度に試す変数は1つ」を横展開でも構造的に強制)
+    - 展開先でまだ試していないtrait、まだ消費していないorigin/decision_id
+    - 評価から`PERFORMANCE_PROPAGATION_MAX_AGE_DAYS`日以内(鮮度ガード)
+
+    既知の制約: tested_traits/used_originsの収集と実際の予約(`reserve_
+    performance_decision`)は別ロックのため、同一チャンネルの複数corner
+    を厳密に同時実行すると同一originが2 corner へ同時に輸入される
+    競合窓が理論上存在する。日次runの想定頻度では確率が低く、致命的でも
+    ない(輸入先ごとに独立した実験として評価されるだけ)ため許容する。
+    """
+    if not corner_key:
+        return None
+    source_ids = [
+        str(item) for item in (spec.pipeline_get("performance_import_from") or [])
+    ]
+    if not source_ids:
+        return None
+    reference = now or datetime.now(timezone.utc)
+
+    dest_rows = history._read_all(spec)
+    tested_traits: set[str] = set()
+    used_origins: set[str] = set()
+    for row in history.performance_experiment_rows(spec):
+        hypothesis = row.get("performance_hypothesis") or {}
+        tested_traits.update(hypothesis.get("positive_traits") or [])
+        tested_traits.update(hypothesis.get("negative_traits") or [])
+        origin_application_id = str(
+            (hypothesis.get("origin") or {}).get("application_id") or ""
+        )
+        if origin_application_id:
+            used_origins.add(origin_application_id)
+
+    best: dict | None = None
+    best_ts: datetime | None = None
+    for source_id in source_ids:
+        try:
+            source_spec = channel.load(source_id)
+        except Exception as exc:  # 壊れた1設定が他のsourceを妨げない
+            print(
+                f"[performance] cross-channel source {source_id} 読込失敗: {exc}",
+                flush=True,
+            )
+            continue
+        for row in history.performance_experiment_rows(source_spec):
+            if str(row.get("status") or "") != "performance_evaluated":
+                continue
+            result = row.get("performance_result") or {}
+            if not result.get("effective"):
+                continue
+            hypothesis = row.get("performance_hypothesis") or {}
+            if str(hypothesis.get("source") or "local") != "local":
+                continue  # 孫展開禁止: A->Bで効いたものをB->Cへ展開しない
+            traits = list(hypothesis.get("positive_traits") or []) + list(
+                hypothesis.get("negative_traits") or []
+            )
+            if len(traits) != 1:
+                continue
+            trait = traits[0]
+            if trait in tested_traits:
+                continue
+            application_id = str(row.get("performance_application_id") or "")
+            if not application_id or application_id in used_origins:
+                continue
+            evaluated_ts = history._parse_ts(row.get("ts"))
+            if evaluated_ts is None:
+                continue
+            age_days = (reference - evaluated_ts).total_seconds() / 86400
+            if age_days > config.PERFORMANCE_PROPAGATION_MAX_AGE_DAYS:
+                continue
+            imported_id = hashlib.sha256(
+                json.dumps(
+                    {
+                        "channel": spec.id,
+                        "corner": corner_key,
+                        "origin_channel": source_id,
+                        "origin_application_id": application_id,
+                        "trait": trait,
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            if history._performance_decision_used_rows(dest_rows, imported_id):
+                continue
+            if best_ts is not None and evaluated_ts <= best_ts:
+                continue
+            best_ts = evaluated_ts
+            positive = [trait] if trait in (hypothesis.get("positive_traits") or []) else []
+            negative = [trait] if trait in (hypothesis.get("negative_traits") or []) else []
+            best = {
+                "decision_id": imported_id,
+                "status": "active",
+                "source": "cross_channel",
+                "reason": (
+                    f"channel {source_id} corner {row.get('corner')} で有効性が確認された"
+                    f"形式仮説 {trait} を横展開"
+                ),
+                "positive_traits": positive,
+                "negative_traits": negative,
+                "origin": {
+                    "channel": source_id,
+                    "decision_id": row.get("performance_decision_id"),
+                    "application_id": application_id,
+                    "video_id": row.get("video_id"),
+                    "evaluated_ts": row.get("ts"),
+                    "metric": hypothesis.get("metric"),
+                    "format_cohort": hypothesis.get("format_cohort"),
+                    "result": result,
+                },
+                "guidance": (
+                    f"channel {source_id} の実験 {application_id} で有効性が確認された"
+                    f"形式特性: {trait}。"
+                    "これは因果ではなく、このチャンネルでの次回1本の実験仮説としてのみ使う。"
+                    "題材・タイトルは展開元から再利用せず、30日cooldownに通る新しい題材を選ぶ。"
+                    f"変更変数は{trait}の1つに絞り、同じ指標で再評価する。"
+                ),
+            }
+    return best
+
+
 def build_decision(
     spec: ChannelSpec,
     snapshot: dict,
@@ -430,7 +640,12 @@ def build_decision(
         )
     )
     if active_experiment and threshold_reached and not within_window:
-        history.complete_performance_evaluation(spec, active_experiment)
+        result = _experiment_result(
+            snapshot, corner_key, str(active_experiment["video_id"])
+        )
+        history.complete_performance_evaluation(
+            spec, active_experiment, result=result
+        )
         active_experiment = None
     if active_experiment:
         applied_video_id = str(active_experiment.get("video_id") or "")
@@ -465,33 +680,41 @@ def build_decision(
             }
         )
     elif len(ranked) < MIN_ELIGIBLE_VIDEOS:
-        decision.update(
-            {
-                "status": "insufficient_data",
-                "reason": (
-                    f"比較可能な動画が{len(ranked)}本。"
-                    f"最低{MIN_ELIGIBLE_VIDEOS}本必要"
-                    f"{source_suffix}"
-                ),
-                "guidance": "",
-            }
-        )
+        cross_channel = _cross_channel_candidate(spec, corner_key)
+        if cross_channel:
+            decision.update(cross_channel)
+        else:
+            decision.update(
+                {
+                    "status": "insufficient_data",
+                    "reason": (
+                        f"比較可能な動画が{len(ranked)}本。"
+                        f"最低{MIN_ELIGIBLE_VIDEOS}本必要"
+                        f"{source_suffix}"
+                    ),
+                    "guidance": "",
+                }
+            )
     else:
         group_size = max(MIN_GROUP_SIZE, len(ranked) // 4)
         lower = ranked[:group_size]
         upper = ranked[-group_size:]
         direction, trait = _single_trait(upper, lower)
         if not trait:
-            decision.update(
-                {
-                    "status": "insufficient_signal",
-                    "reason": (
-                        "上位・下位群を2本以上で分ける単一の形式特性がない"
-                        f"{source_suffix}"
-                    ),
-                    "guidance": "",
-                }
-            )
+            cross_channel = _cross_channel_candidate(spec, corner_key)
+            if cross_channel:
+                decision.update(cross_channel)
+            else:
+                decision.update(
+                    {
+                        "status": "insufficient_signal",
+                        "reason": (
+                            "上位・下位群を2本以上で分ける単一の形式特性がない"
+                            f"{source_suffix}"
+                        ),
+                        "guidance": "",
+                    }
+                )
         else:
             positive = [trait] if direction == "positive" else []
             negative = [trait] if direction == "negative" else []
