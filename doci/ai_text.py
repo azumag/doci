@@ -1048,6 +1048,34 @@ _ENGAGEMENT_COMMENT_PROMPT = """\
 
 出力はコメント本文のみ（説明・引用符・コードフェンス禁止）:
 """
+# 討論誘発型("debate")とは目的が正反対（余白を残す vs 断定・実行可能）のため、
+# 既存プロンプトへ条件分岐で差し込まず、構造（ルール箇条書き＋変数埋め込み）
+# だけを踏襲した別定数にする(issue #98)。unlisted等で不特定多数の議論が
+# 成立しないチャンネル（youtube-growth等）向け。
+_CALL_TO_ACTION_COMMENT_PROMPT = """\
+あなたはこのチャンネルの運営者本人として、公開直後のYouTube動画へ寄せる
+トップレベルコメントを1つ書いてください。目的は、視聴者が今日すぐ試せる
+具体的な行動を促し、実際に手を動かしてもらうことです。議論や感想を
+募るコメントではありません。
+
+ルール:
+- 日本語で1〜2文、40〜80文字程度。読んで自然な日本語にする（機械的・冗長な言い回しは禁止）
+- 「今日すぐ試せる操作」のうち、今日すぐ着手できる1手だけに絞る（手順を並べない）
+- 画面名・指標名など具体的な語を最低1つ名指しする
+- 「どう思いますか」「試してみませんか」等の感想募集・議論誘発・行動を
+  相手に丸投げする言い回し、チャンネル登録・高評価の依頼は禁止
+- 断定的・宣言的な文にする（〜だよね？のような余白は不要）
+- 差別的・攻撃的な表現、事実に反する断定は禁止
+- 絵文字は0〜1個まで
+
+コーナー: {corner_label}
+動画タイトル: {title}
+動画概要欄: {description}
+今日すぐ試せる操作: {viewer_action}
+動画ナレーション（全文）: {narration_excerpt}
+
+出力はコメント本文のみ（説明・引用符・コードフェンス禁止）:
+"""
 _MAX_ENGAGEMENT_COMMENT_LENGTH = 200
 # ナレーションの切り詰め上限。実測(youtube-growth 75本)で平均778字・最大1347字
 # だったため、通常の動画は切り詰められず全文が渡る。動画本編の結論・具体的な
@@ -1064,10 +1092,89 @@ _ENGAGEMENT_COMMENT_URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 # タグ行ごと落とさないと本文に「json」等が残ったまま公開投稿されてしまう。
 _LEADING_CODE_FENCE_RE = re.compile(r"^```[^\n]*\n?")
 _TRAILING_CODE_FENCE_RE = re.compile(r"\n?```$")
+# narration末尾の閉じ括弧・引用符（_strip_bracket_quotesを通っていない旧データ
+# 等で残ることがある。実測: output/ideology/2026-07-31_communism_011315）を
+# 除去してから文末記号の有無を判定する(issue #98)。
+_ENGAGEMENT_TRAILING_BRACKET_RE = re.compile(r"[」』\"'）)】\s]+$")
+_ENGAGEMENT_QUESTION_TAIL_RE = re.compile(
+    r"(？|でしょうか|ましょうか|ますか|ですか|ませんか|だろうか|のか)[。」』\"')]*$"
+)
+_ENGAGEMENT_QUESTION_WORDS_RE = re.compile(
+    r"なぜ|どこ|誰|だれ|何|なに|どう|いつ|どんな|どちら|どれ|いくつ"
+)
+# 「〜でしょう。」（か省略の柔らかい疑問形）は疑問詞と同一文中にある場合だけ
+# 問いかけとみなす。「〜となるでしょう。」のような予測断定を誤検出しないため。
+_ENGAGEMENT_SOFT_QUESTION_TAIL_RE = re.compile(r"でしょう[。」』\"')]*$")
 
 
-def generate_engagement_comment(corner: CornerSpec, script: dict) -> str | None:
-    """討論を誘発する自作コメント文を生成する(issue #86)。
+def _clean_engagement_comment(text: str) -> str | None:
+    """LLM出力・narration逐語抽出のどちらも通す、投稿前の共通サニタイズ(issue #98)。"""
+    text = text.strip()
+    text = _LEADING_CODE_FENCE_RE.sub("", text)
+    text = _TRAILING_CODE_FENCE_RE.sub("", text)
+    text = text.strip("\"'").strip()
+    if not text or _ENGAGEMENT_COMMENT_URL_RE.search(text):
+        return None
+    return text[:_MAX_ENGAGEMENT_COMMENT_LENGTH]
+
+
+def _closing_sentence(
+    narration: str, max_chars: int = _MAX_ENGAGEMENT_COMMENT_LENGTH
+) -> str:
+    """narration末尾の一文（文末記号込み）を切り出す(issue #98)。
+
+    `_opening_sentence`と対だが、コメントとして投稿するため文末記号を
+    落とさない点、および左truncateしない点が異なる。max_chars超過時に
+    先頭を削ると文頭が欠けた断片がそのまま公開投稿されてしまうため、
+    収まらない場合は諦めて空文字を返す（呼び出し側でフォールバック判定に使う）。
+
+    分割後の末尾セグメントが閉じ括弧・引用符だけ（旧データの残骸）になる
+    ケースがあるため、末尾から遡って実際に文末記号で終わる有効なセグメントを
+    探す。
+    """
+    text = (narration or "").strip()
+    if not text:
+        return ""
+    segments = [s for s in re.split(r"(?<=[。？！])", text) if s.strip()]
+    for raw in reversed(segments):
+        tail = _ENGAGEMENT_TRAILING_BRACKET_RE.sub("", raw.strip()).strip()
+        if tail and tail[-1] in "。？！":
+            return tail if len(tail) <= max_chars else ""
+    return ""
+
+
+def _is_closing_question(sentence: str) -> bool:
+    """文が視聴者への問いかけで終わっているかを判定する(issue #98)。
+
+    output_rules.mdは締めの型を意図的に多様化させており（「毎回同じ型に
+    しない」）、疑問形以外の締め（「〜なのかもしれません」等）も一定割合
+    存在するため、この判定に外れた場合は呼び出し側でLLM生成へフォールバック
+    する前提で設計している。
+    """
+    if _ENGAGEMENT_QUESTION_TAIL_RE.search(sentence):
+        return True
+    return bool(
+        _ENGAGEMENT_SOFT_QUESTION_TAIL_RE.search(sentence)
+        and _ENGAGEMENT_QUESTION_WORDS_RE.search(sentence)
+    )
+
+
+def generate_engagement_comment(
+    corner: CornerSpec, script: dict, *, mode: str = "debate"
+) -> str | None:
+    """公開直後のYouTube動画へ寄せるエンゲージメントコメントを生成する
+    (issue #86。チャンネル別方式への分岐はissue #98)。
+
+    `mode`でチャンネルごとに異なる方式を選ぶ（未知の値は"debate"として扱う）:
+    - `"debate"`（既定）: 議論を誘発する一言をLLM生成する(issue #86)。
+    - `"closing_question"`: narration末尾が問いかけならLLMを呼ばずそのまま
+      投稿し、問いかけでなければ`"debate"`へフォールバックする。narrationの
+      締めが問いかけになりやすい文体のチャンネル(ideology等)向け。
+    - `"call_to_action"`: 討論誘発ではなく、視聴者が今日すぐ試せる1手を
+      促す実用的なコメントをLLM生成する。研究段階で得た`viewer_action`
+      （空なら代わりにnarration末尾一文）を主入力にする。どちらも取れなければ
+      投稿しない（`"debate"`へはフォールバックしない。議論誘発の前提が
+      成立しないチャンネル向けの方式のため）。
 
     通信・応答不良時、およびURLらしき出力を含む場合はNoneを返し、
     呼び出し側でコメント投稿をスキップさせる（動画生成・投稿本体は止めない）。
@@ -1079,12 +1186,37 @@ def generate_engagement_comment(corner: CornerSpec, script: dict) -> str | None:
     description = str(script.get("description") or "").strip()
     if not title and not narration:
         return None
-    prompt = _ENGAGEMENT_COMMENT_PROMPT.format(
-        corner_label=corner.label,
-        title=title[:100],
-        description=description[:400] or "(なし)",
-        narration_excerpt=narration[:_MAX_ENGAGEMENT_NARRATION_CHARS],
-    )
+    if mode not in channel.ENGAGEMENT_COMMENT_MODES:
+        mode = "debate"
+
+    if mode == "closing_question":
+        closing = _closing_sentence(narration)
+        if closing and _is_closing_question(closing):
+            return _clean_engagement_comment(closing)
+        _log("エンゲージメントコメント: 末尾が問いかけでないためdebate方式へフォールバック")
+        mode = "debate"
+
+    if mode == "call_to_action":
+        viewer_action = str(
+            (script.get("_research") or {}).get("viewer_action") or ""
+        ).strip()
+        primary_action = viewer_action or _closing_sentence(narration)
+        if not primary_action:
+            return None
+        prompt = _CALL_TO_ACTION_COMMENT_PROMPT.format(
+            corner_label=corner.label,
+            title=title[:100],
+            description=description[:400] or "(なし)",
+            viewer_action=primary_action[:400],
+            narration_excerpt=narration[:_MAX_ENGAGEMENT_NARRATION_CHARS],
+        )
+    else:
+        prompt = _ENGAGEMENT_COMMENT_PROMPT.format(
+            corner_label=corner.label,
+            title=title[:100],
+            description=description[:400] or "(なし)",
+            narration_excerpt=narration[:_MAX_ENGAGEMENT_NARRATION_CHARS],
+        )
     try:
         text = _dispatch(prompt, timeout=60)
     except (
@@ -1095,13 +1227,7 @@ def generate_engagement_comment(corner: CornerSpec, script: dict) -> str | None:
         OSError,
     ):
         return None
-    text = text.strip()
-    text = _LEADING_CODE_FENCE_RE.sub("", text)
-    text = _TRAILING_CODE_FENCE_RE.sub("", text)
-    text = text.strip("\"'").strip()
-    if not text or _ENGAGEMENT_COMMENT_URL_RE.search(text):
-        return None
-    return text[:_MAX_ENGAGEMENT_COMMENT_LENGTH]
+    return _clean_engagement_comment(text)
 
 
 def _validate(script: dict) -> dict:

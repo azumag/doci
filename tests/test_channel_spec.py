@@ -288,6 +288,69 @@ youtube_auto_engagement_comment = true
         self.assertTrue(spec.pipeline_get("youtube_auto_playlist"))
         self.assertTrue(spec.pipeline_get("youtube_auto_engagement_comment"))
 
+    def test_rejects_unknown_youtube_engagement_comment_mode(self) -> None:
+        # issue #98
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+youtube_engagement_comment_mode = "debate2"
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "youtube_engagement_comment_mode"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_rejects_non_string_youtube_engagement_comment_mode(self) -> None:
+        # issue #98
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+youtube_engagement_comment_mode = true
+"""
+        )
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "youtube_engagement_comment_mode"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
+
+    def test_loads_youtube_engagement_comment_mode(self) -> None:
+        # issue #98
+        self._write_channel(
+            toml="""\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[pipeline]
+youtube_engagement_comment_mode = "closing_question"
+"""
+        )
+        spec = channel.load("sample", channels_dir=self.channels_dir)
+        self.assertEqual(
+            spec.pipeline_get("youtube_engagement_comment_mode"), "closing_question"
+        )
+
     def test_rejects_invalid_tactic_issues_switch(self) -> None:
         # issue #90
         self._write_channel(

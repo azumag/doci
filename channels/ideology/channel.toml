@@ -41,3 +41,7 @@ narration_pattern_check = true
 research_requires_youtube_case_studies = false
 youtube_auto_playlist = true
 youtube_auto_engagement_comment = true
+# narrationの締めが問いかけになる文体（output_rules.md）を利用し、LLMで新規
+# 生成せず末尾の一文をそのまま投稿する。問いかけで終わらない回は討論誘発型
+# (LLM生成)へ自動フォールバックする(issue #98)。
+youtube_engagement_comment_mode = "closing_question"

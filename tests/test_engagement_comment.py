@@ -1,6 +1,8 @@
 """issue #86: 討論を誘発する自作コメント生成のテスト。
+チャンネル別方式（issue #98）: closing_question / call_to_action も対象。
 
-対象: ai_text.generate_engagement_comment。
+対象: ai_text.generate_engagement_comment, ai_text._closing_sentence,
+ai_text._is_closing_question。
 """
 from __future__ import annotations
 
@@ -130,6 +132,197 @@ class GenerateEngagementCommentTest(unittest.TestCase):
         prompt = dispatch_mock.call_args.args[0]
         self.assertIn("具体的な内容", prompt)
         self.assertIn("言い換えただけ", prompt)
+
+    def test_unknown_mode_falls_back_to_debate_prompt(self) -> None:
+        with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(),
+                {"title": "タイトル", "narration": "ナレーション"},
+                mode="unknown-mode",
+            )
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn("反応・議論したくなる", prompt)
+
+
+class ClosingSentenceTest(unittest.TestCase):
+    def test_extracts_last_sentence_with_terminator(self) -> None:
+        result = ai_text._closing_sentence(
+            "導入です。中盤の説明です。みなさんはどう思いますか？"
+        )
+        self.assertEqual(result, "みなさんはどう思いますか？")
+
+    def test_strips_stray_trailing_bracket_from_old_data(self) -> None:
+        """実測: output/ideology/2026-07-31_communism_011315の narration が
+        鉤括弧で終わっており（_strip_bracket_quotes未適用の旧データ）、
+        末尾セグメントが「」」だけになる事故があった。有効な文まで遡って
+        抽出できることを確認する。"""
+        result = ai_text._closing_sentence(
+            "本編です。あなたならどうしますか？」"
+        )
+        self.assertEqual(result, "あなたならどうしますか？")
+
+    def test_returns_empty_when_no_terminator_present(self) -> None:
+        self.assertEqual(ai_text._closing_sentence("句読点が一つも無い文字列"), "")
+
+    def test_returns_empty_for_blank_input(self) -> None:
+        self.assertEqual(ai_text._closing_sentence(""), "")
+        self.assertEqual(ai_text._closing_sentence("   "), "")
+
+    def test_returns_empty_when_over_max_chars_instead_of_truncating(self) -> None:
+        """左truncateすると文頭が欠けた断片が公開投稿されてしまうため、
+        収まらない場合は諦めて空文字を返す（変更しない）仕様を固定する。"""
+        long_sentence = "あ" * 300 + "。"
+        self.assertEqual(ai_text._closing_sentence(long_sentence, max_chars=200), "")
+
+
+class IsClosingQuestionTest(unittest.TestCase):
+    def test_plain_question_mark_is_a_question(self) -> None:
+        self.assertTrue(ai_text._is_closing_question("あなたならどうしますか？"))
+
+    def test_deshou_ka_is_a_question(self) -> None:
+        self.assertTrue(
+            ai_text._is_closing_question(
+                "みなさんが選んでいるのは味そのものでしょうか。"
+            )
+        )
+
+    def test_declarative_sentence_is_not_a_question(self) -> None:
+        self.assertFalse(
+            ai_text._is_closing_question("その結果で次の判断をします。")
+        )
+
+    def test_soft_deshou_without_question_word_is_not_a_question(self) -> None:
+        """「〜となるでしょう。」のような予測断定を疑問と誤検出しない。"""
+        self.assertFalse(ai_text._is_closing_question("次第に効果が出るでしょう。"))
+
+    def test_soft_deshou_with_question_word_is_a_question(self) -> None:
+        self.assertTrue(
+            ai_text._is_closing_question(
+                "私たちはいったい何を頼りに歩けばよいのでしょう。"
+            )
+        )
+
+
+class ClosingQuestionModeTest(unittest.TestCase):
+    def test_question_ending_is_posted_verbatim_without_llm_call(self) -> None:
+        with patch.object(ai_text, "_dispatch") as dispatch_mock:
+            result = ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": "導入です。あなたならどうしますか？",
+                },
+                mode="closing_question",
+            )
+        dispatch_mock.assert_not_called()
+        self.assertEqual(result, "あなたならどうしますか？")
+
+    def test_non_question_ending_falls_back_to_debate_llm(self) -> None:
+        with patch.object(
+            ai_text, "_dispatch", return_value="議論を誘発する一言"
+        ) as dispatch_mock:
+            result = ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": "導入です。その結果で次の判断をします。",
+                },
+                mode="closing_question",
+            )
+        dispatch_mock.assert_called_once()
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn("反応・議論したくなる", prompt)
+        self.assertEqual(result, "議論を誘発する一言")
+
+    def test_fallback_llm_failure_returns_none(self) -> None:
+        with patch.object(
+            ai_text, "_dispatch", side_effect=RuntimeError("backend unavailable")
+        ):
+            result = ai_text.generate_engagement_comment(
+                _corner(),
+                {"title": "タイトル", "narration": "断定で終わる文です。"},
+                mode="closing_question",
+            )
+        self.assertIsNone(result)
+
+
+class CallToActionModeTest(unittest.TestCase):
+    def test_uses_viewer_action_as_primary_input(self) -> None:
+        with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": "本編ナレーション。",
+                    "_research": {
+                        "viewer_action": "YouTube Studioで維持率グラフを開いて確認する"
+                    },
+                },
+                mode="call_to_action",
+            )
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn("YouTube Studioで維持率グラフを開いて確認する", prompt)
+
+    def test_falls_back_to_closing_sentence_when_viewer_action_empty(self) -> None:
+        with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": "導入です。次の一手を記録して判断します。",
+                },
+                mode="call_to_action",
+            )
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn("次の一手を記録して判断します。", prompt)
+
+    def test_returns_none_without_llm_call_when_no_input_available(self) -> None:
+        with patch.object(ai_text, "_dispatch") as dispatch_mock:
+            result = ai_text.generate_engagement_comment(
+                _corner(),
+                {"title": "タイトル", "narration": "句読点が一つも無い文字列"},
+                mode="call_to_action",
+            )
+        dispatch_mock.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_does_not_fall_back_to_debate_mode(self) -> None:
+        """call_to_actionは議論誘発の前提が成立しないチャンネル向けの方式
+        のため、入力が無い場合はdebateへフォールバックせず投稿を諦める。"""
+        with patch.object(ai_text, "_dispatch") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(),
+                {"title": "タイトル", "narration": ""},
+                mode="call_to_action",
+            )
+        dispatch_mock.assert_not_called()
+
+    def test_prompt_forbids_discussion_prompting_language(self) -> None:
+        with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": "導入です。次の一手を記録して判断します。",
+                },
+                mode="call_to_action",
+            )
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn("感想募集", prompt)
+
+    def test_output_sanitization_applies_to_call_to_action(self) -> None:
+        with patch.object(
+            ai_text, "_dispatch", return_value="```\n維持率を確認しよう\n```"
+        ):
+            result = ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": "導入です。次の一手を記録して判断します。",
+                },
+                mode="call_to_action",
+            )
+        self.assertEqual(result, "維持率を確認しよう")
 
 
 if __name__ == "__main__":

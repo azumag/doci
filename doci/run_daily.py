@@ -186,10 +186,19 @@ def _apply_ambiguous_date_title_check(spec: ChannelSpec, script: dict) -> None:
         )
 
 
+# generate_engagement_comment()のmodeに対応するログ表示名(issue #98)。
+_ENGAGEMENT_MODE_LABELS = {
+    "debate": "討論誘発",
+    "closing_question": "締めの問いかけ",
+    "call_to_action": "行動喚起",
+}
+
+
 def _apply_youtube_engagement_actions(
     spec: ChannelSpec, corner: CornerSpec, script: dict, video_id: str
 ) -> None:
-    """公開直後のYouTube動画に再生リスト追加・討論誘発コメント投稿を行う(issue #86)。
+    """公開直後のYouTube動画に再生リスト追加・エンゲージメントコメント投稿を行う
+    (issue #86。コメントの方式をチャンネル別に分けるissue #98)。
 
     いずれもpipeline設定で個別に無効化でき、失敗しても動画生成・投稿本体は
     止めない(ソフトフェイル)。コメントの「固定」自体はYouTube Data APIに
@@ -215,10 +224,14 @@ def _apply_youtube_engagement_actions(
             _log(f"再生リスト追加失敗（投稿は継続）: {e}")
 
     if spec.pipeline_get("youtube_auto_engagement_comment", False):
+        mode = str(spec.pipeline_get("youtube_engagement_comment_mode", "debate"))
+        mode_label = _ENGAGEMENT_MODE_LABELS.get(mode, "討論誘発")
         try:
-            comment_text = ai_text.generate_engagement_comment(corner, script)
+            comment_text = ai_text.generate_engagement_comment(
+                corner, script, mode=mode
+            )
             if not comment_text:
-                _log("討論誘発コメント生成に失敗→投稿スキップ")
+                _log(f"{mode_label}コメント生成に失敗→投稿スキップ")
             else:
                 youtube.post_comment(
                     video_id,
@@ -227,7 +240,7 @@ def _apply_youtube_engagement_actions(
                     client_secret_file=spec.publish.youtube.client_secret,
                 )
                 _log(
-                    f"討論誘発コメント投稿: {comment_text}"
+                    f"{mode_label}コメント投稿: {comment_text}"
                     "（固定はYouTube Studioで手動操作してください）"
                 )
         except Exception as e:  # noqa: BLE001 - 非致命的な後処理
