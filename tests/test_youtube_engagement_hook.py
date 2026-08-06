@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from doci import ai_text, run_daily, youtube
+from doci import ai_text, channel, run_daily, youtube
 from doci.channel import CornerSpec
 
 
@@ -182,6 +182,18 @@ class ApplyYoutubeEngagementActionsTest(unittest.TestCase):
             )
         self.assertTrue(
             any("コメント投稿失敗" in call.args[0] for call in log_mock.call_args_list)
+        )
+
+
+class EngagementModeLabelsInvariantTest(unittest.TestCase):
+    def test_every_mode_has_a_log_label(self) -> None:
+        """_ENGAGEMENT_MODE_LABELSとchannel.ENGAGEMENT_COMMENT_MODESの集合が
+        一致することを固定する。新しいmodeを追加してラベル辞書の更新を
+        忘れると、"討論誘発"へ無言でフォールバックしたログになってしまう
+        （issue #98レビュー指摘）。"""
+        self.assertEqual(
+            set(run_daily._ENGAGEMENT_MODE_LABELS),
+            set(channel.ENGAGEMENT_COMMENT_MODES),
         )
 
 

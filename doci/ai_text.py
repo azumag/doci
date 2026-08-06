@@ -1095,16 +1095,25 @@ _TRAILING_CODE_FENCE_RE = re.compile(r"\n?```$")
 # narration末尾の閉じ括弧・引用符（_strip_bracket_quotesを通っていない旧データ
 # 等で残ることがある。実測: output/ideology/2026-07-31_communism_011315）を
 # 除去してから文末記号の有無を判定する(issue #98)。
-_ENGAGEMENT_TRAILING_BRACKET_RE = re.compile(r"[」』\"'）)】\s]+$")
+_ENGAGEMENT_TRAILING_BRACKET_RE = re.compile(r"[」』”’\"'）)】\s]+$")
+# 対応する開き括弧側。文が「『それでいいのですか？」のように閉じ括弧を持たず
+# 開き側だけが残るケース（引用の途中で文が終わる等）を落とす。閉じ括弧を
+# 上のTRAILING_BRACKET_REで先に除去した後に適用する。
+_ENGAGEMENT_LEADING_BRACKET_RE = re.compile(r"^[「『“‘\"'（(]+")
 _ENGAGEMENT_QUESTION_TAIL_RE = re.compile(
-    r"(？|でしょうか|ましょうか|ますか|ですか|ませんか|だろうか|のか)[。」』\"')]*$"
+    r"(？|でしょうか|ましょうか|ますか|ですか|ませんか|だろうか|のか)[。」』”’\"')】]*$"
 )
+# 疑問詞は語境界のない部分一致のため、いつも/何度も/誰も/いくつも/どれほど/
+# どうしても/なにげない等の頻出語に疑問詞が部分文字列として含まれるだけで
+# 誤検出しないよう、非疑問の後続表現を否定先読みで除外する(issue #98 review)。
 _ENGAGEMENT_QUESTION_WORDS_RE = re.compile(
-    r"なぜ|どこ|誰|だれ|何|なに|どう|いつ|どんな|どちら|どれ|いくつ"
+    r"なぜ|どこ|誰(?!も)|だれ(?!も)|何(?!度|人|回)|なに(?!げ)|"
+    r"どう(?!しても|しよう|やって)|いつ(?!も|の)|どんな|どちら|"
+    r"どれ(?!ほど|くらい|だけ)|いくつ(?!も)"
 )
 # 「〜でしょう。」（か省略の柔らかい疑問形）は疑問詞と同一文中にある場合だけ
 # 問いかけとみなす。「〜となるでしょう。」のような予測断定を誤検出しないため。
-_ENGAGEMENT_SOFT_QUESTION_TAIL_RE = re.compile(r"でしょう[。」』\"')]*$")
+_ENGAGEMENT_SOFT_QUESTION_TAIL_RE = re.compile(r"でしょう[。」』”’\"')】]*$")
 
 
 def _clean_engagement_comment(text: str) -> str | None:
@@ -1129,8 +1138,11 @@ def _closing_sentence(
     収まらない場合は諦めて空文字を返す（呼び出し側でフォールバック判定に使う）。
 
     分割後の末尾セグメントが閉じ括弧・引用符だけ（旧データの残骸）になる
-    ケースがあるため、末尾から遡って実際に文末記号で終わる有効なセグメントを
-    探す。
+    ケースがあるため、そのような「除去後に空になる」セグメントだけを遡って
+    読み飛ばす。中身のある最後のセグメントを見つけたら、そこで確定する
+    （文末記号（。？！）で終わっていなければ空文字を返す。半角?!・三点
+    リーダ等で終わる回もあるため、遡ってさらに前の文を誤って「末尾の一文」
+    として返すことはしない）。
     """
     text = (narration or "").strip()
     if not text:
@@ -1138,8 +1150,12 @@ def _closing_sentence(
     segments = [s for s in re.split(r"(?<=[。？！])", text) if s.strip()]
     for raw in reversed(segments):
         tail = _ENGAGEMENT_TRAILING_BRACKET_RE.sub("", raw.strip()).strip()
-        if tail and tail[-1] in "。？！":
-            return tail if len(tail) <= max_chars else ""
+        if not tail:
+            continue  # 閉じ括弧・引用符だけの残骸→さらに前のセグメントへ
+        tail = _ENGAGEMENT_LEADING_BRACKET_RE.sub("", tail).strip()
+        if not tail or tail[-1] not in "。？！":
+            return ""  # 正規の文末記号で終わっていない→誤った文を返さず諦める
+        return tail if len(tail) <= max_chars else ""
     return ""
 
 
@@ -1191,8 +1207,16 @@ def generate_engagement_comment(
 
     if mode == "closing_question":
         closing = _closing_sentence(narration)
-        if closing and _is_closing_question(closing):
-            return _clean_engagement_comment(closing)
+        cleaned = (
+            _clean_engagement_comment(closing)
+            if closing and _is_closing_question(closing)
+            else None
+        )
+        if cleaned is not None:
+            return cleaned
+        # 問いかけでない、または（URLらしき文字列を含む等で）投稿前サニタイズに
+        # 落ちた場合も同じくフォールバックする。「問いかけかどうか」で扱いを
+        # 分けると、後者だけ無投稿になる非対称な挙動になるため揃えている。
         _log("エンゲージメントコメント: 末尾が問いかけでないためdebate方式へフォールバック")
         mode = "debate"
 

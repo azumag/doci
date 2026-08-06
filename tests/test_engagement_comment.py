@@ -174,6 +174,33 @@ class ClosingSentenceTest(unittest.TestCase):
         long_sentence = "あ" * 300 + "。"
         self.assertEqual(ai_text._closing_sentence(long_sentence, max_chars=200), "")
 
+    def test_does_not_silently_return_an_earlier_sentence_when_last_lacks_terminator(
+        self,
+    ) -> None:
+        """レビュー指摘で発覚: 最終セグメントが文末記号(。？！)で終わらない
+        （半角?!・三点リーダ・書きかけ等）場合、以前の実装は遡って手前の文を
+        誤って返していた。締めでない文が締めとして逐語投稿される事故に
+        つながるため、この場合は空文字を返す（手前の文を返さない）ことを
+        固定する。"""
+        cases = [
+            "導入です。中盤の話です。あなたはどう思いますか?",  # 半角?
+            "導入です。中盤の話です。ぜひ試してください!",  # 半角!
+            "導入です。中盤の話です。最後に一言",  # 終端記号なし
+            "導入です。中盤の話です。答えはまだ…",  # 三点リーダ
+        ]
+        for narration in cases:
+            with self.subTest(narration=narration):
+                self.assertEqual(ai_text._closing_sentence(narration), "")
+
+    def test_strips_leading_bracket_when_sentence_is_an_unclosed_quote(self) -> None:
+        """レビュー指摘で発覚: 末尾の閉じ括弧しか除去していなかったため、
+        最終文が開き括弧付きの引用で始まる場合（対応する閉じ括弧が無い）に
+        開き括弧が残ったまま公開投稿される事故があった。"""
+        result = ai_text._closing_sentence(
+            "彼はこう書いた。『それでいいのですか？"
+        )
+        self.assertEqual(result, "それでいいのですか？")
+
 
 class IsClosingQuestionTest(unittest.TestCase):
     def test_plain_question_mark_is_a_question(self) -> None:
@@ -201,6 +228,25 @@ class IsClosingQuestionTest(unittest.TestCase):
                 "私たちはいったい何を頼りに歩けばよいのでしょう。"
             )
         )
+
+    def test_common_words_containing_question_words_as_substring_are_not_questions(
+        self,
+    ) -> None:
+        """疑問詞は語境界の無い部分一致のため、いつも/何度も/誰も/いくつも/
+        どれほど/どうしても/なにげない等の頻出語に疑問詞が部分文字列として
+        含まれるだけで誤検出しないことを固定する（レビュー指摘で発覚）。"""
+        declarative_sentences = [
+            "いつも同じ結末になるでしょう。",
+            "何度も繰り返されることになるでしょう。",
+            "どうしても避けられない結末になるでしょう。",
+            "誰もが知ることになるでしょう。",
+            "いくつもの選択肢が残されているでしょう。",
+            "どれほど努力しても届かないでしょう。",
+            "なにげない一言が効いてくるでしょう。",
+        ]
+        for sentence in declarative_sentences:
+            with self.subTest(sentence=sentence):
+                self.assertFalse(ai_text._is_closing_question(sentence))
 
 
 class ClosingQuestionModeTest(unittest.TestCase):
