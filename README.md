@@ -192,7 +192,7 @@ token = "secrets/sample/youtube_token.json"
 |---|---|
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
-| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `research_requires_youtube_case_studies`, `title_pattern_check`, `narration_opening_guard`, `narration_pattern_check`, `ambiguous_date_title_check`, `plan_topic_retries`, `max_uploads_per_day`, `feedback_repository`, `youtube_auto_playlist`, `youtube_auto_engagement_comment`, `tactic_issues` |
+| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `research_requires_youtube_case_studies`, `title_pattern_check`, `narration_opening_guard`, `narration_pattern_check`, `ambiguous_date_title_check`, `plan_topic_retries`, `max_uploads_per_day`, `feedback_repository`, `youtube_auto_playlist`, `youtube_auto_engagement_comment`, `youtube_engagement_comment_mode`, `tactic_issues` |
 | `style` | `theme` |
 | `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio`, `box_radius` |
 | `style.thumbnail` | `font_family`, `title_color` |
@@ -337,6 +337,21 @@ GitHub Issueでの人手承認・ラベル待ち・reconcileの仕組みは廃�
 3点＋主題適合がすべて明確か）を都度判定して `public`/`unlisted` を決める。
 `enabled`未設定/`false`のチャンネル（`ideology`等）は、この判定を経由せず
 `publish.youtube.privacy`の静的な値（`ideology`は`public`固定）をそのまま使う。
+
+### エンゲージメントコメント（issue #86、チャンネル別方式は issue #98）
+
+`pipeline.youtube_auto_engagement_comment = true` のチャンネルは、公開直後の
+動画へ運営者本人としてコメントを1つ自動投稿する。`pipeline.youtube_engagement_comment_mode`
+（既定`"debate"`）でチャンネルごとに方式を選べる:
+
+| mode | 動作 | 想定チャンネル |
+|---|---|---|
+| `debate`（既定） | 議論を誘発する一言をLLM生成する | 汎用 |
+| `closing_question` | narration末尾が問いかけならLLMを呼ばずそのまま投稿し、問いかけでなければ`debate`へフォールバックする | narrationの締めが問いかけになりやすい文体（`ideology`等） |
+| `call_to_action` | 討論誘発ではなく、視聴者が今日すぐ試せる1手を促す実用的なコメントをLLM生成する。`viewer_action`が空ならnarration末尾一文を代わりに使い、どちらも取れなければ投稿しない（`debate`へはフォールバックしない） | 不特定多数の議論が成立しないチャンネル（`youtube-growth`等、全動画がunlistedのため） |
+
+固定（ピン留め）はYouTube Data APIに無いため、投稿後に固定したい場合は
+YouTube Studioで手動操作する。
 
 個別レイヤのテスト:
 ```bash

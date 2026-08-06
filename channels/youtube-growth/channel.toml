@@ -65,6 +65,10 @@ max_uploads_per_day = 1
 feedback_repository = "azumag/doci"
 youtube_auto_playlist = true
 youtube_auto_engagement_comment = true
+# 全動画がunlisted（限定公開）で不特定多数の議論が発生しないため、討論誘発型
+# ではなく実用的な行動喚起コメントにする。viewer_actionが空ならnarration末尾の
+# 宣言的な締め（output_rules_addendum.md）を代わりに使う(issue #98)。
+youtube_engagement_comment_mode = "call_to_action"
 # 動画が紹介するYouTube運用施策(viewer_action)を検知し、適用要否の判断は人間に
 # 委ねるためGitHub issueとして通知する。適用の自動化は行わない(issue #90)。
 tactic_issues = true

@@ -1,4 +1,5 @@
-"""issue #86: アップロード後の再生リスト追加・討論誘発コメント投稿フックのテスト。
+"""issue #86: アップロード後の再生リスト追加・エンゲージメントコメント投稿フックのテスト。
+チャンネル別方式（issue #98）: youtube_engagement_comment_modeの配線も対象。
 
 対象: run_daily._apply_youtube_engagement_actions。
 """
@@ -9,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from doci import ai_text, run_daily, youtube
+from doci import ai_text, channel, run_daily, youtube
 from doci.channel import CornerSpec
 
 
@@ -88,7 +89,7 @@ class ApplyYoutubeEngagementActionsTest(unittest.TestCase):
         with (
             mock.patch.object(
                 ai_text, "generate_engagement_comment", return_value="議論を誘発する一言"
-            ),
+            ) as generate_mock,
             mock.patch.object(youtube, "post_comment", return_value="c1") as post_mock,
         ):
             run_daily._apply_youtube_engagement_actions(
@@ -99,6 +100,59 @@ class ApplyYoutubeEngagementActionsTest(unittest.TestCase):
             "議論を誘発する一言",
             token_file=spec.publish.youtube.token,
             client_secret_file=spec.publish.youtube.client_secret,
+        )
+        self.assertEqual(generate_mock.call_args.kwargs["mode"], "debate")
+
+    def test_comment_mode_is_passed_from_pipeline_setting(self) -> None:
+        spec = _spec(
+            {
+                "youtube_auto_engagement_comment": True,
+                "youtube_engagement_comment_mode": "call_to_action",
+            }
+        )
+        with (
+            mock.patch.object(
+                ai_text, "generate_engagement_comment", return_value="コメント"
+            ) as generate_mock,
+            mock.patch.object(youtube, "post_comment", return_value="c1"),
+        ):
+            run_daily._apply_youtube_engagement_actions(
+                spec, _corner(), {"title": "t", "narration": "n"}, "vid123"
+            )
+        self.assertEqual(generate_mock.call_args.kwargs["mode"], "call_to_action")
+
+    def test_comment_mode_defaults_to_debate_when_unset(self) -> None:
+        spec = _spec({"youtube_auto_engagement_comment": True})
+        with (
+            mock.patch.object(
+                ai_text, "generate_engagement_comment", return_value="コメント"
+            ) as generate_mock,
+            mock.patch.object(youtube, "post_comment", return_value="c1"),
+        ):
+            run_daily._apply_youtube_engagement_actions(
+                spec, _corner(), {"title": "t", "narration": "n"}, "vid123"
+            )
+        self.assertEqual(generate_mock.call_args.kwargs["mode"], "debate")
+
+    def test_log_label_reflects_call_to_action_mode(self) -> None:
+        spec = _spec(
+            {
+                "youtube_auto_engagement_comment": True,
+                "youtube_engagement_comment_mode": "call_to_action",
+            }
+        )
+        with (
+            mock.patch.object(
+                ai_text, "generate_engagement_comment", return_value="コメント"
+            ),
+            mock.patch.object(youtube, "post_comment", return_value="c1"),
+            mock.patch.object(run_daily, "_log") as log_mock,
+        ):
+            run_daily._apply_youtube_engagement_actions(
+                spec, _corner(), {"title": "t", "narration": "n"}, "vid123"
+            )
+        self.assertTrue(
+            any("行動喚起コメント投稿" in call.args[0] for call in log_mock.call_args_list)
         )
 
     def test_comment_generation_failure_skips_posting_without_raising(self) -> None:
@@ -128,6 +182,18 @@ class ApplyYoutubeEngagementActionsTest(unittest.TestCase):
             )
         self.assertTrue(
             any("コメント投稿失敗" in call.args[0] for call in log_mock.call_args_list)
+        )
+
+
+class EngagementModeLabelsInvariantTest(unittest.TestCase):
+    def test_every_mode_has_a_log_label(self) -> None:
+        """_ENGAGEMENT_MODE_LABELSとchannel.ENGAGEMENT_COMMENT_MODESの集合が
+        一致することを固定する。新しいmodeを追加してラベル辞書の更新を
+        忘れると、"討論誘発"へ無言でフォールバックしたログになってしまう
+        （issue #98レビュー指摘）。"""
+        self.assertEqual(
+            set(run_daily._ENGAGEMENT_MODE_LABELS),
+            set(channel.ENGAGEMENT_COMMENT_MODES),
         )
 
 
