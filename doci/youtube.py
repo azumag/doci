@@ -331,8 +331,19 @@ def video_analytics(
         scopes=ANALYTICS_SCOPES,
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
+    # engagedViews(issue #97): 2025年3月末のShorts仕様変更で`views`は
+    # 再生開始のみでカウントされるようになった一方、それ以前の「数秒以上
+    # 視聴」という定義はengagedViewsとして存続している。views/engagedViews
+    # の乖離率は、離脱の多いスクロール型視聴とちゃんと見られた視聴を区別する
+    # 指標になり得る。「Basic user activity statistics」の同じメトリクス群に
+    # engagedViews/views/likes/comments/estimatedMinutesWatchedが並んでおり、
+    # 既存メトリクスと組み合わせ可能。現時点ではsnapshotへの収集のみ行い、
+    # performance.pyの比較ロジックはまだ消費しない
+    # （Shorts corner限定の指標であり、他cornerと同列に扱うと長尺動画の
+    # 乖離ゼロを誤ってシグナルとして拾いかねないため、消費する場合は
+    # corner別の扱いを別途設計する）。
     metrics = (
-        "views,estimatedMinutesWatched,averageViewDuration,"
+        "views,engagedViews,estimatedMinutesWatched,averageViewDuration,"
         "averageViewPercentage,likes,comments"
     )
     results: list[dict] = []
@@ -358,6 +369,7 @@ def video_analytics(
                 {
                     "video_id": str(row.get("video", "")),
                     "views": int(row.get("views", 0) or 0),
+                    "engaged_views": int(row.get("engagedViews", 0) or 0),
                     "estimated_minutes_watched": float(
                         row.get("estimatedMinutesWatched", 0) or 0
                     ),
