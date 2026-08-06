@@ -190,13 +190,14 @@ class YouTubeSearchTest(unittest.TestCase):
             "columnHeaders": [
                 {"name": "video"},
                 {"name": "views"},
+                {"name": "engagedViews"},
                 {"name": "estimatedMinutesWatched"},
                 {"name": "averageViewDuration"},
                 {"name": "averageViewPercentage"},
                 {"name": "likes"},
                 {"name": "comments"},
             ],
-            "rows": [["abc123", 80, 120.5, 90.0, 72.4, 5, 2]],
+            "rows": [["abc123", 80, 65, 120.5, 90.0, 72.4, 5, 2]],
         }
         service = mock.Mock()
         service.reports.return_value = reports
@@ -212,10 +213,35 @@ class YouTubeSearchTest(unittest.TestCase):
 
         self.assertEqual(results[0]["average_view_percentage"], 72.4)
         self.assertEqual(results[0]["views"], 80)
+        self.assertEqual(results[0]["engaged_views"], 65)
         self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video")
         self.assertEqual(reports.query.call_args.kwargs["filters"], "video==abc123")
         self.assertEqual(reports.query.call_args.kwargs["sort"], "-views")
         self.assertEqual(reports.query.call_args.kwargs["maxResults"], 200)
+        self.assertIn("engagedViews", reports.query.call_args.kwargs["metrics"])
+
+    def test_video_analytics_defaults_engaged_views_to_zero_when_absent(self) -> None:
+        """`engagedViews`列がレスポンスに含まれない場合でもKeyErrorにならず
+        0を返すことを固定する（他のメトリクスと同じ`.get(key, 0)`防御パターン
+        の確認。無効なメトリクス指定自体はAPI側がHTTP 400で拒否するため、
+        実運用でこの経路に入るのは想定外の応答形状の場合のみ）。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [{"name": "video"}, {"name": "views"}],
+            "rows": [["abc123", 80]],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_analytics(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+        self.assertEqual(results[0]["engaged_views"], 0)
 
 
 if __name__ == "__main__":
