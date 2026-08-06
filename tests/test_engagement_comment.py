@@ -100,6 +100,37 @@ class GenerateEngagementCommentTest(unittest.TestCase):
             )
         self.assertIsNone(result)
 
+    def test_prompt_carries_full_narration_and_description(self) -> None:
+        """実測(m1B5vH7K-tk動画)で、冒頭300字だけを渡していたため動画本編の
+        具体的な判断基準（本文後半にある）が見えず、タイトルを言い換えただけの
+        的外れなコメントが生成された事故があった。ナレーションが切り詰められず
+        全文渡ること、descriptionも渡ることを回帰テストとして固定する。"""
+        long_tail = "本編後半にしかない具体的な判断基準テキスト"
+        narration = "導入部。" + "あ" * 400 + long_tail
+        with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": narration,
+                    "description": "概要欄の要約テキスト",
+                },
+            )
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn(long_tail, prompt)
+        self.assertIn("概要欄の要約テキスト", prompt)
+
+    def test_prompt_forbids_paraphrasing_title_as_generic_opinion(self) -> None:
+        """タイトルの言い換えだけの一般論コメントを禁止する指示がプロンプトに
+        含まれることを確認する（的外れコメント事故の再発防止）。"""
+        with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(), {"title": "タイトル", "narration": "ナレーション"}
+            )
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn("具体的な内容", prompt)
+        self.assertIn("言い換えただけ", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

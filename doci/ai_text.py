@@ -1030,7 +1030,11 @@ _ENGAGEMENT_COMMENT_PROMPT = """\
 滞在時間を延ばすことです。
 
 ルール:
-- 日本語で1〜2文、40〜80文字程度
+- 日本語で1〜2文、40〜80文字程度。読んで自然な日本語にする（機械的・冗長な言い回しは禁止）
+- 動画本編で語られている具体的な内容（固有の数値・条件・判断基準・手順の1つ）を
+  最低1つ、名指しで引用すること。動画タイトルや導入部の前提を言い換えただけの
+  一般論・抽象的な感想は禁止（例:「〜とは限らない気がします」のような、
+  タイトルをなぞるだけの内容にしない）
 - 動画の主題に関係する内容にする（無関係な話題や単なる宣伝は禁止）
 - 断定しすぎず、視聴者が「いや、それは違う」「自分はこう思う」と
   言いたくなる程度の余白を残す（例:「〜だよね？」「〜な気がする」）
@@ -1039,11 +1043,18 @@ _ENGAGEMENT_COMMENT_PROMPT = """\
 
 コーナー: {corner_label}
 動画タイトル: {title}
-動画ナレーション（冒頭抜粋）: {narration_excerpt}
+動画概要欄: {description}
+動画ナレーション（全文）: {narration_excerpt}
 
 出力はコメント本文のみ（説明・引用符・コードフェンス禁止）:
 """
 _MAX_ENGAGEMENT_COMMENT_LENGTH = 200
+# ナレーションの切り詰め上限。実測(youtube-growth 75本)で平均778字・最大1347字
+# だったため、通常の動画は切り詰められず全文が渡る。動画本編の結論・具体的な
+# 判断基準は冒頭ではなく後半に置かれることが多く、以前の300字切り詰めでは
+# 前提・導入部しか見えず、コメントがタイトルの言い換えに終始する事故があった
+# (実測: m1B5vH7K-tk「オートダビング」動画で発生)。
+_MAX_ENGAGEMENT_NARRATION_CHARS = 2000
 # URLらしき文字列を含む出力は迷惑投稿の疑いとして安全側にスキップする。
 # プロンプト指示だけに頼らない最低限の出力側ガード（完全なコンテンツ
 # モデレーションではない。差別的・扇動的表現の有無までは機械的に判定できない
@@ -1065,12 +1076,14 @@ def generate_engagement_comment(corner: CornerSpec, script: dict) -> str | None:
     """
     title = str(script.get("title") or "").strip()
     narration = str(script.get("narration") or "").strip()
+    description = str(script.get("description") or "").strip()
     if not title and not narration:
         return None
     prompt = _ENGAGEMENT_COMMENT_PROMPT.format(
         corner_label=corner.label,
         title=title[:100],
-        narration_excerpt=narration[:300],
+        description=description[:400] or "(なし)",
+        narration_excerpt=narration[:_MAX_ENGAGEMENT_NARRATION_CHARS],
     )
     try:
         text = _dispatch(prompt, timeout=60)
