@@ -316,11 +316,13 @@ class TacticIssuesTest(unittest.TestCase):
         )
         self.assertIn("「施策テキスト」", candidate["title"])
 
-    # 6. 週次上限(ローカル/リモート双方)
+    # 6. 週次上限は持たない（新しい施策なら毎回issue化）
 
-    def test_apply_respects_weekly_limit(self) -> None:
+    def test_recent_local_creations_do_not_block_new_tactic(self) -> None:
+        """直近7日以内にローカルで何件createdが記録されていても、fingerprint・
+        action_keyが異なる新規候補はブロックされない（週次上限は撤廃済み）。"""
         self._write_published_row(video_id="v1")
-        for i in range(config.TACTIC_ISSUES_MAX_PER_WEEK):
+        for i in range(5):
             self._write_tactic_record(
                 fingerprint=f"bbbbbbbbbbbbbbb{i}",
                 video_id=f"other{i}",
@@ -329,11 +331,17 @@ class TacticIssuesTest(unittest.TestCase):
                 status="created",
             )
         with patch.object(tactic_issues, "_run_gh") as mock_run_gh:
+            mock_run_gh.side_effect = [
+                _search_response([]),
+                "https://github.com/azumag/doci/issues/501",
+            ]
             result = tactic_issues.run(self.spec, apply=True, now=self.now)
-        mock_run_gh.assert_not_called()
-        self.assertEqual(result["skipped"][0]["skip_reason"], "weekly_limit_reached")
+        self.assertEqual(len(result["created"]), 1)
+        self.assertEqual(mock_run_gh.call_count, 2)
 
-    def test_weekly_limit_enforced_remotely_without_local_history(self) -> None:
+    def test_recent_remote_tactic_issues_do_not_block_creation(self) -> None:
+        """直近作成のtactic issueがGitHub側に複数あっても、fingerprint・
+        action_hashが一致しなければ新規issueの作成はブロックされない。"""
         self._write_published_row(video_id="v1")
         recent = (self.now - timedelta(days=1)).isoformat()
         remote_rows = [
@@ -343,13 +351,26 @@ class TacticIssuesTest(unittest.TestCase):
                 state="OPEN",
                 created_at=recent,
             )
-            for i in range(config.TACTIC_ISSUES_MAX_PER_WEEK)
+            for i in range(4)
+        ] + [
+            # action_hash比較の分岐（_find_duplicateの2つ目のループ）も
+            # 実際に通過することを固定する。マーカーは候補と別のhashのため
+            # 一致せず、これも新規issueの作成をブロックしない。
+            _issue_row(
+                number=200,
+                body=f"<!-- doci-tactic-action:{'d' * 16} -->\n本文",
+                state="OPEN",
+                created_at=recent,
+            )
         ]
         with patch.object(tactic_issues, "_run_gh") as mock_run_gh:
-            mock_run_gh.side_effect = [_search_response(remote_rows)]
+            mock_run_gh.side_effect = [
+                _search_response(remote_rows),
+                "https://github.com/azumag/doci/issues/501",
+            ]
             result = tactic_issues.run(self.spec, apply=True, now=self.now)
-        self.assertEqual(result["skipped"][0]["skip_reason"], "weekly_limit_reached")
-        self.assertEqual(mock_run_gh.call_count, 1)
+        self.assertEqual(len(result["created"]), 1)
+        self.assertEqual(mock_run_gh.call_count, 2)
 
     # 7. リポジトリ未設定/実行上限0
 
@@ -443,11 +464,18 @@ class TacticIssuesTest(unittest.TestCase):
     # 11. naiveタイムスタンプでクラッシュしない
 
     def test_naive_timestamp_in_history_does_not_crash(self) -> None:
+        """`_recent_same_action`のts比較（naive/aware比較でTypeErrorになりうる）が
+        例外を握り潰して「recentではない」扱いにすることを固定する。fingerprintは
+        candidateと別物にして`_local_terminal_record`側の即時terminal判定を
+        経由させず、action_keyを一致させてts比較の経路を必ず踏ませる。"""
         self._write_published_row(video_id="v1")
+        action_key = tactic_issues._action_key(
+            tactic_issues._candidate_rows(self.spec, now=self.now)[0]
+        )
         self._write_tactic_record(
             fingerprint="cccccccccccccccc",
             video_id="other",
-            action_key="youtube-growth|other",
+            action_key=action_key,
             ts="2026-08-01T12:00:00",
             status="created",
         )
@@ -458,6 +486,7 @@ class TacticIssuesTest(unittest.TestCase):
             ]
             result = tactic_issues.run(self.spec, apply=True, now=self.now)
         self.assertEqual(len(result["created"]), 1)
+        self.assertEqual(mock_run_gh.call_count, 2)
 
     # 12. 実行あたり上限が複数候補にまたがって効く
 
