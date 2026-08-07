@@ -10,6 +10,8 @@
 既定はdry-run（候補JSONと予定タイトル・本文の表示のみ、外部状態を変更しない）。
 `--apply` を明示した場合だけ `gh issue create` を呼ぶ。判定は `history.jsonl` の
 `published`行を読むだけで、このモジュール自身は動画生成・投稿の副作用を一切持たない。
+`--backfill <jsonl>` を指定すると `doci.tactic_backfill`(issue #106)が抽出した
+過去動画の施策を候補に加える(lookback足切りは無視、重複判定は共通)。
 
 作成件数は TACTIC_ISSUES_MAX_PER_RUN（既定1）で環境変数から上書きできる。週次上限は
 設けない: 新しい施策(viewer_action)を紹介する動画が公開されるたびにissue化する運用
@@ -108,6 +110,43 @@ def _candidate_rows(spec: ChannelSpec, *, now: datetime) -> list[dict]:
                 "viewer_action": viewer_action,
                 "youtube_creator_problem": _normalise_field(
                     metadata.get("youtube_creator_problem")
+                ),
+            }
+        )
+    candidates.sort(key=lambda c: str(c.get("ts") or ""), reverse=True)
+    return candidates
+
+
+def _backfill_candidates(rows: list[dict], *, channel_id: str) -> list[dict]:
+    """tactic_backfill.jsonlの抽出済み行(status=extracted)を候補dictへ変換する。
+
+    `_candidate_rows`の出力と同形(channel/corner/video_id/video_title/topic/ts/
+    viewer_action/youtube_creator_problem)に揃える。lookbackの足切りは通さない
+    (バックフィルは過去動画全体を対象とする)。改行は`_normalise_field`で畳む。
+    """
+    candidates: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "") != "extracted":
+            continue
+        video_id = str(row.get("video_id") or "")
+        if not video_id:
+            continue
+        viewer_action = _normalise_field(row.get("viewer_action"))
+        if not viewer_action:
+            continue
+        candidates.append(
+            {
+                "channel": channel_id,
+                "corner": str(row.get("corner") or ""),
+                "video_id": video_id,
+                "video_title": _normalise_field(row.get("video_title")),
+                "topic": _normalise_field(row.get("topic")),
+                "ts": str(row.get("ts") or ""),
+                "viewer_action": viewer_action,
+                "youtube_creator_problem": _normalise_field(
+                    row.get("youtube_creator_problem")
                 ),
             }
         )
@@ -425,6 +464,7 @@ def run(
     apply: bool = False,
     max_issues: int | None = None,
     now: datetime | None = None,
+    extra_candidates: list[dict] | None = None,
 ) -> dict:
     """候補ごとに重複判定し、新規施策だけをGitHub issue化する（既定はdry-run）。
 
@@ -432,9 +472,16 @@ def run(
     no_repository / run_limit_reached / local_*（ローカル記録がterminal）/
     duplicate_action（同一施策がcooldown中）/ duplicate_remote /
     duplicate_action_remote のいずれか。
+
+    `extra_candidates`は`_candidate_rows`出力と同形の候補dictリストで、
+    lookbackの足切りを**通さず**に既存の重複判定(fingerprint・cooldown・
+    GitHub照合)へ流す。過去動画のバックフィル抽出結果
+    (doci.tactic_backfill → `--backfill`)用。
     """
     now = now or datetime.now(timezone.utc)
     raw_candidates = _candidate_rows(spec, now=now)
+    if extra_candidates:
+        raw_candidates = [*extra_candidates, *raw_candidates]
     candidates = [build_candidate(raw) for raw in raw_candidates]
 
     if not candidates:
@@ -567,9 +614,25 @@ def main() -> int:
         default=None,
         help="1回の実行で作成する最大件数（既定はTACTIC_ISSUES_MAX_PER_RUN）",
     )
+    parser.add_argument(
+        "--backfill",
+        metavar="JSONL",
+        default=None,
+        help="tactic_backfill.jsonl（doci.tactic_backfill出力）を候補に加える。"
+        "lookback足切りを無視し、既存の重複判定のみを通す",
+    )
     args = parser.parse_args()
     spec = channel.load(args.channel)
-    result = run(spec, apply=args.apply, max_issues=args.max_issues)
+    extra_candidates = None
+    if args.backfill:
+        rows = history._read_path(Path(args.backfill))
+        extra_candidates = _backfill_candidates(rows, channel_id=spec.id)
+    result = run(
+        spec,
+        apply=args.apply,
+        max_issues=args.max_issues,
+        extra_candidates=extra_candidates,
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
