@@ -11,8 +11,11 @@
 `--apply` を明示した場合だけ `gh issue create` を呼ぶ。判定は `history.jsonl` の
 `published`行を読むだけで、このモジュール自身は動画生成・投稿の副作用を一切持たない。
 
-作成件数は TACTIC_ISSUES_MAX_PER_RUN（既定1）・TACTIC_ISSUES_MAX_PER_WEEK（既定2）で
-環境変数から上書き可能な上限を持つ（`feedback_issues`とは独立した枠）。
+作成件数は TACTIC_ISSUES_MAX_PER_RUN（既定1）で環境変数から上書きできる。週次上限は
+設けない: 新しい施策(viewer_action)を紹介する動画が公開されるたびにissue化する運用
+方針のため。同じ話を無限に投げないための歯止めはfingerprint一致（同一動画+施策を
+恒久ブロック）・TACTIC_ISSUES_ACTION_COOLDOWN_DAYS（同一施策の再提案間隔、既定30日）・
+GitHub側の既存issue照合が担う。
 """
 from __future__ import annotations
 
@@ -215,23 +218,7 @@ def build_candidate(raw: dict) -> dict:
     }
 
 
-# --- 上限・重複判定（ローカルJSONLのみ参照） ---
-
-
-def _weekly_created_count(records: list[dict], now: datetime) -> int:
-    threshold = now - timedelta(days=7)
-    count = 0
-    for row in records:
-        if row.get("status") != "created":
-            continue
-        try:
-            ts = datetime.fromisoformat(str(row.get("ts")))
-            is_recent = ts >= threshold
-        except (ValueError, TypeError):
-            continue
-        if is_recent:
-            count += 1
-    return count
+# --- 重複判定（ローカルJSONLのみ参照） ---
 
 
 def _recent_same_action(records: list[dict], action_key: str, now: datetime) -> bool:
@@ -303,10 +290,10 @@ def _find_duplicate(
     *,
     cooldown_days: int,
     now: datetime,
-) -> tuple[str | None, dict | None, int]:
+) -> tuple[str | None, dict | None]:
     """open/closed両方を対象に、本文中のfingerprint/actionマーカーで既存issueを検索する。
 
-    ("kind", issue, remote_weekly_count) を返す。kindは
+    ("kind", issue) を返す。kindは
     "duplicate_remote"（fingerprint完全一致）/
     "duplicate_action_remote"（同一施策がcooldown内に作成済み）/ None（重複なし）。
     `feedback_issues._find_duplicate`と同じ理由でSearch APIではなく`gh issue list`を使う。
@@ -336,31 +323,13 @@ def _find_duplicate(
             "一覧が切り詰められた可能性があります。重複作成を避けるため自動作成を停止します"
         )
 
-    weekly_threshold = now - timedelta(days=7)
-    remote_weekly_count = 0
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        body = str(row.get("body") or "")
-        if not _TACTIC_MARKER_RE.search(body):
-            continue
-        try:
-            created_at = datetime.fromisoformat(
-                str(row.get("createdAt")).replace("Z", "+00:00")
-            )
-            is_recent = created_at >= weekly_threshold
-        except (ValueError, TypeError):
-            continue
-        if is_recent:
-            remote_weekly_count += 1
-
     for row in rows:
         if not isinstance(row, dict):
             continue
         body = str(row.get("body") or "")
         match = _TACTIC_MARKER_RE.search(body)
         if match and match.group(1) == fp:
-            return "duplicate_remote", _issue_summary(row), remote_weekly_count
+            return "duplicate_remote", _issue_summary(row)
 
     threshold = now - timedelta(days=cooldown_days)
     for row in rows:
@@ -378,8 +347,8 @@ def _find_duplicate(
         except (ValueError, TypeError):
             continue
         if is_recent:
-            return "duplicate_action_remote", _issue_summary(row), remote_weekly_count
-    return None, None, remote_weekly_count
+            return "duplicate_action_remote", _issue_summary(row)
+    return None, None
 
 
 def _create_issue(repository: str, title: str, body: str) -> tuple[int, str]:
@@ -457,6 +426,13 @@ def run(
     max_issues: int | None = None,
     now: datetime | None = None,
 ) -> dict:
+    """候補ごとに重複判定し、新規施策だけをGitHub issue化する（既定はdry-run）。
+
+    週次の作成上限は持たない。skipped[].skip_reason は
+    no_repository / run_limit_reached / local_*（ローカル記録がterminal）/
+    duplicate_action（同一施策がcooldown中）/ duplicate_remote /
+    duplicate_action_remote のいずれか。
+    """
     now = now or datetime.now(timezone.utc)
     raw_candidates = _candidate_rows(spec, now=now)
     candidates = [build_candidate(raw) for raw in raw_candidates]
@@ -527,20 +503,13 @@ def run(
                 )
                 continue
 
-            local_weekly_count = _weekly_created_count(records, now)
-            if local_weekly_count >= config.TACTIC_ISSUES_MAX_PER_WEEK:
-                skipped.append(
-                    {"candidate": candidate, "skip_reason": "weekly_limit_reached"}
-                )
-                continue
-
             if _recent_same_action(records, candidate["action_key"], now):
                 skipped.append(
                     {"candidate": candidate, "skip_reason": "duplicate_action"}
                 )
                 continue
 
-            kind, existing, remote_weekly_count = _find_duplicate(
+            kind, existing = _find_duplicate(
                 repository,
                 candidate["fingerprint"],
                 candidate["action_hash"],
@@ -561,15 +530,6 @@ def run(
                     ),
                 )
                 skipped.append({"candidate": candidate, "skip_reason": kind})
-                continue
-
-            if (
-                max(local_weekly_count, remote_weekly_count)
-                >= config.TACTIC_ISSUES_MAX_PER_WEEK
-            ):
-                skipped.append(
-                    {"candidate": candidate, "skip_reason": "weekly_limit_reached"}
-                )
                 continue
 
             _append_record(spec, _record_row(candidate, status="creating"))
