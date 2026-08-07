@@ -1,8 +1,7 @@
 """issue #86: 討論を誘発する自作コメント生成のテスト。
-チャンネル別方式（issue #98）: closing_question / call_to_action も対象。
+チャンネル別方式（issue #98）: closing_sentence / call_to_action も対象。
 
-対象: ai_text.generate_engagement_comment, ai_text._closing_sentence,
-ai_text._is_closing_question。
+対象: ai_text.generate_engagement_comment, ai_text._closing_sentence。
 """
 from __future__ import annotations
 
@@ -28,19 +27,19 @@ def _corner() -> CornerSpec:
 class GenerateEngagementCommentTest(unittest.TestCase):
     def test_strips_language_tagged_code_fences(self) -> None:
         with patch.object(
-            ai_text, "_dispatch", return_value="```json\nバスタオルは週1で洗うよね？\n```"
+            ai_text, "_dispatch", return_value="```json\nバスタオルは週1で洗うのではないでしょうか。\n```"
         ):
             result = ai_text.generate_engagement_comment(
                 _corner(), {"title": "タイトル", "narration": "ナレーション本文"}
             )
-        self.assertEqual(result, "バスタオルは週1で洗うよね？")
+        self.assertEqual(result, "バスタオルは週1で洗うのではないでしょうか。")
 
     def test_strips_quotes_and_code_fences(self) -> None:
-        with patch.object(ai_text, "_dispatch", return_value='```\n"バスタオルは週1で洗うよね？"\n```'):
+        with patch.object(ai_text, "_dispatch", return_value='```\n"バスタオルは週1で洗うのではないでしょうか。"\n```'):
             result = ai_text.generate_engagement_comment(
                 _corner(), {"title": "タイトル", "narration": "ナレーション本文"}
             )
-        self.assertEqual(result, "バスタオルは週1で洗うよね？")
+        self.assertEqual(result, "バスタオルは週1で洗うのではないでしょうか。")
 
     def test_truncates_overlong_output(self) -> None:
         with patch.object(ai_text, "_dispatch", return_value="あ" * 500):
@@ -133,6 +132,21 @@ class GenerateEngagementCommentTest(unittest.TestCase):
         self.assertIn("具体的な内容", prompt)
         self.assertIn("言い換えただけ", prompt)
 
+    def test_prompt_requires_desu_masu_style(self) -> None:
+        """narrationと同じですます調を要求し、タメ口・口語の例を禁止する指示が
+        プロンプトに含まれることを確認する（口語コメント事故の再発防止。
+        実測: ideologyが「closing_question」から「debate」へフォールバック
+        していた頃の回で「〜な気がする。支援が先なら違ったのかな？」という
+        口語が投稿された。同フォールバックは廃止済み）。"""
+        with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(), {"title": "タイトル", "narration": "ナレーション"}
+            )
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn("ですます調", prompt)
+        self.assertIn("だよね", prompt)
+        self.assertIn("な気がする", prompt)
+
     def test_unknown_mode_falls_back_to_debate_prompt(self) -> None:
         with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
             ai_text.generate_engagement_comment(
@@ -202,54 +216,13 @@ class ClosingSentenceTest(unittest.TestCase):
         self.assertEqual(result, "それでいいのですか？")
 
 
-class IsClosingQuestionTest(unittest.TestCase):
-    def test_plain_question_mark_is_a_question(self) -> None:
-        self.assertTrue(ai_text._is_closing_question("あなたならどうしますか？"))
+class ClosingSentenceModeTest(unittest.TestCase):
+    """closing_sentence方式: narration末尾の一文をLLMを呼ばず逐語投稿する。
 
-    def test_deshou_ka_is_a_question(self) -> None:
-        self.assertTrue(
-            ai_text._is_closing_question(
-                "みなさんが選んでいるのは味そのものでしょうか。"
-            )
-        )
+    疑問形かどうかは問わず、debateへのフォールバックも行わない（フォール
+    バックするとLLM生成の疑問形に戻り、方式を選んだ意味が消えるため）。
+    """
 
-    def test_declarative_sentence_is_not_a_question(self) -> None:
-        self.assertFalse(
-            ai_text._is_closing_question("その結果で次の判断をします。")
-        )
-
-    def test_soft_deshou_without_question_word_is_not_a_question(self) -> None:
-        """「〜となるでしょう。」のような予測断定を疑問と誤検出しない。"""
-        self.assertFalse(ai_text._is_closing_question("次第に効果が出るでしょう。"))
-
-    def test_soft_deshou_with_question_word_is_a_question(self) -> None:
-        self.assertTrue(
-            ai_text._is_closing_question(
-                "私たちはいったい何を頼りに歩けばよいのでしょう。"
-            )
-        )
-
-    def test_common_words_containing_question_words_as_substring_are_not_questions(
-        self,
-    ) -> None:
-        """疑問詞は語境界の無い部分一致のため、いつも/何度も/誰も/いくつも/
-        どれほど/どうしても/なにげない等の頻出語に疑問詞が部分文字列として
-        含まれるだけで誤検出しないことを固定する（レビュー指摘で発覚）。"""
-        declarative_sentences = [
-            "いつも同じ結末になるでしょう。",
-            "何度も繰り返されることになるでしょう。",
-            "どうしても避けられない結末になるでしょう。",
-            "誰もが知ることになるでしょう。",
-            "いくつもの選択肢が残されているでしょう。",
-            "どれほど努力しても届かないでしょう。",
-            "なにげない一言が効いてくるでしょう。",
-        ]
-        for sentence in declarative_sentences:
-            with self.subTest(sentence=sentence):
-                self.assertFalse(ai_text._is_closing_question(sentence))
-
-
-class ClosingQuestionModeTest(unittest.TestCase):
     def test_question_ending_is_posted_verbatim_without_llm_call(self) -> None:
         with patch.object(ai_text, "_dispatch") as dispatch_mock:
             result = ai_text.generate_engagement_comment(
@@ -258,37 +231,56 @@ class ClosingQuestionModeTest(unittest.TestCase):
                     "title": "タイトル",
                     "narration": "導入です。あなたならどうしますか？",
                 },
-                mode="closing_question",
+                mode="closing_sentence",
             )
         dispatch_mock.assert_not_called()
         self.assertEqual(result, "あなたならどうしますか？")
 
-    def test_non_question_ending_falls_back_to_debate_llm(self) -> None:
-        with patch.object(
-            ai_text, "_dispatch", return_value="議論を誘発する一言"
-        ) as dispatch_mock:
+    def test_non_question_ending_is_also_posted_verbatim(self) -> None:
+        """締めが問いかけでなくても、LLM生成へフォールバックせず
+        末尾の一文をそのまま投稿する（issue #98後の修正: フォールバックは
+        「LLM生成の問いかけで揺さぶらない」という方式の目的と相反するため廃止）。"""
+        with patch.object(ai_text, "_dispatch") as dispatch_mock:
             result = ai_text.generate_engagement_comment(
                 _corner(),
                 {
                     "title": "タイトル",
                     "narration": "導入です。その結果で次の判断をします。",
                 },
-                mode="closing_question",
+                mode="closing_sentence",
             )
-        dispatch_mock.assert_called_once()
-        prompt = dispatch_mock.call_args.args[0]
-        self.assertIn("反応・議論したくなる", prompt)
-        self.assertEqual(result, "議論を誘発する一言")
+        dispatch_mock.assert_not_called()
+        self.assertEqual(result, "その結果で次の判断をします。")
 
-    def test_fallback_llm_failure_returns_none(self) -> None:
-        with patch.object(
-            ai_text, "_dispatch", side_effect=RuntimeError("backend unavailable")
-        ):
+    def test_returns_none_without_llm_call_when_closing_sentence_unavailable(
+        self,
+    ) -> None:
+        """末尾の一文が抽出できない（文末記号で終わらない）回は、無理に
+        LLM生成せず投稿を諦める。"""
+        with patch.object(ai_text, "_dispatch") as dispatch_mock:
             result = ai_text.generate_engagement_comment(
                 _corner(),
-                {"title": "タイトル", "narration": "断定で終わる文です。"},
-                mode="closing_question",
+                {"title": "タイトル", "narration": "句読点が一つも無い文字列"},
+                mode="closing_sentence",
             )
+        dispatch_mock.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_returns_none_without_llm_call_when_closing_sentence_contains_url(
+        self,
+    ) -> None:
+        """末尾の一文がURLらしき文字列を含み投稿前サニタイズに落ちる回も、
+        LLM生成へはフォールバックせず投稿を諦める。"""
+        with patch.object(ai_text, "_dispatch") as dispatch_mock:
+            result = ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": "本編です。詳細はhttps://example.com をご覧ください。",
+                },
+                mode="closing_sentence",
+            )
+        dispatch_mock.assert_not_called()
         self.assertIsNone(result)
 
 
@@ -356,9 +348,26 @@ class CallToActionModeTest(unittest.TestCase):
         prompt = dispatch_mock.call_args.args[0]
         self.assertIn("感想募集", prompt)
 
+    def test_prompt_requires_desu_masu_style(self) -> None:
+        """narrationと同じですます調を要求し、タメ口・口語の例を禁止する指示が
+        プロンプトに含まれることを確認する（debate側と同じ口語コメント事故の
+        再発防止。call_to_actionもLLM生成である以上、対策は必要）。"""
+        with patch.object(ai_text, "_dispatch", return_value="コメント") as dispatch_mock:
+            ai_text.generate_engagement_comment(
+                _corner(),
+                {
+                    "title": "タイトル",
+                    "narration": "導入です。次の一手を記録して判断します。",
+                },
+                mode="call_to_action",
+            )
+        prompt = dispatch_mock.call_args.args[0]
+        self.assertIn("ですます調", prompt)
+        self.assertIn("だよね", prompt)
+
     def test_output_sanitization_applies_to_call_to_action(self) -> None:
         with patch.object(
-            ai_text, "_dispatch", return_value="```\n維持率を確認しよう\n```"
+            ai_text, "_dispatch", return_value="```\n維持率を確認してください\n```"
         ):
             result = ai_text.generate_engagement_comment(
                 _corner(),
@@ -368,7 +377,7 @@ class CallToActionModeTest(unittest.TestCase):
                 },
                 mode="call_to_action",
             )
-        self.assertEqual(result, "維持率を確認しよう")
+        self.assertEqual(result, "維持率を確認してください")
 
 
 if __name__ == "__main__":

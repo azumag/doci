@@ -343,12 +343,12 @@ persona = "prompts/persona.md"
 corner = "prompts/corner.md"
 voice = "narrator"
 [pipeline]
-youtube_engagement_comment_mode = "closing_question"
+youtube_engagement_comment_mode = "closing_sentence"
 """
         )
         spec = channel.load("sample", channels_dir=self.channels_dir)
         self.assertEqual(
-            spec.pipeline_get("youtube_engagement_comment_mode"), "closing_question"
+            spec.pipeline_get("youtube_engagement_comment_mode"), "closing_sentence"
         )
 
     def test_rejects_invalid_tactic_issues_switch(self) -> None:
