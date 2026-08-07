@@ -113,7 +113,11 @@ def _load_credentials(
         token_file, required_scopes
     )
     if token_scopes_ok:
-        creds = Credentials.from_authorized_user_file(str(token_file), required_scopes)
+        # scopes引数を渡さずに読み込む: JSON内の保存scopesがそのまま
+        # Credentials.scopes になり、refresh後のto_json()保存でも縮小されない。
+        # 要求スコープを渡すと読み込み時にscopesが上書きされ、refresh保存で
+        # 保存トークンのscopeが縮小されてしまう(issue #103)。
+        creds = Credentials.from_authorized_user_file(str(token_file))
     elif token_file.exists() and not interactive:
         raise RuntimeError(
             "YouTube token のscopeが不足しています。"
