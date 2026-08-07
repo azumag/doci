@@ -347,7 +347,7 @@ GitHub Issueでの人手承認・ラベル待ち・reconcileの仕組みは廃�
 | mode | 動作 | 想定チャンネル |
 |---|---|---|
 | `debate`（既定） | 議論を誘発する一言をLLM生成する | 汎用 |
-| `closing_question` | narration末尾が問いかけならLLMを呼ばずそのまま投稿し、問いかけでなければ`debate`へフォールバックする | narrationの締めが問いかけになりやすい文体（`ideology`等） |
+| `closing_sentence` | narration末尾の一文をLLMを呼ばずそのまま投稿する（疑問形かは問わない）。末尾の一文を抽出できない回は投稿しない（`debate`へはフォールバックしない） | narrationの締めを本編の言葉のまま届けたいチャンネル（`ideology`等） |
 | `call_to_action` | 討論誘発ではなく、視聴者が今日すぐ試せる1手を促す実用的なコメントをLLM生成する。`viewer_action`が空ならnarration末尾一文を代わりに使い、どちらも取れなければ投稿しない（`debate`へはフォールバックしない） | 不特定多数の議論が成立しないチャンネル（`youtube-growth`等、全動画がunlistedのため） |
 
 固定（ピン留め）はYouTube Data APIに無いため、投稿後に固定したい場合は
