@@ -189,7 +189,7 @@ def _apply_ambiguous_date_title_check(spec: ChannelSpec, script: dict) -> None:
 # generate_engagement_comment()のmodeに対応するログ表示名(issue #98)。
 _ENGAGEMENT_MODE_LABELS = {
     "debate": "討論誘発",
-    "closing_question": "締めの問いかけ",
+    "closing_sentence": "締めの一文",
     "call_to_action": "行動喚起",
 }
 
@@ -231,7 +231,7 @@ def _apply_youtube_engagement_actions(
                 corner, script, mode=mode
             )
             if not comment_text:
-                _log(f"{mode_label}コメント生成に失敗→投稿スキップ")
+                _log(f"{mode_label}コメントを用意できず→投稿スキップ")
             else:
                 youtube.post_comment(
                     video_id,

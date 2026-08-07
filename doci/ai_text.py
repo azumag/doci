@@ -1023,6 +1023,13 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
     }
 
 
+# 文体はnarrationと同じ「ですます調」に揃える。doci/prompts/output_rules.md が
+# narrationにですます調を強制している一方、以前はこのプロンプトだけが
+# 「〜だよね？」「〜な気がする」を余白の例として挙げていたため、公開直後の
+# コメントだけタメ口になる事故があった（実測: ideologyが「closing_question」
+# から「debate」へフォールバックしていた頃の回で「〜な気がする。支援が
+# 先なら違ったのかな？」。同フォールバックは廃止済み）。
+# 余白は口語ではなく、敬体のまま断定を弱める言い回しで作る。
 _ENGAGEMENT_COMMENT_PROMPT = """\
 あなたはこのチャンネルの運営者本人として、公開直後のYouTubeショート動画へ
 寄せるトップレベルコメントを1つ書いてください。目的は、視聴者がコメント欄で
@@ -1031,13 +1038,18 @@ _ENGAGEMENT_COMMENT_PROMPT = """\
 
 ルール:
 - 日本語で1〜2文、40〜80文字程度。読んで自然な日本語にする（機械的・冗長な言い回しは禁止）
+- 文体は必ず「ですます調」。全ての文を 〜です／〜ます／〜でしょうか／〜ません 等で
+  終え、動画本編のナレーションと同じ文体に揃える。だ・である調、および
+  タメ口・口語（「〜だよね？」「〜な気がする」「〜かな」「〜じゃない？」等）は禁止
 - 動画本編で語られている具体的な内容（固有の数値・条件・判断基準・手順の1つ）を
   最低1つ、名指しで引用すること。動画タイトルや導入部の前提を言い換えただけの
   一般論・抽象的な感想は禁止（例:「〜とは限らない気がします」のような、
   タイトルをなぞるだけの内容にしない）
 - 動画の主題に関係する内容にする（無関係な話題や単なる宣伝は禁止）
 - 断定しすぎず、視聴者が「いや、それは違う」「自分はこう思う」と
-  言いたくなる程度の余白を残す（例:「〜だよね？」「〜な気がする」）
+  言いたくなる程度の余白を残す。ですます調のまま断定を弱める言い回しで作る
+  （例:「〜のではないでしょうか。」「〜の場合はどうなのでしょうか。」。
+  上のルールで引用した具体を主語に据え、抽象論で終わらせない）
 - 差別的・攻撃的・扇動的な表現、事実に反する断定は禁止
 - 絵文字は0〜1個まで
 
@@ -1060,11 +1072,17 @@ _CALL_TO_ACTION_COMMENT_PROMPT = """\
 
 ルール:
 - 日本語で1〜2文、40〜80文字程度。読んで自然な日本語にする（機械的・冗長な言い回しは禁止）
+- 文体は必ず「ですます調」。全ての文を 〜です／〜ます／〜てください 等で終え、
+  動画本編のナレーションと同じ文体に揃える。だ・である調、および
+  タメ口・口語（「〜だよね」「〜しよう」「〜かな」等）は禁止
 - 「今日すぐ試せる操作」のうち、今日すぐ着手できる1手だけに絞る（手順を並べない）
 - 画面名・指標名など具体的な語を最低1つ名指しする
-- 「どう思いますか」「試してみませんか」等の感想募集・議論誘発・行動を
-  相手に丸投げする言い回し、チャンネル登録・高評価の依頼は禁止
-- 断定的・宣言的な文にする（〜だよね？のような余白は不要）
+- 文末は「〜です／〜ます」の言い切り、または「〈具体的な操作〉を
+  試してみてください」のように操作を名指しした指示形にする。何を試すかを
+  相手に委ねる勧誘・感想募集（「どう思いますか」「試してみませんか」
+  「考えてみてください」等、操作を名指ししない呼びかけ）とチャンネル登録・
+  高評価の依頼は禁止
+- 断定的・宣言的な文にする（「〜のではないでしょうか」のような余白は不要）
 - 差別的・攻撃的な表現、事実に反する断定は禁止
 - 絵文字は0〜1個まで
 
@@ -1100,20 +1118,6 @@ _ENGAGEMENT_TRAILING_BRACKET_RE = re.compile(r"[」』”’\"'）)】\s]+$")
 # 開き側だけが残るケース（引用の途中で文が終わる等）を落とす。閉じ括弧を
 # 上のTRAILING_BRACKET_REで先に除去した後に適用する。
 _ENGAGEMENT_LEADING_BRACKET_RE = re.compile(r"^[「『“‘\"'（(]+")
-_ENGAGEMENT_QUESTION_TAIL_RE = re.compile(
-    r"(？|でしょうか|ましょうか|ますか|ですか|ませんか|だろうか|のか)[。」』”’\"')】]*$"
-)
-# 疑問詞は語境界のない部分一致のため、いつも/何度も/誰も/いくつも/どれほど/
-# どうしても/なにげない等の頻出語に疑問詞が部分文字列として含まれるだけで
-# 誤検出しないよう、非疑問の後続表現を否定先読みで除外する(issue #98 review)。
-_ENGAGEMENT_QUESTION_WORDS_RE = re.compile(
-    r"なぜ|どこ|誰(?!も)|だれ(?!も)|何(?!度|人|回)|なに(?!げ)|"
-    r"どう(?!しても|しよう|やって)|いつ(?!も|の)|どんな|どちら|"
-    r"どれ(?!ほど|くらい|だけ)|いくつ(?!も)"
-)
-# 「〜でしょう。」（か省略の柔らかい疑問形）は疑問詞と同一文中にある場合だけ
-# 問いかけとみなす。「〜となるでしょう。」のような予測断定を誤検出しないため。
-_ENGAGEMENT_SOFT_QUESTION_TAIL_RE = re.compile(r"でしょう[。」』”’\"')】]*$")
 
 
 def _clean_engagement_comment(text: str) -> str | None:
@@ -1159,22 +1163,6 @@ def _closing_sentence(
     return ""
 
 
-def _is_closing_question(sentence: str) -> bool:
-    """文が視聴者への問いかけで終わっているかを判定する(issue #98)。
-
-    output_rules.mdは締めの型を意図的に多様化させており（「毎回同じ型に
-    しない」）、疑問形以外の締め（「〜なのかもしれません」等）も一定割合
-    存在するため、この判定に外れた場合は呼び出し側でLLM生成へフォールバック
-    する前提で設計している。
-    """
-    if _ENGAGEMENT_QUESTION_TAIL_RE.search(sentence):
-        return True
-    return bool(
-        _ENGAGEMENT_SOFT_QUESTION_TAIL_RE.search(sentence)
-        and _ENGAGEMENT_QUESTION_WORDS_RE.search(sentence)
-    )
-
-
 def generate_engagement_comment(
     corner: CornerSpec, script: dict, *, mode: str = "debate"
 ) -> str | None:
@@ -1183,9 +1171,12 @@ def generate_engagement_comment(
 
     `mode`でチャンネルごとに異なる方式を選ぶ（未知の値は"debate"として扱う）:
     - `"debate"`（既定）: 議論を誘発する一言をLLM生成する(issue #86)。
-    - `"closing_question"`: narration末尾が問いかけならLLMを呼ばずそのまま
-      投稿し、問いかけでなければ`"debate"`へフォールバックする。narrationの
-      締めが問いかけになりやすい文体のチャンネル(ideology等)向け。
+    - `"closing_sentence"`: narration末尾の一文をLLMを呼ばずそのまま投稿する。
+      疑問形かどうかは問わない。LLMが新規生成した問いかけはこの方式の目的
+      （本編の締めを本編の言葉のまま届ける）と相反するため、`"debate"`へは
+      フォールバックしない。末尾の一文を抽出できない・投稿前サニタイズに
+      落ちる回は投稿しない（Noneを返す）。narrationの締めを本編の言葉の
+      まま届けたいチャンネル(ideology等)向け。
     - `"call_to_action"`: 討論誘発ではなく、視聴者が今日すぐ試せる1手を
       促す実用的なコメントをLLM生成する。研究段階で得た`viewer_action`
       （空なら代わりにnarration末尾一文）を主入力にする。どちらも取れなければ
@@ -1203,22 +1194,21 @@ def generate_engagement_comment(
     if not title and not narration:
         return None
     if mode not in channel.ENGAGEMENT_COMMENT_MODES:
+        _log(f"エンゲージメントコメント: 未知のmode「{mode}」→debate方式で生成")
         mode = "debate"
 
-    if mode == "closing_question":
+    if mode == "closing_sentence":
+        # narration末尾の一文をそのまま投稿する方式。「LLMが新規生成した
+        # 問いかけで揺さぶらない」ことがこの方式の目的のため、debate方式へは
+        # フォールバックしない（フォールバックするとLLM生成の疑問形に戻り、
+        # 方式を選んだ意味が消える）。末尾の一文が使えない回は無理に生成せず
+        # 投稿自体を諦める(issue #98)。
         closing = _closing_sentence(narration)
-        cleaned = (
-            _clean_engagement_comment(closing)
-            if closing and _is_closing_question(closing)
-            else None
-        )
-        if cleaned is not None:
-            return cleaned
-        # 問いかけでない、または（URLらしき文字列を含む等で）投稿前サニタイズに
-        # 落ちた場合も同じくフォールバックする。「問いかけかどうか」で扱いを
-        # 分けると、後者だけ無投稿になる非対称な挙動になるため揃えている。
-        _log("エンゲージメントコメント: 末尾が問いかけでないためdebate方式へフォールバック")
-        mode = "debate"
+        cleaned = _clean_engagement_comment(closing) if closing else None
+        if cleaned is None:
+            reason = "投稿前サニタイズで除外" if closing else "末尾の一文を抽出できず"
+            _log(f"エンゲージメントコメント: narration末尾の一文を使えず投稿スキップ（{reason}）")
+        return cleaned
 
     if mode == "call_to_action":
         viewer_action = str(

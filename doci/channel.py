@@ -195,15 +195,15 @@ _PIPELINE_KEYS = {
 }
 # doci.ai_text.generate_engagement_comment()のmode引数と対応する(issue #98)。
 # "debate"（既定・後方互換）: 議論を誘発する一言をLLM生成する(issue #86)。
-# "closing_question": narration末尾が問いかけならLLMを呼ばず逐語投稿し、
-# 問いかけでなければ"debate"へフォールバックする。narrationの締めが問いかけに
-# なりやすい文体のチャンネル(ideology等)向け（実測ideology: 約7割が該当。
-# 締めの型を毎回変える設計のため必ず問いかけになるわけではなく、フォール
-# バックは前提として発生する）。
+# "closing_sentence": narration末尾の一文をLLMを呼ばず逐語投稿する。疑問形か
+# どうかは問わない。LLM新規生成の問いかけはこの方式の目的（本編の締めを本編の
+# 言葉のまま届ける）と相反するため"debate"へはフォールバックせず、末尾の一文を
+# 抽出できない回は投稿をスキップする。narrationの締めを本編の言葉のまま
+# 届けたいチャンネル(ideology等)向け。
 # "call_to_action": 討論誘発ではなく、視聴者がすぐ試せる1手を促す実用的な
 # コメントをLLM生成する。unlisted等で不特定多数の議論が成立しないチャンネル
 # (youtube-growth等)向け。
-ENGAGEMENT_COMMENT_MODES = ("debate", "closing_question", "call_to_action")
+ENGAGEMENT_COMMENT_MODES = ("debate", "closing_sentence", "call_to_action")
 _STYLE_KEYS = {"theme", "subtitle", "thumbnail", "chart", "video", "bgm", "credits"}
 _SUBTITLE_STYLE_KEYS = {
     "font",
