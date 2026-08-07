@@ -539,6 +539,115 @@ class TacticIssuesTest(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["created"], [])
 
+    # 15. backfill候補 (issue #106)
+
+    def _backfill_row(
+        self,
+        *,
+        video_id: str,
+        viewer_action: str = "バックフィル施策",
+        status: str = "extracted",
+        ts: str | None = None,
+    ) -> dict:
+        return {
+            "ts": ts or self.now.isoformat(),
+            "schema_version": 1,
+            "video_id": video_id,
+            "workdir": "/tmp/workdir",
+            "corner": "shorts",
+            "video_title": "過去の動画",
+            "topic": "過去の題材",
+            "narration_len": 100,
+            "viewer_action": viewer_action,
+            "youtube_creator_problem": "過去の課題",
+            "status": status,
+            "backend": "codex",
+            "error": "",
+        }
+
+    def test_backfill_candidates_filters_extracted_only(self) -> None:
+        rows = [
+            self._backfill_row(video_id="ok1"),
+            self._backfill_row(video_id="empty1", viewer_action="", status="empty"),
+            self._backfill_row(video_id="err1", status="error"),
+            self._backfill_row(video_id="ok2", viewer_action="別の施策"),
+        ]
+        candidates = tactic_issues._backfill_candidates(rows, channel_id="youtube-growth")
+        by_video = {c["video_id"]: c for c in candidates}
+        self.assertEqual(set(by_video), {"ok1", "ok2"})
+        self.assertEqual(by_video["ok1"]["channel"], "youtube-growth")
+        self.assertEqual(by_video["ok1"]["viewer_action"], "バックフィル施策")
+        self.assertEqual(by_video["ok1"]["video_title"], "過去の動画")
+
+    def test_backfill_candidates_collapse_newlines(self) -> None:
+        row = self._backfill_row(video_id="v1", viewer_action="施策A\n改行あり")
+        candidates = tactic_issues._backfill_candidates([row], channel_id="c")
+        self.assertNotIn("\n", candidates[0]["viewer_action"])
+        # build_candidate後も title/body に改行が漏れない
+        built = tactic_issues.build_candidate(candidates[0])
+        self.assertNotIn("\n", built["title"])
+        self.assertNotIn("\n", built["viewer_action"])
+
+    def test_backfill_candidates_sorted_newest_first(self) -> None:
+        old = (self.now - timedelta(days=10)).isoformat()
+        new = self.now.isoformat()
+        rows = [
+            self._backfill_row(video_id="old1", ts=old),
+            self._backfill_row(video_id="new1", ts=new),
+        ]
+        candidates = tactic_issues._backfill_candidates(rows, channel_id="c")
+        self.assertEqual([c["video_id"] for c in candidates], ["new1", "old1"])
+
+    def test_backfill_candidates_feed_run_and_dedup(self) -> None:
+        """extra_candidatesはlookbackを無視しつつ、既存の重複判定を通す。"""
+        old_ts = (
+            self.now - timedelta(days=config.TACTIC_ISSUES_LOOKBACK_DAYS + 30)
+        ).isoformat()
+        extra = [
+            {
+                "channel": "youtube-growth",
+                "corner": "shorts",
+                "video_id": "old-video",
+                "video_title": "過去動画",
+                "topic": "過去題材",
+                "ts": old_ts,
+                "viewer_action": "過去動画の施策",
+                "youtube_creator_problem": "過去課題",
+            }
+        ]
+        with patch.object(tactic_issues, "_run_gh") as mock_run_gh:
+            mock_run_gh.side_effect = [
+                _search_response([]),
+                "https://github.com/azumag/doci/issues/800",
+            ]
+            result = tactic_issues.run(
+                self.spec, apply=True, now=self.now, extra_candidates=extra
+            )
+        self.assertEqual(len(result["created"]), 1)
+        self.assertEqual(result["created"][0]["candidate"]["video_id"], "old-video")
+        self.assertEqual(mock_run_gh.call_count, 2)
+
+    def test_backfill_dry_run_uses_gh(self) -> None:
+        """backfillでもdry-runはghを呼ばず、候補だけを返す。"""
+        extra = [
+            {
+                "channel": "youtube-growth",
+                "corner": "shorts",
+                "video_id": "v1",
+                "video_title": "過去動画",
+                "topic": "過去題材",
+                "ts": self.now.isoformat(),
+                "viewer_action": "施策",
+                "youtube_creator_problem": "課題",
+            }
+        ]
+        with patch.object(tactic_issues, "_run_gh") as mock_run_gh:
+            result = tactic_issues.run(
+                self.spec, apply=False, now=self.now, extra_candidates=extra
+            )
+        mock_run_gh.assert_not_called()
+        self.assertEqual(len(result["candidates"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
