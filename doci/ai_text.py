@@ -279,22 +279,29 @@ _DEFAULT_OPENCODE_GO_TIMEOUT = object()
 
 
 # 閉じタグがある<think>ブロックは内容ごと除去する(大文字・属性付きも対応)。
+# タグ名直後に境界(?=[\s/>])を要求し、<thinks> / <thinkable> 等への誤マッチを防ぐ。
 _THINK_TAG_RE = re.compile(
-    r"<[Tt][Hh][Ii][Nn][Kk][^>]*>.*?</[Tt][Hh][Ii][Nn][Kk]>", re.DOTALL
+    r"<[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>.*?</[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>",
+    re.DOTALL,
 )
-# 閉じタグを欠いたまま残った開始タグ・表記ゆれタグを保険で掃除する。
-_LEFT_OVER_THINK_RE = re.compile(r"</?[Tt][Hh][Ii][Nn][Kk][^>]*>")
+# 閉じタグを欠いたまま残った開始タグを保険で掃除する(タグ名境界付き)。
+_LEFT_OVER_THINK_RE = re.compile(r"</?[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>")
 
 
 def _strip_think_tags(text: str) -> str:
     """OpenAI互換エンドポイント由来の reasoning タグ(<think>...</think>)を除去する。
 
     <think>は小文字・大文字・属性付き(<think budget="...">)を内容ごと除去する。
-    閉じタグを欠いた未完了の<think>(ストリーム切断等)はタグだけを取り除き、
-    後続の本文は残す(issue #153)。
+    閉じタグを欠いた未完了の<think>(ストリーム切断等)は、タグ以降のreasoning断片を
+    本文へ漏らさないよう切り落とす(issue #153)。<thinks>等、thinkで始まる別タグや
+    本文中のリテラルにはタグ名境界(?=[\s/>])によりマッチしない。
     """
     cleaned = _THINK_TAG_RE.sub("", text)
-    return _LEFT_OVER_THINK_RE.sub("", cleaned).strip()
+    # 未終端の<think>開始タグより後はreasoning断片とみなし切り落とす。
+    leftover = _LEFT_OVER_THINK_RE.search(cleaned)
+    if leftover:
+        cleaned = cleaned[: leftover.start()]
+    return cleaned.strip()
 
 
 def _run_opencode_go(

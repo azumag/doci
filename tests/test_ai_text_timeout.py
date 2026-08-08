@@ -579,8 +579,10 @@ class WriteTimeoutTest(unittest.TestCase):
             ("<think>inner</think>OK", "OK"),  # 基本
             ("<Think>inner</Think>OK", "OK"),  # 大文字
             ('<think budget="1000">inner</think>OK', "OK"),  # 属性付き
-            ("<think>unterminated OK", "unterminated OK"),  # 閉じタグなし→タグのみ除去
+            ("<think>unterminated reasoning...", ""),  # 閉じタグなし→reasoning断片は切り落とし
             ("<Think>inner</think>OK", "OK"),  # 開き大文字・閉じ小文字
+            ("<thinks>not a think tag</thinks>OK", "<thinks>not a think tag</thinks>OK"),  # 誤マッチしない
+            ('本文中の<think>リテラル', '本文中の'),  # 未終端は以降を切り落とし
         ]
         for sample, expected in samples:
             with self.subTest(sample=sample):
