@@ -138,6 +138,9 @@ class SelectOpenCodeBackendTest(unittest.TestCase):
         with (
             mock.patch("doci.ai_text._run_opencode_go", return_value=raw) as run_mock,
             mock.patch.object(chart_bg.llm, "run_claude") as claude_mock,
+            # .env に OPENCODE_MODEL が設定されていると DEFAULT への
+            # フォールバックを検証できないため、未設定状態を再現する。
+            mock.patch.object(config, "OPENCODE_MODEL", ""),
         ):
             result = chart_bg.select(spec, "テストテーマ")
 

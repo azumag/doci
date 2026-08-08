@@ -277,6 +277,10 @@ def _opencode_go_model(model: str) -> str:
 
 _DEFAULT_OPENCODE_GO_TIMEOUT = object()
 
+# content無しのfinish=stopチャンクを連続で受けてよい上限。これを超えたら
+# 終端とみなす(異常系の無限ループ防止。issue #153)。
+_MAX_EMPTY_STOP_CHUNKS = 5
+
 
 # 閉じタグがある<think>ブロックは内容ごと除去する(大文字・属性付きも対応)。
 # タグ名直後に境界(?=[\s/>])を要求し、<thinks> / <thinkable> 等への誤マッチを防ぐ。
@@ -364,6 +368,7 @@ def _run_opencode_go(
     text_parts: list[str] = []
     text_chars = 0
     stop_reason = ""
+    empty_stop_count = 0
     if timeout is _DEFAULT_OPENCODE_GO_TIMEOUT:
         deadline_timeout = _whole_write_timeout()
     else:
@@ -545,6 +550,18 @@ def _run_opencode_go(
                             # [DONE]を送らず接続を保持するゲートウェイでも、
                             # max_tokens到達をタイムアウト誤報告しないため
                             # (issue #153 Claudeレビュー4巡目)。
+                            # ただし本文が1文字も無いのにstopで終わるのは、
+                            # 先行するcontent付きチャンクを出し忘れた/遅延した
+                            # ゲートウェイの異常系とみなし、ストリームを継続して
+                            # 後続チャンクを待つ(deepseek-v4-flashで実測)。
+                            # ただし同一チャッタリングを無限に許さないよう上限を設ける。
+                            if finish == "stop" and not text_parts:
+                                if empty_stop_count >= _MAX_EMPTY_STOP_CHUNKS:
+                                    stop_reason = finish
+                                    received_terminal = True
+                                    break
+                                empty_stop_count += 1
+                                continue
                             stop_reason = (
                                 "max_tokens" if finish == "length" else finish
                             )
