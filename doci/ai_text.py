@@ -278,12 +278,35 @@ def _opencode_go_model(model: str) -> str:
 _DEFAULT_OPENCODE_GO_TIMEOUT = object()
 
 
+_THINK_TAG_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.DOTALL)
+# 閉じタグを欠いたまま残った断片・大文字表記を保険で掃除する。
+_LEFT_OVER_THINK_RE = re.compile(r"</?[Tt][Hh][Ii][Nn][Kk][^>]*>")
+
+
+def _strip_think_tags(text: str) -> str:
+    """OpenAI互換エンドポイント由来の reasoning タグ(<think>...</think>)を除去する。
+
+    閉じタグを欠いた未完了の<think>(ストリーム切断等)も取り除き、
+    大文字<Think>等の表記ゆれも掃除する(issue #153)。
+    """
+    cleaned = _THINK_TAG_RE.sub("", text)
+    return _LEFT_OVER_THINK_RE.sub("", cleaned).strip()
+
+
 def _run_opencode_go(
     prompt: str,
     model: str,
     timeout: int | None | object = _DEFAULT_OPENCODE_GO_TIMEOUT,
 ) -> str:
-    """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
+    """OpenCode CLIを介さず、OpenCode GoのOpenAI互換APIへ直接接続する。
+
+    issue #153: 以前はAnthropic互換エンドポイント(`/messages`+`x-api-key`)を使っていた
+    が、Console Goプロバイダ経由のモデル(kimi-k3 / deepseek-v4-pro / glm-5.2 /
+    mimo-v2.5-pro等)がAnthropic SSE変換に失敗して空応答になるため、
+    OpenAI互換エンドポイント(`/chat/completions`+`Authorization: Bearer`)へ統一した。
+    全モデルで応答することを実測確認済み(deepseek-v4-flash / qwen3.7-plus /
+    minimax-m3を含む)。
+    """
     model = _opencode_go_model(model)
     _, sep, model_id = model.partition("/")
     if not sep:
@@ -297,11 +320,10 @@ def _run_opencode_go(
         }
     ).encode("utf-8")
     req = urllib.request.Request(
-        f"{config.OPENCODE_GO_BASE_URL}/messages",
+        f"{config.OPENCODE_GO_BASE_URL}/chat/completions",
         data=body,
         headers={
-            "x-api-key": _opencode_go_key(),
-            "anthropic-version": "2023-06-01",
+            "authorization": f"Bearer {_opencode_go_key()}",
             "content-type": "application/json",
             # Python標準UAはGoゲートウェイで403になるため、アプリ固有UAを明示する。
             "user-agent": "doci/1.0",
@@ -476,6 +498,24 @@ def _run_opencode_go(
                         part = delta.get("text", "")
                         text_parts.append(part)
                         text_chars += len(part)
+                    # OpenAI互換のチャンク形式 (issue #153): choices[0].delta.content
+                    choices = event.get("choices") or []
+                    if choices:
+                        choice = choices[0]
+                        if not isinstance(choice, dict):
+                            continue
+                        finish = choice.get("finish_reason")
+                        if finish:
+                            stop_reason = finish if stop_reason != "max_tokens" else stop_reason
+                        delta_content = (choice.get("delta") or {}).get("content")
+                        if isinstance(delta_content, str) and delta_content:
+                            text_parts.append(delta_content)
+                            text_chars += len(delta_content)
+                        if finish == "stop":
+                            received_terminal = True
+                            break
+                        if finish == "length":
+                            stop_reason = "max_tokens"
                     if event_type == "message_delta":
                         stop_reason = delta.get("stop_reason") or stop_reason
                         if stop_reason:
@@ -512,6 +552,10 @@ def _run_opencode_go(
             raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
         raise
     text = "".join(text_parts)
+    # OpenAI互換エンドポイント経由のモデル(minimax-m3等)が reasoning を
+    # <think>...</think> で本文に混入させることがある(実測)。narration等の
+    # 本文として意図しないため除去する。
+    text = _strip_think_tags(text)
     if stop_reason == "max_tokens":
         raise RuntimeError(
             f"OpenCode Go API が max_tokens={config.OPENCODE_GO_MAX_TOKENS} に達しました"
