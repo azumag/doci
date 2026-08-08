@@ -307,15 +307,16 @@ def _strip_think_tags(text: str) -> str:
     """
     cleaned = _THINK_TAG_RE.sub("", text)
     cleaned = _SELF_CLOSING_THINK_RE.sub("", cleaned)
+    # 孤立した</think>: タグより前はreasoning、後が実際の回答。未終端<think>の
+    # 切り落としより先に適用する(「reasoning</think>回答<think>切断」のような
+    # 併存入力でもreasoning断片とリテラル</think>が漏れないように)。
+    leftover_close = _LEFT_OVER_THINK_CLOSE_RE.search(cleaned)
+    if leftover_close:
+        cleaned = cleaned[leftover_close.end() :]
     # 未終端の<think>開始タグより後はreasoning断片とみなし切り落とす。
     leftover_open = _LEFT_OVER_THINK_OPEN_RE.search(cleaned)
     if leftover_open:
         cleaned = cleaned[: leftover_open.start()]
-        return cleaned.strip()
-    # 孤立した</think>: タグより前はreasoning、後が実際の回答。
-    leftover_close = _LEFT_OVER_THINK_CLOSE_RE.search(cleaned)
-    if leftover_close:
-        cleaned = cleaned[leftover_close.end() :]
     return cleaned.strip()
 
 
@@ -531,17 +532,21 @@ def _run_opencode_go(
                         if not isinstance(choice, dict):
                             continue
                         finish = choice.get("finish_reason")
-                        if finish:
-                            stop_reason = finish if stop_reason != "max_tokens" else stop_reason
                         delta_content = (choice.get("delta") or {}).get("content")
                         if isinstance(delta_content, str) and delta_content:
                             text_parts.append(delta_content)
                             text_chars += len(delta_content)
-                        if finish == "stop":
+                        if finish:
+                            # "length"(max_tokens到達)・"content_filter"等も含め、
+                            # 終端理由を受信した時点でストリーム終端とみなす。
+                            # [DONE]を送らず接続を保持するゲートウェイでも、
+                            # max_tokens到達をタイムアウト誤報告しないため
+                            # (issue #153 Claudeレビュー4巡目)。
+                            stop_reason = (
+                                "max_tokens" if finish == "length" else finish
+                            )
                             received_terminal = True
                             break
-                        if finish == "length":
-                            stop_reason = "max_tokens"
                     if event_type == "message_delta":
                         stop_reason = delta.get("stop_reason") or stop_reason
                         if stop_reason:
