@@ -573,6 +573,19 @@ class WriteTimeoutTest(unittest.TestCase):
 
         self.assertEqual(result, "ok")
 
+    def test_strip_think_tags_handles_case_and_attributes(self) -> None:
+        """大文字・属性付きタグでも内容ごと除去される (Claudeレビュー指摘)。"""
+        samples = [
+            ("<think>inner</think>OK", "OK"),  # 基本
+            ("<Think>inner</Think>OK", "OK"),  # 大文字
+            ('<think budget="1000">inner</think>OK', "OK"),  # 属性付き
+            ("<think>unterminated OK", "unterminated OK"),  # 閉じタグなし→タグのみ除去
+            ("<Think>inner</think>OK", "OK"),  # 開き大文字・閉じ小文字
+        ]
+        for sample, expected in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(ai_text._strip_think_tags(sample), expected)
+
     def test_zero_disables_explicit_claude_timeout(self) -> None:
         with (
             mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),

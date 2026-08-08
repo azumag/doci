@@ -278,16 +278,20 @@ def _opencode_go_model(model: str) -> str:
 _DEFAULT_OPENCODE_GO_TIMEOUT = object()
 
 
-_THINK_TAG_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.DOTALL)
-# 閉じタグを欠いたまま残った断片・大文字表記を保険で掃除する。
+# 閉じタグがある<think>ブロックは内容ごと除去する(大文字・属性付きも対応)。
+_THINK_TAG_RE = re.compile(
+    r"<[Tt][Hh][Ii][Nn][Kk][^>]*>.*?</[Tt][Hh][Ii][Nn][Kk]>", re.DOTALL
+)
+# 閉じタグを欠いたまま残った開始タグ・表記ゆれタグを保険で掃除する。
 _LEFT_OVER_THINK_RE = re.compile(r"</?[Tt][Hh][Ii][Nn][Kk][^>]*>")
 
 
 def _strip_think_tags(text: str) -> str:
     """OpenAI互換エンドポイント由来の reasoning タグ(<think>...</think>)を除去する。
 
-    閉じタグを欠いた未完了の<think>(ストリーム切断等)も取り除き、
-    大文字<Think>等の表記ゆれも掃除する(issue #153)。
+    <think>は小文字・大文字・属性付き(<think budget="...">)を内容ごと除去する。
+    閉じタグを欠いた未完了の<think>(ストリーム切断等)はタグだけを取り除き、
+    後続の本文は残す(issue #153)。
     """
     cleaned = _THINK_TAG_RE.sub("", text)
     return _LEFT_OVER_THINK_RE.sub("", cleaned).strip()
