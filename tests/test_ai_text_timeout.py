@@ -583,6 +583,8 @@ class WriteTimeoutTest(unittest.TestCase):
             ("<Think>inner</think>OK", "OK"),  # 開き大文字・閉じ小文字
             ("<thinks>not a think tag</thinks>OK", "<thinks>not a think tag</thinks>OK"),  # 誤マッチしない
             ('本文中の<think>リテラル', '本文中の'),  # 未終端は以降を切り落とし
+            ("reasoning text</think>実際の回答", "実際の回答"),  # 孤立した</think>: 前を捨て後を残す
+            ("<think/>後続の回答", "後続の回答"),  # 自己終端形: 回答を残す
         ]
         for sample, expected in samples:
             with self.subTest(sample=sample):

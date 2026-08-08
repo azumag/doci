@@ -284,23 +284,38 @@ _THINK_TAG_RE = re.compile(
     r"<[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>.*?</[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>",
     re.DOTALL,
 )
-# 閉じタグを欠いたまま残った開始タグを保険で掃除する(タグ名境界付き)。
-_LEFT_OVER_THINK_RE = re.compile(r"</?[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>")
+# 開始タグを伴わない孤立した</think>(reasoningモデルが開始タグを省略して
+# 「reasoning...</think>回答」の形で返す既知形式)のタグ名境界付きパターン。
+_LEFT_OVER_THINK_OPEN_RE = re.compile(r"<[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>")
+_LEFT_OVER_THINK_CLOSE_RE = re.compile(r"</[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>")
+# 自己終端形<think/>はreasoningなしの意味で、タグのみ除去する。
+_SELF_CLOSING_THINK_RE = re.compile(
+    r"<[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*/>"
+)
 
 
 def _strip_think_tags(text: str) -> str:
     """OpenAI互換エンドポイント由来の reasoning タグ(<think>...</think>)を除去する。
 
     <think>は小文字・大文字・属性付き(<think budget="...">)を内容ごと除去する。
-    閉じタグを欠いた未完了の<think>(ストリーム切断等)は、タグ以降のreasoning断片を
-    本文へ漏らさないよう切り落とす(issue #153)。<thinks>等、thinkで始まる別タグや
-    本文中のリテラルにはタグ名境界(?=[\s/>])によりマッチしない。
+    自己終端形<think/>はタグのみ除去する。閉じタグを欠いた未完了の<think>
+    (ストリーム切断等)は、タグ以降のreasoning断片を本文へ漏らさないよう切り落とす。
+    逆に、開始タグを伴わない孤立した</think>(DeepSeek系が開始タグを省略して返す
+    既知形式)は、reasoning部分を捨ててタグ以降の実際の回答を残す(issue #153)。
+    <thinks>等、thinkで始まる別タグや本文中のリテラルにはタグ名境界(?=[\s/>])に
+    よりマッチしない。
     """
     cleaned = _THINK_TAG_RE.sub("", text)
+    cleaned = _SELF_CLOSING_THINK_RE.sub("", cleaned)
     # 未終端の<think>開始タグより後はreasoning断片とみなし切り落とす。
-    leftover = _LEFT_OVER_THINK_RE.search(cleaned)
-    if leftover:
-        cleaned = cleaned[: leftover.start()]
+    leftover_open = _LEFT_OVER_THINK_OPEN_RE.search(cleaned)
+    if leftover_open:
+        cleaned = cleaned[: leftover_open.start()]
+        return cleaned.strip()
+    # 孤立した</think>: タグより前はreasoning、後が実際の回答。
+    leftover_close = _LEFT_OVER_THINK_CLOSE_RE.search(cleaned)
+    if leftover_close:
+        cleaned = cleaned[leftover_close.end() :]
     return cleaned.strip()
 
 
