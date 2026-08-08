@@ -95,8 +95,10 @@ class WriteTimeoutTest(unittest.TestCase):
         self.assertEqual(result, '{"title":"ok"}')
         self.assertEqual(urlopen_mock.call_args.kwargs["timeout"], 17)
         request = urlopen_mock.call_args.args[0]
-        self.assertEqual(request.headers["X-api-key"], "test-key")
+        # issue #153: OpenAI互換エンドポイント(/chat/completions + Bearer)へ統一した
+        self.assertEqual(request.headers["Authorization"], "Bearer test-key")
         self.assertEqual(request.headers["User-agent"], "doci/1.0")
+        self.assertTrue(request.full_url.endswith("/chat/completions"))
 
     def test_opencode_go_stream_processes_unterminated_final_sse_line(self) -> None:
         class FakeResponse(BytesIO):
@@ -485,6 +487,110 @@ class WriteTimeoutTest(unittest.TestCase):
 
         request_body = json.loads(urlopen_mock.call_args.args[0].data)
         self.assertEqual(request_body["model"], "qwen3.7-plus")
+
+    def test_opencode_go_openai_format_chunks_are_parsed(self) -> None:
+        """issue #153: OpenAI互換のSSEチャンク(choices[].delta.content)をパースする。"""
+        events = b"".join(
+            [
+                b'data:{"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"{\\"title\\":"},"finish_reason":null}]}\n',
+                b'data:{"id":"2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"\\"ok\\"}"},"finish_reason":null}]}\n',
+                b'data:{"id":"3","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n',
+                b"data:[DONE]\n",
+            ]
+        )
+
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ),
+        ):
+            result = ai_text._run_opencode_go(
+                "prompt", "opencode-go/kimi-k3", timeout=17
+            )
+
+        self.assertEqual(result, '{"title":"ok"}')
+
+    def test_opencode_go_openai_finish_length_raises_max_tokens(self) -> None:
+        """issue #153: finish_reason=length は max_tokens 到達として失敗させる。"""
+        events = (
+            b'data:{"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}]}\n'
+            b"data:[DONE]\n"
+        )
+
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "max_tokens"):
+                ai_text._run_opencode_go(
+                    "prompt", "opencode-go/kimi-k3", timeout=17
+                )
+
+    def test_opencode_go_think_tags_are_stripped(self) -> None:
+        """issue #153: reasoning(<think>...</think>)は本文から除去される。"""
+        events = (
+            b'data:{"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"<think>internal reasoning</think>"},"finish_reason":null}]}\n'
+            b'data:{"id":"2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n'
+            b"data:[DONE]\n"
+        )
+
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ),
+        ):
+            result = ai_text._run_opencode_go(
+                "prompt", "opencode-go/minimax-m3", timeout=17
+            )
+
+        self.assertEqual(result, "ok")
+
+    def test_strip_think_tags_handles_case_and_attributes(self) -> None:
+        """大文字・属性付きタグでも内容ごと除去される (Claudeレビュー指摘)。"""
+        samples = [
+            ("<think>inner</think>OK", "OK"),  # 基本
+            ("<Think>inner</Think>OK", "OK"),  # 大文字
+            ('<think budget="1000">inner</think>OK', "OK"),  # 属性付き
+            ("<think>unterminated reasoning...", ""),  # 閉じタグなし→reasoning断片は切り落とし
+            ("<Think>inner</think>OK", "OK"),  # 開き大文字・閉じ小文字
+            ("<thinks>not a think tag</thinks>OK", "<thinks>not a think tag</thinks>OK"),  # 誤マッチしない
+            ('本文中の<think>リテラル', '本文中の'),  # 未終端は以降を切り落とし
+            ("reasoning text</think>実際の回答", "実際の回答"),  # 孤立した</think>: 前を捨て後を残す
+            ("<think/>後続の回答", "後続の回答"),  # 自己終端形: 回答を残す
+            ("<think/>回答A<think>reasoning</think>回答B", "回答A回答B"),  # 自己終端+ペア形の併存
+            ("reasoning</think>回答<think>切断されたreasoning", "回答"),  # 孤立</think>+未終端<think>の併存
+        ]
+        for sample, expected in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(ai_text._strip_think_tags(sample), expected)
 
     def test_zero_disables_explicit_claude_timeout(self) -> None:
         with (

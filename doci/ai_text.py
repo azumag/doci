@@ -278,12 +278,65 @@ def _opencode_go_model(model: str) -> str:
 _DEFAULT_OPENCODE_GO_TIMEOUT = object()
 
 
+# 閉じタグがある<think>ブロックは内容ごと除去する(大文字・属性付きも対応)。
+# タグ名直後に境界(?=[\s/>])を要求し、<thinks> / <thinkable> 等への誤マッチを防ぐ。
+_THINK_TAG_RE = re.compile(
+    r"<[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>.*?</[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>",
+    re.DOTALL,
+)
+# 開始タグを伴わない孤立した</think>(reasoningモデルが開始タグを省略して
+# 「reasoning...</think>回答」の形で返す既知形式)のタグ名境界付きパターン。
+_LEFT_OVER_THINK_OPEN_RE = re.compile(r"<[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>")
+_LEFT_OVER_THINK_CLOSE_RE = re.compile(r"</[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*>")
+# 自己終端形<think/>はreasoningなしの意味で、タグのみ除去する。
+_SELF_CLOSING_THINK_RE = re.compile(
+    r"<[Tt][Hh][Ii][Nn][Kk](?=[\s/>])[^>]*/>"
+)
+
+
+def _strip_think_tags(text: str) -> str:
+    """OpenAI互換エンドポイント由来の reasoning タグ(<think>...</think>)を除去する。
+
+    <think>は小文字・大文字・属性付き(<think budget="...">)を内容ごと除去する。
+    自己終端形<think/>はタグのみ除去する。閉じタグを欠いた未完了の<think>
+    (ストリーム切断等)は、タグ以降のreasoning断片を本文へ漏らさないよう切り落とす。
+    逆に、開始タグを伴わない孤立した</think>(DeepSeek系が開始タグを省略して返す
+    既知形式)は、reasoning部分を捨ててタグ以降の実際の回答を残す(issue #153)。
+    <thinks>等、thinkで始まる別タグや本文中のリテラルにはタグ名境界(?=[\s/>])に
+    よりマッチしない。
+    """
+    # 自己終端形<think/>はペア形の開始タグパターンにもマッチしてしまうため、
+    # 先に除去する(「<think/>回答A<think>reasoning</think>回答B」のような併存で
+    # 回答Aが失われないように、issue #153 Claudeレビュー5巡目)。
+    cleaned = _SELF_CLOSING_THINK_RE.sub("", text)
+    cleaned = _THINK_TAG_RE.sub("", cleaned)
+    # 孤立した</think>: タグより前はreasoning、後が実際の回答。未終端<think>の
+    # 切り落としより先に適用する(「reasoning</think>回答<think>切断」のような
+    # 併存入力でもreasoning断片とリテラル</think>が漏れないように)。
+    leftover_close = _LEFT_OVER_THINK_CLOSE_RE.search(cleaned)
+    if leftover_close:
+        cleaned = cleaned[leftover_close.end() :]
+    # 未終端の<think>開始タグより後はreasoning断片とみなし切り落とす。
+    leftover_open = _LEFT_OVER_THINK_OPEN_RE.search(cleaned)
+    if leftover_open:
+        cleaned = cleaned[: leftover_open.start()]
+    return cleaned.strip()
+
+
 def _run_opencode_go(
     prompt: str,
     model: str,
     timeout: int | None | object = _DEFAULT_OPENCODE_GO_TIMEOUT,
 ) -> str:
-    """OpenCode CLIを介さず、OpenCode GoのAnthropic互換APIへ直接接続する。"""
+    """OpenCode CLIを介さず、OpenCode GoのOpenAI互換APIへ直接接続する。
+
+    issue #153: 以前はAnthropic互換エンドポイント(`/messages`+`x-api-key`)を使っていた
+    が、Console Goプロバイダ経由のモデル(kimi-k3 / deepseek-v4-pro / glm-5.2 /
+    mimo-v2.5-pro等)がAnthropic SSE変換に失敗して空応答になるため、
+    OpenAI互換エンドポイント(`/chat/completions`+`Authorization: Bearer`)へ統一した。
+    全モデルで応答することを実測確認済み(deepseek-v4-flash / qwen3.7-plus /
+    minimax-m3を含む)。
+    """
     model = _opencode_go_model(model)
     _, sep, model_id = model.partition("/")
     if not sep:
@@ -297,11 +350,10 @@ def _run_opencode_go(
         }
     ).encode("utf-8")
     req = urllib.request.Request(
-        f"{config.OPENCODE_GO_BASE_URL}/messages",
+        f"{config.OPENCODE_GO_BASE_URL}/chat/completions",
         data=body,
         headers={
-            "x-api-key": _opencode_go_key(),
-            "anthropic-version": "2023-06-01",
+            "authorization": f"Bearer {_opencode_go_key()}",
             "content-type": "application/json",
             # Python標準UAはGoゲートウェイで403になるため、アプリ固有UAを明示する。
             "user-agent": "doci/1.0",
@@ -476,6 +528,28 @@ def _run_opencode_go(
                         part = delta.get("text", "")
                         text_parts.append(part)
                         text_chars += len(part)
+                    # OpenAI互換のチャンク形式 (issue #153): choices[0].delta.content
+                    choices = event.get("choices") or []
+                    if choices:
+                        choice = choices[0]
+                        if not isinstance(choice, dict):
+                            continue
+                        finish = choice.get("finish_reason")
+                        delta_content = (choice.get("delta") or {}).get("content")
+                        if isinstance(delta_content, str) and delta_content:
+                            text_parts.append(delta_content)
+                            text_chars += len(delta_content)
+                        if finish:
+                            # "length"(max_tokens到達)・"content_filter"等も含め、
+                            # 終端理由を受信した時点でストリーム終端とみなす。
+                            # [DONE]を送らず接続を保持するゲートウェイでも、
+                            # max_tokens到達をタイムアウト誤報告しないため
+                            # (issue #153 Claudeレビュー4巡目)。
+                            stop_reason = (
+                                "max_tokens" if finish == "length" else finish
+                            )
+                            received_terminal = True
+                            break
                     if event_type == "message_delta":
                         stop_reason = delta.get("stop_reason") or stop_reason
                         if stop_reason:
@@ -512,6 +586,10 @@ def _run_opencode_go(
             raise RuntimeError("OpenCode Go API が時間上限に達しました") from exc
         raise
     text = "".join(text_parts)
+    # OpenAI互換エンドポイント経由のモデル(minimax-m3等)が reasoning を
+    # <think>...</think> で本文に混入させることがある(実測)。narration等の
+    # 本文として意図しないため除去する。
+    text = _strip_think_tags(text)
     if stop_reason == "max_tokens":
         raise RuntimeError(
             f"OpenCode Go API が max_tokens={config.OPENCODE_GO_MAX_TOKENS} に達しました"
