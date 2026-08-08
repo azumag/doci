@@ -305,8 +305,11 @@ def _strip_think_tags(text: str) -> str:
     <thinks>等、thinkで始まる別タグや本文中のリテラルにはタグ名境界(?=[\s/>])に
     よりマッチしない。
     """
-    cleaned = _THINK_TAG_RE.sub("", text)
-    cleaned = _SELF_CLOSING_THINK_RE.sub("", cleaned)
+    # 自己終端形<think/>はペア形の開始タグパターンにもマッチしてしまうため、
+    # 先に除去する(「<think/>回答A<think>reasoning</think>回答B」のような併存で
+    # 回答Aが失われないように、issue #153 Claudeレビュー5巡目)。
+    cleaned = _SELF_CLOSING_THINK_RE.sub("", text)
+    cleaned = _THINK_TAG_RE.sub("", cleaned)
     # 孤立した</think>: タグより前はreasoning、後が実際の回答。未終端<think>の
     # 切り落としより先に適用する(「reasoning</think>回答<think>切断」のような
     # 併存入力でもreasoning断片とリテラル</think>が漏れないように)。

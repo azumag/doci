@@ -585,6 +585,7 @@ class WriteTimeoutTest(unittest.TestCase):
             ('本文中の<think>リテラル', '本文中の'),  # 未終端は以降を切り落とし
             ("reasoning text</think>実際の回答", "実際の回答"),  # 孤立した</think>: 前を捨て後を残す
             ("<think/>後続の回答", "後続の回答"),  # 自己終端形: 回答を残す
+            ("<think/>回答A<think>reasoning</think>回答B", "回答A回答B"),  # 自己終端+ペア形の併存
             ("reasoning</think>回答<think>切断されたreasoning", "回答"),  # 孤立</think>+未終端<think>の併存
         ]
         for sample, expected in samples:
