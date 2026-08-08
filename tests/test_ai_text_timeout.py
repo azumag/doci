@@ -545,6 +545,66 @@ class WriteTimeoutTest(unittest.TestCase):
                     "prompt", "opencode-go/kimi-k3", timeout=17
                 )
 
+    def test_opencode_go_empty_stop_chunk_waits_for_content(self) -> None:
+        """finish=stop を content 無しで受けたらストリームを継続する (deepseek-v4-flash対策)。"""
+        events = (
+            b'data:{"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n'
+            b'data:{"id":"2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n'
+            b'data:{"id":"3","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n'
+            b"data:[DONE]\n"
+        )
+
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ),
+        ):
+            result = ai_text._run_opencode_go(
+                "prompt", "opencode-go/deepseek-v4-flash", timeout=17
+            )
+
+        self.assertEqual(result, "ok")
+
+    def test_opencode_go_empty_stop_chunk_has_upper_limit(self) -> None:
+        """content無しstopの連続には上限があり、超えたら終端として空本文エラーになる。"""
+        limit = ai_text._MAX_EMPTY_STOP_CHUNKS
+        events = b"".join(
+            [
+                b'data:{"id":"%d","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n'
+                % i
+                for i in range(limit + 2)
+            ]
+            + [b"data:[DONE]\n"]
+        )
+
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with (
+            mock.patch.object(config, "OPENCODE_GO_API_KEY", "test-key"),
+            mock.patch.object(config, "WRITE_LLM_TIMEOUT", 0),
+            mock.patch.object(
+                ai_text.urllib.request, "urlopen", return_value=FakeResponse(events)
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "空の本文"):
+                ai_text._run_opencode_go(
+                    "prompt", "opencode-go/deepseek-v4-flash", timeout=17
+                )
+
     def test_opencode_go_think_tags_are_stripped(self) -> None:
         """issue #153: reasoning(<think>...</think>)は本文から除去される。"""
         events = (
