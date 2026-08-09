@@ -228,6 +228,26 @@ _LONG_TERM_OBSERVATION_PATTERN = re.compile(
     r"続ける|続けます)|する)?$"
 )
 _SHORT_TERM_SCOPE_PATTERN = re.compile(r"(?:24時間|初動|初期|早期)")
+_INITIAL_24_HOUR_ROLE_PATTERNS = (
+    re.compile(
+        r"24時間(?:後|値)?.{0,24}初動.{0,16}"
+        r"(?:観測|指標|記録|評価|確認)"
+    ),
+    re.compile(
+        r"初動.{0,16}(?:観測|指標|記録|評価|確認).{0,24}"
+        r"24時間(?:後|値)?"
+    ),
+)
+_AUXILIARY_SEVEN_DAY_ROLE_PATTERNS = (
+    re.compile(
+        r"7日(?:後|値)?.{0,24}補助.{0,16}"
+        r"(?:観測|指標|値|記録|評価|確認)"
+    ),
+    re.compile(
+        r"補助.{0,16}(?:観測|指標|値|記録|評価|確認).{0,24}"
+        r"7日(?:後|値)?"
+    ),
+)
 
 
 def publication_timing_policy_enabled(
@@ -239,7 +259,7 @@ def publication_timing_policy_enabled(
 
 
 def _publication_timing_context(data: Mapping[str, object]) -> str:
-    return " ".join(
+    return "。".join(
         str(data.get(key) or "")
         for key in (
             "topic",
@@ -397,6 +417,18 @@ def _has_multiple_uploads(text: str) -> bool:
     )
 
 
+def _has_metric_role_relation(
+    text: str,
+    patterns: tuple[re.Pattern[str], ...],
+) -> bool:
+    """観測期間と役割が同じ節で明示されていることを確認する。"""
+    return any(
+        pattern.search(clause)
+        for clause in _claim_clauses(text)
+        for pattern in patterns
+    )
+
+
 def _missing_publish_time_design_guards(design: str) -> list[str]:
     compact = re.sub(r"\s+", "", design)
     missing = []
@@ -417,7 +449,7 @@ def validate_publication_timing_research(
 ) -> bool:
     """公開時刻企画の構造化状態と比較設計をfail-closedで検証する。"""
     structured_timing = _has_structured_publication_timing_state(data)
-    policy_context = _publication_timing_context(data) + " " + focus_text
+    policy_context = _publication_timing_context(data) + "。" + focus_text
     if not structured_timing and not _is_publication_timing_text(
         policy_context
     ):
@@ -477,9 +509,15 @@ def validate_publication_timing_script(
         violations.append("複数本の比較")
     if not any(marker in compact for marker in _COMPARISON_MARKERS):
         violations.append("比較または交互割当")
-    if "24時間" not in compact or "初動" not in compact:
+    if not _has_metric_role_relation(
+        script_text,
+        _INITIAL_24_HOUR_ROLE_PATTERNS,
+    ):
         violations.append("24時間値を初動の主要観測とする説明")
-    if "7日" not in compact or "補助" not in compact:
+    if not _has_metric_role_relation(
+        script_text,
+        _AUXILIARY_SEVEN_DAY_ROLE_PATTERNS,
+    ):
         violations.append("7日値を補助観測とする説明")
     if not _has_long_term_uncertainty(compact):
         violations.append("長期効果は不明という限界")

@@ -922,6 +922,21 @@ class ResearchPromptTest(unittest.TestCase):
                 }
             )
         )
+        self.assertTrue(
+            research.validate_publication_timing_script(
+                {
+                    "title": "公開時刻の検証",
+                    "description": "複数動画の比較です。",
+                    "narration": (
+                        "公開時刻A/Bを各3本ずつ比較します。"
+                        "24時間値は初動の主要観測、7日値は初動差がその後"
+                        "どうなったかを見る補助値として区別します。"
+                        "長期的な影響は分かっていません。"
+                        "データ不足の間は判断を保留します。"
+                    ),
+                }
+            )
+        )
         unsafe_title = {
             "title": "夜が最適です",
             "description": "配信タイミングの比較です。",
@@ -1127,6 +1142,61 @@ class ResearchPromptTest(unittest.TestCase):
         }
         with self.assertRaises(research.PublicationTimingPolicyViolation):
             research.validate_publication_timing_script(script)
+
+    def test_publication_timing_script_requires_metric_role_relationships(
+        self,
+    ) -> None:
+        unrelated_keywords = {
+            "title": "公開時刻の検証",
+            "description": "複数動画の比較です。",
+            "narration": (
+                "公開時刻A/Bを各3本ずつ比較します。"
+                "24時間ごとに通知します。初動ではタイトルを確認します。"
+                "7日間試します。補助資料も参照します。"
+                "長期的な影響は分かっていません。"
+                "データ不足の間は判断を保留します。"
+            ),
+        }
+        with self.assertRaisesRegex(
+            research.PublicationTimingPolicyViolation,
+            "24時間値を初動の主要観測.*7日値を補助観測",
+        ):
+            research.validate_publication_timing_script(unrelated_keywords)
+
+        self.assertTrue(
+            research.validate_publication_timing_script(
+                {
+                    "title": "公開時刻の検証",
+                    "description": "複数動画の比較です。",
+                    "narration": (
+                        "公開時刻A/Bを各3本ずつ比較します。"
+                        "公開後24時間の視聴回数を初動として記録します。"
+                        "公開7日後の視聴回数を補助指標として確認します。"
+                        "長期的な影響は分かっていません。"
+                        "データ不足の間は判断を保留します。"
+                    ),
+                }
+            )
+        )
+
+    def test_publication_timing_research_keeps_field_boundaries(self) -> None:
+        payload = {
+            "topic": "公開時刻の検証で夜が",
+            "angle": "最適ですとは言えません",
+            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+            "publication_timing_experiment_design": (
+                "公開時刻A/Bを各3本ずつ比較し、"
+                "データ不足なら結論を保留します"
+            ),
+            "publication_timing_sample_scope": "multiple_comparable_uploads",
+            "publication_timing_conclusion_status": "insufficient_data",
+        }
+
+        context = research._publication_timing_context(payload)
+        self.assertIn("夜が。最適", context)
+        self.assertTrue(
+            research.validate_publication_timing_research(payload)
+        )
 
     def test_live_stream_duration_is_not_publication_timing(self) -> None:
         payload = {
