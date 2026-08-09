@@ -142,10 +142,18 @@ _POSITIVE_OPTIMAL_COPULA = (
     r"じゃない|しょうか)|"
     r"と言え(?:る|ます)|とな(?:る|ります)|にな(?:る|ります)|(?=$|[、。]))"
 )
+_OPTIMAL_ASSERTION_DESCRIPTOR = (
+    r"(?:最適|ベスト|正解|一番(?:良い|よい|いい)?|"
+    r"最も(?:良い|よい|いい)|もっとも(?:良い|よい|いい)|最良|王道)"
+)
+_OPTIONAL_TIMING_NOUN = (
+    r"(?:(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング))?"
+)
 _DIRECT_OPTIMAL_ASSERTION_PATTERNS = (
     re.compile(
-        r"(?:が|は|こそ)(?:最適|ベスト|正解|一番(?:良い|よい)?|"
-        r"最も(?:良い|よい)|最良)"
+        r"(?:が|は|こそ)"
+        + _OPTIMAL_ASSERTION_DESCRIPTOR
+        + _OPTIONAL_TIMING_NOUN
         + _POSITIVE_OPTIMAL_COPULA
     ),
     re.compile(
