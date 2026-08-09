@@ -775,14 +775,15 @@ class ResearchPromptTest(unittest.TestCase):
             "novelty_reason": "",
             "youtube_creator_audience": "YouTube制作者",
             "youtube_creator_problem": "公開時刻が初動へ影響するか切り分けたい",
-            "viewer_action": "",
+            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+            "publication_timing_experiment_design": "",
             "publication_timing_sample_scope": "multiple_comparable_uploads",
             "publication_timing_conclusion_status": "insufficient_data",
             "theme_fit": "clear",
             "theme_fit_reason": "YouTube Studioの公開実績を分析するため",
         }
 
-        unsafe_actions = (
+        unsafe_designs = (
             "次の1本だけ公開時刻を変えて結果を記録する",
             "次の動画だけ公開時刻を変え、7日後に最適時刻を決める",
             "1動画のみ公開時刻を変えて効果を確認する",
@@ -797,15 +798,15 @@ class ResearchPromptTest(unittest.TestCase):
         )
         for audience in ("YouTube制作者", "YouTubeチャンネル運営者", ""):
             payload["youtube_creator_audience"] = audience
-            for action in unsafe_actions:
-                with self.subTest(audience=audience, action=action):
-                    payload["viewer_action"] = action
+            for design in unsafe_designs:
+                with self.subTest(audience=audience, design=design):
+                    payload["publication_timing_experiment_design"] = design
                     with self.assertRaises(
                         research.PublicationTimingPolicyViolation
                     ):
                         research.validate_publication_timing_research(payload)
 
-        safe_actions = (
+        safe_designs = (
             "次の1本だけ公開時刻を変えて記録し、複数本がそろった後にまとめて比較する",
             "公開時刻は複数本がそろった後に比較し、次の1本だけサムネイルを変える",
             "公開時刻A/Bを複数本で交互に比較し、データ不足の間は最適時刻を決めない",
@@ -813,14 +814,39 @@ class ResearchPromptTest(unittest.TestCase):
             "投稿時刻A/Bを3動画ずつ比較し、データ不足なら結論は保留する",
             "配信時刻A/Bを三本ずつ比較し、データ不足なら断定しない",
         )
-        for action in safe_actions:
-            with self.subTest(action=action):
-                payload["viewer_action"] = action
+        for design in safe_designs:
+            with self.subTest(design=design):
+                payload["publication_timing_experiment_design"] = design
                 self.assertTrue(
                     research.validate_publication_timing_research(payload)
                 )
 
-        payload["viewer_action"] = safe_actions[-1]
+        brief = research.brief_for_prompt(payload)
+        self.assertIn(
+            "視聴後の操作: YouTube Studioで公開後24時間の実績を確認する",
+            brief,
+        )
+        self.assertIn(
+            f"公開時刻の比較設計: {safe_designs[-1]}",
+            brief,
+        )
+
+        for invalid_action in ("", None, ["YouTube Studioを確認する"]):
+            with self.subTest(invalid_action=invalid_action):
+                invalid_payload = dict(payload)
+                invalid_payload["viewer_action"] = invalid_action
+                with self.assertRaises(
+                    research.PublicationTimingPolicyViolation
+                ):
+                    research.validate_publication_timing_research(
+                        invalid_payload
+                    )
+        missing_action = dict(payload)
+        missing_action.pop("viewer_action")
+        with self.assertRaises(research.PublicationTimingPolicyViolation):
+            research.validate_publication_timing_research(missing_action)
+
+        payload["publication_timing_experiment_design"] = safe_designs[-1]
         payload["publication_timing_conclusion_status"] = "preliminary_observation"
         with self.assertRaises(research.PublicationTimingPolicyViolation):
             research.validate_publication_timing_research(payload)
@@ -997,7 +1023,8 @@ class ResearchPromptTest(unittest.TestCase):
         )
         payload = {
             "topic": "YouTube動画の公開時刻を検証する",
-            "viewer_action": "",
+            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+            "publication_timing_experiment_design": safe_design,
             "publication_timing_sample_scope": "multiple_comparable_uploads",
             "publication_timing_conclusion_status": "insufficient_data",
         }
@@ -1042,7 +1069,9 @@ class ResearchPromptTest(unittest.TestCase):
             "最適時刻を決めることはできないとは限りません。",
         ):
             with self.subTest(conclusion=conclusion):
-                payload["viewer_action"] = safe_design + conclusion
+                payload["publication_timing_experiment_design"] = (
+                    safe_design + conclusion
+                )
                 with self.assertRaises(
                     research.PublicationTimingPolicyViolation
                 ):
@@ -1067,7 +1096,7 @@ class ResearchPromptTest(unittest.TestCase):
             "7日後の再生数は伸びません",
         ):
             with self.subTest(safe_conclusion=safe_conclusion):
-                payload["viewer_action"] = (
+                payload["publication_timing_experiment_design"] = (
                     "公開時刻A/Bを各3本ずつ比較し、データ不足なので"
                     + safe_conclusion
                 )
@@ -1075,7 +1104,7 @@ class ResearchPromptTest(unittest.TestCase):
                     research.validate_publication_timing_research(payload)
                 )
 
-        payload["viewer_action"] = (
+        payload["publication_timing_experiment_design"] = (
             "公開時刻A/Bを各3本ずつ比較し、データ不足なら保留します。"
             "長期的な再生数の推移を分析していきます"
         )
@@ -1152,7 +1181,8 @@ class ResearchPromptTest(unittest.TestCase):
         unsafe = json.dumps(
             {
                 "topic": "配信タイミングの検証",
-                "viewer_action": (
+                "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                "publication_timing_experiment_design": (
                     "配信タイミングA/Bを各3本ずつ比較し、"
                     "データ不足でも最適配信時間を決めます"
                 ),
@@ -1192,9 +1222,13 @@ class ResearchPromptTest(unittest.TestCase):
         unsafe = json.dumps(
             {
                 "topic": "公開時刻のファクトチェック",
-                "viewer_action": "公開時刻を夜にすると再生数が伸びます",
-                "publication_timing_sample_scope": "not_applicable",
-                "publication_timing_conclusion_status": "not_applicable",
+                "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                "publication_timing_experiment_design": (
+                    "公開時刻A/Bを各3本ずつ比較し、"
+                    "データ不足なら結論を保留します"
+                ),
+                "publication_timing_sample_scope": "multiple_comparable_uploads",
+                "publication_timing_conclusion_status": "insufficient_data",
                 "facts": [
                     {
                         "claim": "公式情報で確認済み",
@@ -1218,15 +1252,50 @@ class ResearchPromptTest(unittest.TestCase):
                     require_youtube_examples=False,
                 )
 
+    def test_non_timing_focus_text_is_not_rejected_by_timing_policy(self) -> None:
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["analytics"]
+        normal = json.dumps(
+            {
+                "topic": "視聴者維持率の確認",
+                "viewer_action": "YouTube Studioで視聴者維持率を確認する",
+                "publication_timing_experiment_design": "",
+                "publication_timing_sample_scope": "not_applicable",
+                "publication_timing_conclusion_status": "not_applicable",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/141805",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+            mock.patch.object(research.llm, "run_claude", return_value=normal),
+        ):
+            result = research.web_research(
+                corner,
+                [],
+                spec,
+                backend_override="claude",
+                focus_text="視聴者維持率の離脱点を確認します",
+                require_youtube_examples=False,
+            )
+
+        self.assertEqual(result["topic"], "視聴者維持率の確認")
+
     def test_publication_timing_policy_retry_accepts_later_safe_result(self) -> None:
         spec = channel_mod.load("youtube-growth")
         corner = spec.corners["analytics"]
 
-        def result(action: str) -> str:
+        def result(design: str) -> str:
             return json.dumps(
                 {
                     "topic": "配信タイミングの検証",
-                    "viewer_action": action,
+                    "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                    "publication_timing_experiment_design": design,
                     "publication_timing_sample_scope": "multiple_comparable_uploads",
                     "publication_timing_conclusion_status": "insufficient_data",
                     "facts": [
@@ -1262,7 +1331,10 @@ class ResearchPromptTest(unittest.TestCase):
             )
 
         self.assertEqual(run_mock.call_count, 2)
-        self.assertEqual(actual["viewer_action"], json.loads(safe)["viewer_action"])
+        self.assertEqual(
+            actual["publication_timing_experiment_design"],
+            json.loads(safe)["publication_timing_experiment_design"],
+        )
 
     def test_youtube_growth_publish_time_guard_reaches_research_prompt(self) -> None:
         spec = channel_mod.load("youtube-growth")
@@ -1270,7 +1342,8 @@ class ResearchPromptTest(unittest.TestCase):
         raw = json.dumps(
             {
                 "topic": "公開時刻の検証",
-                "viewer_action": (
+                "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                "publication_timing_experiment_design": (
                     "公開時刻A/Bを複数本で交互に比較し、データ不足の間は"
                     "最適時刻を決めない"
                 ),
@@ -1307,6 +1380,7 @@ class ResearchPromptTest(unittest.TestCase):
             "insufficient_data",
             "publication_timing_sample_scope",
             "publication_timing_conclusion_status",
+            "publication_timing_experiment_design",
             "取得できないCTR・維持率などの指標は推測で補いません",
         ):
             self.assertIn(rule, prompt)
