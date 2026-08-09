@@ -760,6 +760,914 @@ class ResearchPromptTest(unittest.TestCase):
                     require_structured_novelty=True,
                 )
 
+    def test_publication_timing_research_requires_structured_safe_comparison(self) -> None:
+        payload = {
+            "topic": "YouTube動画の公開時刻を検証する",
+            "angle": "視聴者がいる時間帯と初動を比較する",
+            "canonical_theme": "YouTube制作者の公開時刻と初動の分析",
+            "format": "指標",
+            "novelty_type": "new",
+            "novelty_axis": "",
+            "viewpoint": "",
+            "comparison_key": "公開時刻別の24時間後と7日後の実績",
+            "parent_topic": "",
+            "parent_topic_id": "",
+            "novelty_reason": "",
+            "youtube_creator_audience": "YouTube制作者",
+            "youtube_creator_problem": "公開時刻が初動へ影響するか切り分けたい",
+            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+            "publication_timing_experiment_design": "",
+            "publication_timing_sample_scope": "multiple_comparable_uploads",
+            "publication_timing_conclusion_status": "insufficient_data",
+            "theme_fit": "clear",
+            "theme_fit_reason": "YouTube Studioの公開実績を分析するため",
+        }
+
+        unsafe_designs = (
+            "次の1本だけ公開時刻を変えて結果を記録する",
+            "次の動画だけ公開時刻を変え、7日後に最適時刻を決める",
+            "1動画のみ公開時刻を変えて効果を確認する",
+            "一度だけ投稿時刻を変え、結果を参考値として最適時刻を決める",
+            "公開時刻を参考値として複数本で比較し、最適時刻を決める",
+            "公開時刻A/Bを複数本で比較し、最適時刻を決めます",
+            "配信タイミングA/Bを複数本で比較し、最適配信時間を決めます",
+            (
+                "公開時刻A/Bを複数本で比較し、データ不足ですが、"
+                "最適時刻を決めることはできないわけではない"
+            ),
+        )
+        for audience in ("YouTube制作者", "YouTubeチャンネル運営者", ""):
+            payload["youtube_creator_audience"] = audience
+            for design in unsafe_designs:
+                with self.subTest(audience=audience, design=design):
+                    payload["publication_timing_experiment_design"] = design
+                    with self.assertRaises(
+                        research.PublicationTimingPolicyViolation
+                    ):
+                        research.validate_publication_timing_research(payload)
+
+        safe_designs = (
+            "次の1本だけ公開時刻を変えて記録し、複数本がそろった後にまとめて比較する",
+            "公開時刻は複数本がそろった後に比較し、次の1本だけサムネイルを変える",
+            "公開時刻A/Bを複数本で交互に比較し、データ不足の間は最適時刻を決めない",
+            "公開時刻A/Bを各3本ずつ比較し、十分なデータが揃うまで判断を保留する",
+            "投稿時刻A/Bを3動画ずつ比較し、データ不足なら結論は保留する",
+            "配信時刻A/Bを三本ずつ比較し、データ不足なら断定しない",
+        )
+        for design in safe_designs:
+            with self.subTest(design=design):
+                payload["publication_timing_experiment_design"] = design
+                self.assertTrue(
+                    research.validate_publication_timing_research(payload)
+                )
+
+        brief = research.brief_for_prompt(payload)
+        self.assertIn(
+            "視聴後の操作: YouTube Studioで公開後24時間の実績を確認する",
+            brief,
+        )
+        self.assertIn(
+            f"公開時刻の比較設計: {safe_designs[-1]}",
+            brief,
+        )
+
+        for invalid_action in ("", None, ["YouTube Studioを確認する"]):
+            with self.subTest(invalid_action=invalid_action):
+                invalid_payload = dict(payload)
+                invalid_payload["viewer_action"] = invalid_action
+                with self.assertRaises(
+                    research.PublicationTimingPolicyViolation
+                ):
+                    research.validate_publication_timing_research(
+                        invalid_payload
+                    )
+        missing_action = dict(payload)
+        missing_action.pop("viewer_action")
+        with self.assertRaises(research.PublicationTimingPolicyViolation):
+            research.validate_publication_timing_research(missing_action)
+
+        payload["publication_timing_experiment_design"] = safe_designs[-1]
+        payload["publication_timing_conclusion_status"] = "preliminary_observation"
+        with self.assertRaises(research.PublicationTimingPolicyViolation):
+            research.validate_publication_timing_research(payload)
+
+    def test_publication_timing_script_rejects_polite_and_synonym_conclusions(
+        self,
+    ) -> None:
+        base = (
+            "配信タイミングA/Bを各3本ずつ比較します。"
+            "24時間値を初動の主要観測、7日値を補助観測にします。"
+            "長期効果は不明で、データ不足の間は判断を保留します。"
+        )
+        for conclusion in (
+            "この結果で最適配信時間を決めます。",
+            "公開時刻の効果を判定しました。",
+            "因果を断定しましょう。",
+            "最適時刻は午前9時です。",
+            "午前9時がベストです。",
+            "火曜日が最適です。",
+            "毎週火曜がベストです。",
+            "最適な時間は午前9時です。",
+            "火曜日をベストとします。",
+            "最適な時間は火曜日です。",
+            "ベストな時間は午前9時です。",
+            "一番良い時間は夜です。",
+            "火曜日を最適な公開時刻とします。",
+            "午前9時をベストな時間帯とします。",
+            "夜を一番良いタイミングとします。",
+            "火曜日を最適な公開時刻とする。",
+            "午前9時をベストな時間帯とする。",
+            "最適時刻を決定する。",
+            "最適な公開時刻を特定する。",
+            "最適な公開時刻を火曜日とします。",
+            "ベストな時間帯を午前9時とします。",
+            "一番良いタイミングを夜にします。",
+            "公開時刻の長期効果は確実です。",
+            "平日の夜が最適です。",
+            "夜がベストです。",
+            "夜がベストタイミングです。",
+            "夜が一番いいタイミングです。",
+            "夜が王道の時間帯です。",
+            "長期的な再生数は伸びます。",
+            "長期的な総再生時間は増えます。",
+            "将来的な再生数は伸びます。",
+            "火曜日に公開すると再生数が伸びます。",
+            "将来的な再生数は伸びますので、登録者1000人を目指します。",
+            "将来的な再生数は伸びると見て、さらなる向上を目指します。",
+            "中長期的な効果は確実で、改善に取り組みます。",
+            "将来的な再生数は伸び、成果向上を目指します。",
+            "将来的な効果は確実で、再生数向上を目指します。",
+            "中長期的な総再生時間は増え、成果改善を目標とします。",
+            "将来的な再生数は伸びて、成果向上を目指します。",
+            "中長期的な総再生時間は改善して、成果向上を目指します。",
+            "長期的な効果があり、成果向上を目指します。",
+            "将来的な再生数も伸びて、成果向上を目指します。",
+            "将来的な再生数だけは伸びて、成果向上を目指します。",
+            "長期的な効果については明らかで、成果向上を目指します。",
+            "将来的な再生数の増加が見込まれ、成果向上を目指します。",
+            "長期的な効果が期待され、成果改善を目指します。",
+            "将来的な再生数は増加傾向となり、成果向上を目指します。",
+            "将来的な再生数の増加を期待し成果向上を目指します。",
+            "将来的な再生数の増加を見込んで成果向上を目指します。",
+            "長期的な効果を確信し成果改善を目指します。",
+            "夜が最適ですが最適時刻は決めません。",
+            "最適時刻は決めませんが夜が最適です。",
+            "ただし長期的な再生数は上がります。",
+            "ただし長期的な総再生時間は増加します。",
+            "最適時刻は午前9時で理由は不明です。",
+            "平日の夜が最適で根拠は分かっていません。",
+            "夜こそ最適です。",
+            "夜をベストとします。",
+            "長期的な再生数は伸びると分析します。",
+            "長期的な総再生時間は増えたと記録します。",
+            "夜が最適と言えます。",
+            "夜が最適となります。",
+            "長期的な再生数を分析すると伸びます。",
+            "長期的な再生数の推移を分析し、伸びると判断します。",
+            "最適時刻は午後6時になります。",
+            "最適時刻は午前9時ではなく午後6時です。",
+            "夜に公開するのが一番です。",
+            "長期的な影響は分かっていませんが、再生数は伸びます。",
+            "長期的な再生数は不明ですが、増えています。",
+            "公開時刻を夜にすると再生数が伸びます。",
+            "公開時刻を夜にすると7日後の再生数が伸びます。",
+            "夜に公開するのが一番良いです。",
+            "夜に公開すると再生数が伸びます。",
+            "再生数は公開時刻を夜にすると伸びます。",
+            "タイトルには改善の可能性があり、公開時刻を夜にすると再生数が伸びます。",
+            "長期的な影響は不明ですが、24時間の初動には影響し得て、7日後の再生数は伸びます。",
+            "公開時間を夜にすると再生数が伸びます。",
+            "夜に公開すれば再生数が伸びます。",
+            "夜に公開することで再生数が伸びます。",
+            "動画を夜に出すと再生数が伸びます。",
+            "動画を夜にアップロードすると再生数が伸びます。",
+            "動画を夜に上げるのが一番です。",
+            "最適時刻を決めることはできないとは言えません。",
+            "最適時刻を決めることはできないとは限りません。",
+        ):
+            with self.subTest(conclusion=conclusion):
+                script = {
+                    "title": "配信タイミングの検証",
+                    "description": "複数動画の比較です。",
+                    "narration": base + conclusion,
+                }
+                with self.assertRaises(
+                    research.PublicationTimingPolicyViolation
+                ):
+                    research.validate_publication_timing_script(script)
+
+        self.assertTrue(
+            research.validate_publication_timing_script(
+                {
+                    "title": "配信タイミングの検証",
+                    "description": "複数動画の比較です。",
+                    "narration": base,
+                }
+            )
+        )
+        self.assertTrue(
+            research.validate_publication_timing_script(
+                {
+                    "title": "公開時刻の検証",
+                    "description": "複数動画の比較です。",
+                    "narration": (
+                        "公開時刻A/Bを各3本ずつ比較します。"
+                        "24時間値は初動の主要観測、7日値は初動差がその後"
+                        "どうなったかを見る補助値として区別します。"
+                        "長期的な影響は分かっていません。"
+                        "データ不足の間は判断を保留します。"
+                    ),
+                }
+            )
+        )
+        unsafe_title = {
+            "title": "夜が最適です",
+            "description": "配信タイミングの比較です。",
+            "narration": base,
+        }
+        with self.assertRaises(research.PublicationTimingPolicyViolation):
+            research.validate_publication_timing_script(unsafe_title)
+        for safe_title in (
+            "最適時刻を探す前に見る数字",
+            "公開時刻の長期分析",
+        ):
+            with self.subTest(safe_title=safe_title):
+                self.assertTrue(
+                    research.validate_publication_timing_script(
+                        {
+                            "title": safe_title,
+                            "description": "配信タイミングの比較です。",
+                            "narration": base + "長期の推移も記録します。",
+                        }
+                    )
+                )
+        for uncertainty in (
+            "長期的な影響は分かっていません。",
+            "長期的な影響は明らかではありません。",
+            "長期的な効果は検証されていません。",
+            "将来的な影響は分かっていません。",
+            "中長期的な効果は不明です。",
+        ):
+            with self.subTest(uncertainty=uncertainty):
+                self.assertTrue(
+                    research.validate_publication_timing_script(
+                        {
+                            "title": "配信タイミングの検証",
+                            "description": "複数動画の比較です。",
+                            "narration": (
+                                "配信タイミングA/Bを各3本ずつ比較します。"
+                                "24時間値を初動の主要観測、"
+                                "7日値を補助観測にします。"
+                                f"{uncertainty}"
+                                "データ不足の間は判断を保留します。"
+                            ),
+                        }
+                    )
+                )
+        self.assertTrue(
+            research.validate_publication_timing_script(
+                {
+                    "title": "配信タイミングの検証",
+                    "description": "複数動画の比較です。",
+                    "narration": (
+                        "配信タイミングA/Bを各3本ずつ比較します。"
+                        "24時間値を初動の主要観測、7日値を補助観測にします。"
+                        "長期的な影響は分かっていません。"
+                        "長期的な再生数の推移を分析していきます。"
+                        "データ不足の間は判断を保留します。"
+                    ),
+                }
+            )
+        )
+        for safe_conclusion in (
+            "夜が最適かは判断できません。",
+            "夜が最適かは、判断できません。",
+            "夜が最適ではありません。",
+            "午前9時がベストとは言えません。",
+            "夜がベストタイミングではありません。",
+            "夜が王道の時間帯でしょうか。",
+            "最適時刻は午前9時ではありません。",
+            "夜が最適でなく朝が候補です。",
+            "最適時刻は午前9時ではなくまだ不明です。",
+            "長期的な影響は分かっていませんが、24時間の初動には影響し得ます。",
+            "公開時刻は初動に影響する可能性があります。",
+            "夜に公開すると再生数が伸びる可能性があります。",
+            "火曜日に公開すると再生数が伸びる可能性があります。",
+            "夜が最適でしょうか。",
+            "夜が最適だとは言えません。",
+            "7日後も再生数が伸びているか確認します。",
+            "7日後の再生数の伸びを補助観測として記録します。",
+            "公開時刻を夜にすると再生数は伸びません。",
+            "7日後の再生数は伸びません。",
+            "タイトルの文字数は短いのが最適です。",
+            "動画の長さは10分が最適な時間です。",
+            "ライブ配信の長さは30分が最適な時間です。",
+            "将来的な再生数向上を目指します。",
+            "将来的な成果につなげることを目指します。",
+            "動画の長さは30分が最適な時間で、午後に撮影します。",
+            "ライブ配信の長さは30分が最適な時間で、火曜日に収録します。",
+            "サムネイル変更は公開後がベストタイミングです。",
+            "最適な公開時刻を火曜日とするとは限らない。",
+            "ベストな時間帯を午前9時とするのでしょうか。",
+            "最適な公開時刻を火曜日としますか。",
+            "最適時刻を決めるのでしょうか。",
+            "最適時刻を決定するのですか。",
+            "最適時刻を決定することはできません。",
+            "火曜日を最適な公開時刻とする必要はありません。",
+            "将来的に再生数を改善することを目指します。",
+            "長期的な総再生時間を向上することを目指します。",
+            "将来的な再生数が増えることを目標とします。",
+            "長期的な効果が高まることを目指します。",
+            "最適時刻を決定することができません。",
+            "火曜日を最適な公開時刻とする必要がありません。",
+            "将来的に価値ある成果を目指します。",
+            "長期的に実りある成果を目指します。",
+            "将来的な成果につながる改善を目指します。",
+            "長期的にやりがいのある成果を目指します。",
+            "将来的な視聴回数の向上を目指します。",
+            "長期的なパフォーマンス改善を目指します。",
+            "中長期的な指標改善を目標とします。",
+            "将来的には再生数向上を目指します。",
+            "長期では成果改善を目指します。",
+            "将来的な再生数と総再生時間の向上を目指します。",
+            "この検証で将来的な再生数向上を目指します。",
+            "将来的なチャンネルの再生数向上を目指します。",
+        ):
+            with self.subTest(safe_conclusion=safe_conclusion):
+                self.assertTrue(
+                    research.validate_publication_timing_script(
+                        {
+                            "title": "配信タイミングの検証",
+                            "description": "複数動画の比較です。",
+                            "narration": (
+                                "配信タイミングA/Bを各3本ずつ比較します。"
+                                "24時間値を初動の主要観測、"
+                                "7日値を補助観測にします。"
+                                "長期的な影響は分かっていません。"
+                                "データ不足の間は判断を保留します。"
+                                f"{safe_conclusion}"
+                            ),
+                        }
+                    )
+                )
+
+    def test_publication_timing_research_rejects_direct_and_reversed_claims(
+        self,
+    ) -> None:
+        safe_design = (
+            "公開時刻A/Bを各3本ずつ比較し、データ不足なら判断を保留します。"
+        )
+        payload = {
+            "topic": "YouTube動画の公開時刻を検証する",
+            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+            "publication_timing_experiment_design": safe_design,
+            "publication_timing_sample_scope": "multiple_comparable_uploads",
+            "publication_timing_conclusion_status": "insufficient_data",
+        }
+        for conclusion in (
+            "最適時刻は午前9時です。",
+            "午前9時がベストです。",
+            "火曜日が最適です。",
+            "毎週火曜がベストです。",
+            "最適な時間は午前9時です。",
+            "火曜日をベストとします。",
+            "最適な時間は火曜日です。",
+            "ベストな時間は午前9時です。",
+            "一番良い時間は夜です。",
+            "火曜日を最適な公開時刻とします。",
+            "午前9時をベストな時間帯とします。",
+            "夜を一番良いタイミングとします。",
+            "火曜日を最適な公開時刻とする。",
+            "午前9時をベストな時間帯とする。",
+            "最適時刻を決定する。",
+            "最適な公開時刻を特定する。",
+            "最適な公開時刻を火曜日とします。",
+            "ベストな時間帯を午前9時とします。",
+            "一番良いタイミングを夜にします。",
+            "公開時刻の長期効果は確実です。",
+            "平日の夜が最適です。",
+            "夜がベストです。",
+            "夜がベストタイミングです。",
+            "夜が一番いいタイミングです。",
+            "夜が王道の時間帯です。",
+            "長期的な再生数は伸びます。",
+            "長期的な総再生時間は増えます。",
+            "将来的な再生数は伸びます。",
+            "火曜日に公開すると再生数が伸びます。",
+            "将来的な再生数は伸びますので、登録者1000人を目指します。",
+            "将来的な再生数は伸びると見て、さらなる向上を目指します。",
+            "中長期的な効果は確実で、改善に取り組みます。",
+            "将来的な再生数は伸び、成果向上を目指します。",
+            "将来的な効果は確実で、再生数向上を目指します。",
+            "中長期的な総再生時間は増え、成果改善を目標とします。",
+            "将来的な再生数は伸びて、成果向上を目指します。",
+            "中長期的な総再生時間は改善して、成果向上を目指します。",
+            "長期的な効果があり、成果向上を目指します。",
+            "将来的な再生数も伸びて、成果向上を目指します。",
+            "将来的な再生数だけは伸びて、成果向上を目指します。",
+            "長期的な効果については明らかで、成果向上を目指します。",
+            "将来的な再生数の増加が見込まれ、成果向上を目指します。",
+            "長期的な効果が期待され、成果改善を目指します。",
+            "将来的な再生数は増加傾向となり、成果向上を目指します。",
+            "将来的な再生数の増加を期待し成果向上を目指します。",
+            "将来的な再生数の増加を見込んで成果向上を目指します。",
+            "長期的な効果を確信し成果改善を目指します。",
+            "夜が最適ですが最適時刻は決めません。",
+            "最適時刻は決めませんが夜が最適です。",
+            "ただし長期的な再生数は上がります。",
+            "ただし長期的な総再生時間は増加します。",
+            "最適時刻は午前9時で理由は不明です。",
+            "平日の夜が最適で根拠は分かっていません。",
+            "夜こそ最適です。",
+            "夜をベストとします。",
+            "長期的な再生数は伸びると分析します。",
+            "長期的な総再生時間は増えたと記録します。",
+            "夜が最適と言えます。",
+            "夜が最適となります。",
+            "長期的な再生数を分析すると伸びます。",
+            "長期的な再生数の推移を分析し、伸びると判断します。",
+            "最適時刻は午後6時になります。",
+            "最適時刻は午前9時ではなく午後6時です。",
+            "夜に公開するのが一番です。",
+            "長期的な影響は分かっていませんが、再生数は伸びます。",
+            "長期的な再生数は不明ですが、増えています。",
+            "公開時刻を夜にすると再生数が伸びます。",
+            "公開時刻を夜にすると7日後の再生数が伸びます。",
+            "夜に公開するのが一番良いです。",
+            "夜に公開すると再生数が伸びます。",
+            "再生数は公開時刻を夜にすると伸びます。",
+            "タイトルには改善の可能性があり、公開時刻を夜にすると再生数が伸びます。",
+            "長期的な影響は不明ですが、24時間の初動には影響し得て、7日後の再生数は伸びます。",
+            "公開時間を夜にすると再生数が伸びます。",
+            "夜に公開すれば再生数が伸びます。",
+            "夜に公開することで再生数が伸びます。",
+            "動画を夜にアップロードすると再生数が伸びます。",
+            "動画を夜に上げるのが一番です。",
+            "最適時刻を決めることはできないとは言えません。",
+            "最適時刻を決めることはできないとは限りません。",
+        ):
+            with self.subTest(conclusion=conclusion):
+                payload["publication_timing_experiment_design"] = (
+                    safe_design + conclusion
+                )
+                with self.assertRaises(
+                    research.PublicationTimingPolicyViolation
+                ):
+                    research.validate_publication_timing_research(payload)
+
+        for safe_conclusion in (
+            "夜が最適かは判断できません",
+            "夜が最適かは、判断できません",
+            "夜が最適ではありません",
+            "午前9時がベストとは言えません",
+            "夜がベストタイミングではありません",
+            "夜が王道の時間帯でしょうか",
+            "最適時刻は午前9時ではありません",
+            "夜が最適でなく朝が候補です",
+            "最適時刻は午前9時ではなくまだ不明です",
+            "長期的な影響は分かっていませんが、24時間の初動には影響し得ます",
+            "公開時刻は初動に影響する可能性があります",
+            "夜に公開すると再生数が伸びる可能性があります",
+            "火曜日に公開すると再生数が伸びる可能性があります",
+            "夜が最適でしょうか",
+            "夜が最適だとは言えません",
+            "7日後も再生数が伸びているか確認します",
+            "7日後の再生数の伸びを補助観測として記録します",
+            "公開時刻を夜にすると再生数は伸びません",
+            "7日後の再生数は伸びません",
+            "。タイトルの文字数は短いのが最適です",
+            "。動画の長さは10分が最適な時間です",
+            "。ライブ配信の長さは30分が最適な時間です",
+            "。将来的な再生数向上を目指します",
+            "。将来的な成果につなげることを目指します",
+            "。動画の長さは30分が最適な時間で、午後に撮影します",
+            "。ライブ配信の長さは30分が最適な時間で、火曜日に収録します",
+            "。サムネイル変更は公開後がベストタイミングです",
+            "。最適な公開時刻を火曜日とするとは限らない",
+            "。ベストな時間帯を午前9時とするのでしょうか",
+            "。最適な公開時刻を火曜日としますか",
+            "。最適時刻を決めるのでしょうか",
+            "。最適時刻を決定するのですか",
+            "。最適時刻を決定することはできません",
+            "。火曜日を最適な公開時刻とする必要はありません",
+            "。将来的に再生数を改善することを目指します",
+            "。長期的な総再生時間を向上することを目指します",
+            "。将来的な再生数が増えることを目標とします",
+            "。長期的な効果が高まることを目指します",
+            "。最適時刻を決定することができません",
+            "。火曜日を最適な公開時刻とする必要がありません",
+            "。将来的に価値ある成果を目指します",
+            "。長期的に実りある成果を目指します",
+            "。将来的な成果につながる改善を目指します",
+            "。長期的にやりがいのある成果を目指します",
+            "。将来的な視聴回数の向上を目指します",
+            "。長期的なパフォーマンス改善を目指します",
+            "。中長期的な指標改善を目標とします",
+            "。将来的には再生数向上を目指します",
+            "。長期では成果改善を目指します",
+            "。将来的な再生数と総再生時間の向上を目指します",
+            "。この検証で将来的な再生数向上を目指します",
+            "。将来的なチャンネルの再生数向上を目指します",
+        ):
+            with self.subTest(safe_conclusion=safe_conclusion):
+                payload["publication_timing_experiment_design"] = (
+                    "公開時刻A/Bを各3本ずつ比較し、データ不足なので"
+                    + safe_conclusion
+                )
+                self.assertTrue(
+                    research.validate_publication_timing_research(payload)
+                )
+
+        payload["publication_timing_experiment_design"] = (
+            "公開時刻A/Bを各3本ずつ比較し、データ不足なら保留します。"
+            "長期的な再生数の推移を分析していきます"
+        )
+        self.assertTrue(
+            research.validate_publication_timing_research(payload)
+        )
+
+    def test_publication_timing_script_requires_local_long_term_uncertainty(
+        self,
+    ) -> None:
+        script = {
+            "title": "公開時刻の検証",
+            "description": "複数動画の比較です。",
+            "narration": (
+                "公開時刻A/Bを各3本ずつ比較します。"
+                "24時間値を初動の主要観測、7日値を補助観測にします。"
+                "原因の詳細は不明ですが、公開時刻の長期効果は確実です。"
+                "データ不足の間は判断を保留します。"
+            ),
+        }
+        with self.assertRaises(research.PublicationTimingPolicyViolation):
+            research.validate_publication_timing_script(script)
+
+    def test_publication_timing_script_requires_metric_role_relationships(
+        self,
+    ) -> None:
+        unrelated_keywords = {
+            "title": "公開時刻の検証",
+            "description": "複数動画の比較です。",
+            "narration": (
+                "公開時刻A/Bを各3本ずつ比較します。"
+                "24時間ごとに通知します。初動ではタイトルを確認します。"
+                "7日間試します。補助資料も参照します。"
+                "長期的な影響は分かっていません。"
+                "データ不足の間は判断を保留します。"
+            ),
+        }
+        with self.assertRaisesRegex(
+            research.PublicationTimingPolicyViolation,
+            "24時間値を初動の主要観測.*7日値を補助観測",
+        ):
+            research.validate_publication_timing_script(unrelated_keywords)
+
+        self.assertTrue(
+            research.validate_publication_timing_script(
+                {
+                    "title": "公開時刻の検証",
+                    "description": "複数動画の比較です。",
+                    "narration": (
+                        "公開時刻A/Bを各3本ずつ比較します。"
+                        "公開後24時間の視聴回数を初動として記録します。"
+                        "公開7日後の視聴回数を補助指標として確認します。"
+                        "長期的な影響は分かっていません。"
+                        "データ不足の間は判断を保留します。"
+                    ),
+                }
+            )
+        )
+
+    def test_publication_timing_research_keeps_field_boundaries(self) -> None:
+        payload = {
+            "topic": "公開時刻の検証で夜が",
+            "angle": "最適ですとは言えません",
+            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+            "publication_timing_experiment_design": (
+                "公開時刻A/Bを各3本ずつ比較し、"
+                "データ不足なら結論を保留します"
+            ),
+            "publication_timing_sample_scope": "multiple_comparable_uploads",
+            "publication_timing_conclusion_status": "insufficient_data",
+        }
+
+        context = research._publication_timing_context(payload)
+        self.assertIn("夜が。最適", context)
+        self.assertTrue(
+            research.validate_publication_timing_research(payload)
+        )
+
+    def test_publication_timing_research_checks_nested_claims_and_observations(
+        self,
+    ) -> None:
+        payload = {
+            "topic": "YouTube動画の公開時刻を検証する",
+            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+            "publication_timing_experiment_design": (
+                "公開時刻A/Bを各3本ずつ比較し、"
+                "データ不足なら結論を保留します"
+            ),
+            "publication_timing_sample_scope": "multiple_comparable_uploads",
+            "publication_timing_conclusion_status": "insufficient_data",
+        }
+        nested_claims = (
+            ("facts", "claim", "公開時刻を夜にすると再生数が伸びます"),
+            ("examples", "observed", "動画を夜に出すと再生数が伸びます"),
+        )
+        for collection_key, text_key, unsafe_text in nested_claims:
+            with self.subTest(collection_key=collection_key):
+                candidate = dict(payload)
+                candidate[collection_key] = [{text_key: unsafe_text}]
+                with self.assertRaises(
+                    research.PublicationTimingPolicyViolation
+                ):
+                    research.validate_publication_timing_research(candidate)
+
+        payload["facts"] = [{"claim": "夜が"}, {"claim": "ベストですとは言えません"}]
+        context = research._publication_timing_context(payload)
+        self.assertIn("夜が。ベスト", context)
+        self.assertTrue(research.validate_publication_timing_research(payload))
+
+    def test_live_stream_duration_is_not_publication_timing(self) -> None:
+        payload = {
+            "topic": "ライブ配信時間と平均視聴時間の関係",
+            "viewer_action": "ライブ配信の尺を10分と20分で比較する",
+            "publication_timing_sample_scope": "not_applicable",
+            "publication_timing_conclusion_status": "not_applicable",
+        }
+        self.assertFalse(
+            research.validate_publication_timing_research(payload)
+        )
+        self.assertFalse(
+            research.validate_publication_timing_script(
+                {
+                    "title": "ライブ配信時間を見直す",
+                    "description": "配信尺と平均視聴時間の関係です。",
+                    "narration": "動画の長さを10分と20分で比較します。",
+                }
+            )
+        )
+
+    def test_natural_publish_time_wording_triggers_policy(self) -> None:
+        for wording in (
+            "動画を夜に出すと再生数が伸びる",
+            "動画を夜にアップロードすると再生数が伸びる",
+            "夜に動画を上げるのが一番です",
+        ):
+            with self.subTest(wording=wording):
+                payload = {
+                    "topic": wording,
+                    "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                }
+                with self.assertRaises(research.PublicationTimingPolicyViolation):
+                    research.validate_publication_timing_research(payload)
+
+                with self.assertRaises(research.PublicationTimingPolicyViolation):
+                    research.validate_publication_timing_script(
+                        {
+                            "title": wording,
+                            "description": "公開後の実績を確認します。",
+                            "narration": "次の一本で試します。",
+                        }
+                    )
+
+    def test_structured_state_triggers_script_guard_for_ambiguous_time_word(
+        self,
+    ) -> None:
+        research_data = {
+            "topic": "公開時間の検証",
+            "publication_timing_sample_scope": "multiple_comparable_uploads",
+            "publication_timing_conclusion_status": "insufficient_data",
+        }
+        script = {
+            "title": "公開時間の検証",
+            "description": "公開時間A/Bの比較です。",
+            "narration": (
+                "公開時間A/Bを各3本ずつ比較します。"
+                "24時間値を初動の主要観測、7日値を補助観測にします。"
+                "長期的な影響は分かっていません。"
+                "データ不足の間は判断を保留します。"
+            ),
+        }
+        self.assertTrue(
+            research.validate_publication_timing_script(script, research_data)
+        )
+        script["narration"] += "平日の夜が最適です。"
+        with self.assertRaises(research.PublicationTimingPolicyViolation):
+            research.validate_publication_timing_script(script, research_data)
+
+    def test_publication_timing_policy_error_survives_later_malformed_retry(
+        self,
+    ) -> None:
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["analytics"]
+        unsafe = json.dumps(
+            {
+                "topic": "配信タイミングの検証",
+                "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                "publication_timing_experiment_design": (
+                    "配信タイミングA/Bを各3本ずつ比較し、"
+                    "データ不足でも最適配信時間を決めます"
+                ),
+                "publication_timing_sample_scope": "multiple_comparable_uploads",
+                "publication_timing_conclusion_status": "insufficient_data",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/141805",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 2),
+            mock.patch.object(
+                research.llm,
+                "run_claude",
+                side_effect=[unsafe, "{malformed"],
+            ) as run_mock,
+        ):
+            with self.assertRaises(research.PublicationTimingPolicyViolation):
+                research.web_research(
+                    corner,
+                    [],
+                    spec,
+                    backend_override="claude",
+                    require_youtube_examples=False,
+                )
+
+        self.assertEqual(run_mock.call_count, 2)
+
+    def test_publication_timing_policy_applies_to_focus_text_research(self) -> None:
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["analytics"]
+        unsafe = json.dumps(
+            {
+                "topic": "公開時刻のファクトチェック",
+                "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                "publication_timing_experiment_design": (
+                    "公開時刻A/Bを各3本ずつ比較し、"
+                    "データ不足なら結論を保留します"
+                ),
+                "publication_timing_sample_scope": "multiple_comparable_uploads",
+                "publication_timing_conclusion_status": "insufficient_data",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/141805",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+            mock.patch.object(research.llm, "run_claude", return_value=unsafe),
+        ):
+            with self.assertRaises(research.PublicationTimingPolicyViolation):
+                research.web_research(
+                    corner,
+                    [],
+                    spec,
+                    backend_override="claude",
+                    focus_text="公開時刻を夜にすると再生数が伸びます",
+                    require_youtube_examples=False,
+                )
+
+    def test_non_timing_focus_text_is_not_rejected_by_timing_policy(self) -> None:
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["analytics"]
+        normal = json.dumps(
+            {
+                "topic": "視聴者維持率の確認",
+                "viewer_action": "YouTube Studioで視聴者維持率を確認する",
+                "publication_timing_experiment_design": "",
+                "publication_timing_sample_scope": "not_applicable",
+                "publication_timing_conclusion_status": "not_applicable",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/141805",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+            mock.patch.object(research.llm, "run_claude", return_value=normal),
+        ):
+            result = research.web_research(
+                corner,
+                [],
+                spec,
+                backend_override="claude",
+                focus_text="視聴者維持率の離脱点を確認します",
+                require_youtube_examples=False,
+            )
+
+        self.assertEqual(result["topic"], "視聴者維持率の確認")
+
+    def test_publication_timing_policy_retry_accepts_later_safe_result(self) -> None:
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["analytics"]
+
+        def result(design: str) -> str:
+            return json.dumps(
+                {
+                    "topic": "配信タイミングの検証",
+                    "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                    "publication_timing_experiment_design": design,
+                    "publication_timing_sample_scope": "multiple_comparable_uploads",
+                    "publication_timing_conclusion_status": "insufficient_data",
+                    "facts": [
+                        {
+                            "claim": "公式情報で確認済み",
+                            "source_url": "https://support.google.com/youtube/answer/141805",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        unsafe = result(
+            "配信タイミングA/Bを各3本ずつ比較し、最適配信時間を決めます"
+        )
+        safe = result(
+            "配信タイミングA/Bを各3本ずつ比較し、データ不足なら結論は保留します"
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 2),
+            mock.patch.object(
+                research.llm,
+                "run_claude",
+                side_effect=[unsafe, safe],
+            ) as run_mock,
+        ):
+            actual = research.web_research(
+                corner,
+                [],
+                spec,
+                backend_override="claude",
+                require_youtube_examples=False,
+            )
+
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(
+            actual["publication_timing_experiment_design"],
+            json.loads(safe)["publication_timing_experiment_design"],
+        )
+
+    def test_youtube_growth_publish_time_guard_reaches_research_prompt(self) -> None:
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["analytics"]
+        raw = json.dumps(
+            {
+                "topic": "公開時刻の検証",
+                "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+                "publication_timing_experiment_design": (
+                    "公開時刻A/Bを複数本で交互に比較し、データ不足の間は"
+                    "最適時刻を決めない"
+                ),
+                "publication_timing_sample_scope": "multiple_comparable_uploads",
+                "publication_timing_conclusion_status": "insufficient_data",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/141805",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+            mock.patch.object(research.llm, "run_claude", return_value=raw) as run_mock,
+        ):
+            result = research.web_research(
+                corner,
+                [],
+                spec,
+                backend_override="claude",
+                require_youtube_examples=False,
+            )
+
+        prompt = run_mock.call_args.args[0]
+        self.assertIsNotNone(result)
+        for rule in (
+            "1本だけの変更は予備観測",
+            "候補時間帯A/Bを複数本にわたり交互に比較",
+            "24時間値は初動の主要観測",
+            "7日値は初動差がその後どうなったかを見る補助値",
+            "insufficient_data",
+            "publication_timing_sample_scope",
+            "publication_timing_conclusion_status",
+            "publication_timing_experiment_design",
+            "取得できないCTR・維持率などの指標は推測で補いません",
+        ):
+            self.assertIn(rule, prompt)
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
             mock.patch.object(config, "RESEARCH_BACKEND", "opencode-go"),

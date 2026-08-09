@@ -1508,13 +1508,17 @@ def generate(
     topic_metadata_guard: Callable[[dict], None] | None = None,
     recent_openings: list[str] | None = None,
 ) -> dict:
+    from . import research as research_mod
+
+    publication_timing_policy = research_mod.publication_timing_policy_enabled(
+        spec,
+        corner,
+    )
     # 1) 前段リサーチ（issue #6）: 題材選定＋Web裏取り。失敗してもリサーチ無しで続行。
     research = None
     research_enabled = spec.pipeline_get("research", config.SCRIPT_RESEARCH)
     factcheck_enabled = spec.pipeline_get("factcheck", config.SCRIPT_FACTCHECK)
     if research_enabled:
-        from . import research as research_mod
-
         _log(f"前段リサーチ ({config.RESEARCH_BACKEND}+Web)…")
         try:
             research = research_mod.web_research(
@@ -1525,6 +1529,10 @@ def generate(
             )
             if research:
                 _log(f"題材: {research.get('topic', '')} / 裏取り事実 {len(research.get('facts', []))}件")
+        except research_mod.PublicationTimingPolicyViolation:
+            # Issue #160の違反は一過性のリサーチ障害ではない。research=Noneへ
+            # 劣化させると同じ危険な結論をドラフトで再生成できるためfail-closed。
+            raise
         except Exception as e:  # noqa: BLE001
             _log(f"リサーチ失敗→リサーチ無しで続行: {e}")
             research = None
@@ -1685,6 +1693,11 @@ def generate(
             )
         try:
             candidate = _validate(_extract_json(_dispatch(prompt, timeout=attempt_timeout)))
+            if publication_timing_policy:
+                research_mod.validate_publication_timing_script(
+                    candidate,
+                    research,
+                )
         except (ValueError, TimeoutError, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
             # JSON不良/必須キー不足（ValueError）だけでなく、執筆バックエンドのタイムアウト
             # (TimeoutExpired)・異常終了(RuntimeError)・ネットワーク失敗(OSError)も一過性とみなし
@@ -1769,8 +1782,6 @@ def generate(
         and config.FACTCHECK_BACKEND in {"opencode", "opencode_go"}
         and not research_enabled
     ):
-        from . import research as research_mod
-
         _log(f"ファクトチェック用リサーチ ({config.FACTCHECK_BACKEND}+Web)…")
         try:
             factcheck_research = research_mod.web_research(
@@ -1785,6 +1796,10 @@ def generate(
                 ),
                 require_youtube_examples=False,
             )
+        except research_mod.PublicationTimingPolicyViolation:
+            # 前段リサーチと同様、Issue #160 の違反は一過性障害として
+            # factcheck_research=None へ劣化させず、公開工程をfail-closedする。
+            raise
         except Exception as e:  # noqa: BLE001
             _log(f"ファクトチェック用リサーチ失敗→原文維持: {e}")
             factcheck_research = None
@@ -1810,6 +1825,10 @@ def generate(
                 raise
         except Exception as e:  # noqa: BLE001
             _log(f"ファクトチェック失敗→修正なしで続行: {e}")
+
+    if publication_timing_policy:
+        # ファクトチェックが安全な文言を再び断定へ変えた場合も公開前に止める。
+        research_mod.validate_publication_timing_script(script, research)
 
     script["_corner"] = corner.key
     script["_speaker"] = spec.voice_for(corner).speaker

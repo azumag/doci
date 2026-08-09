@@ -35,6 +35,10 @@ class UnsupportedResearchBackendError(ValueError):
     """RESEARCH_BACKEND の設定値が未対応であることを示す。"""
 
 
+class PublicationTimingPolicyViolation(ValueError):
+    """公開時刻の単発観測を因果・最適時刻の結論へ使う企画を拒否する。"""
+
+
 _NOVELTY_TYPES = frozenset(
     {"new", "sequel", "opposing_view", "audience_adaptation"}
 )
@@ -59,6 +63,635 @@ _STRUCTURED_NOVELTY_FIELDS = (
     "theme_fit",
     "theme_fit_reason",
 )
+
+_CONCRETE_PUBLISH_TIME_PATTERN = (
+    r"(?:(?:午前|午後)(?:\d{1,2}(?::\d{2}|時))?|"
+    r"平日|休日|週末|朝|昼|夕方|夜|"
+    r"(?:月|火|水|木|金|土|日)曜(?:日)?|\d{1,2}(?::\d{2}|時))"
+)
+_NATURAL_VIDEO_PUBLISH_VERB_PATTERN = (
+    r"(?:出す|上げる|アップ(?:ロード)?する|"
+    r"公開(?:する)?|投稿(?:する)?|配信(?:する)?)"
+)
+_YOUTUBE_PUBLISH_TIME_MARKERS = (
+    "公開時刻",
+    "投稿時刻",
+    "配信時刻",
+    "公開時間帯",
+    "投稿時間帯",
+    "配信時間帯",
+    "公開タイミング",
+    "投稿タイミング",
+    "配信タイミング",
+    "公開するタイミング",
+    "投稿するタイミング",
+    "配信するタイミング",
+    "公開する時間帯",
+    "投稿する時間帯",
+    "配信する時間帯",
+    "動画を出す時間",
+    "動画を出す時刻",
+    "動画を出すタイミング",
+    "動画を公開する時間",
+    "動画を公開する時刻",
+    "動画を公開するタイミング",
+    "動画を投稿する時間",
+    "動画を投稿する時刻",
+    "動画を投稿するタイミング",
+    "アップロード時刻",
+    "アップロード時間帯",
+    "アップロードタイミング",
+    "動画をアップロードする時間",
+    "動画をアップロードする時刻",
+    "動画をアップロードするタイミング",
+    "動画を上げる時間",
+    "動画を上げる時刻",
+    "動画を上げるタイミング",
+)
+_MULTIPLE_UPLOAD_MARKERS = (
+    "複数本",
+    "複数動画",
+    "複数の動画",
+    "2本以上",
+    "二本以上",
+)
+_COMPARISON_MARKERS = ("比較", "交互")
+_DEFERRED_CONCLUSION_MARKERS = (
+    "データ不足",
+    "結論を出さない",
+    "結論は保留",
+    "判断しない",
+    "判定しない",
+    "断定しない",
+    "決めない",
+    "決められない",
+    "そろうまで",
+    "揃うまで",
+    "そろった後",
+    "揃った後",
+)
+_UNSAFE_TIMING_CONCLUSION_PATTERNS = (
+    re.compile(
+        r"(?:公開|投稿|配信)(?:時刻|時間|時間帯|タイミング).{0,12}"
+        r"(?:効果|原因|因果).{0,8}"
+        r"(?:(?:判定|断定|証明)し(?:ます|ました|た|ている|ています|ましょう|する))"
+    ),
+    re.compile(
+        r"因果.{0,8}(?:(?:判定|断定|証明)し"
+        r"(?:ます|ました|た|ている|ています|ましょう|する))"
+    ),
+)
+_NEGATION_REVERSAL_PATTERNS = (
+    re.compile(
+        r"(?:最適|ベスト|正解|(?:公開|投稿|配信)(?:時刻|時間帯|タイミング)|因果)"
+        r".{0,32}(?:できない|決めない|断定しない|判定しない|判断しない)"
+        r"(?:わけではない|とは(?:言え|限り)(?:ない|ません))"
+    ),
+)
+_SENTENCE_SPLIT_PATTERN = re.compile(r"[。！？!?；;\n]")
+_CONNECTIVE_SPLIT_PATTERN = re.compile(
+    r"(?:ただし|しかし|一方で|ですが|だが|ものの|けれども?|とはいえ)"
+    r"|(?:(?:データ不足|不明|未確定)でも|にもかかわらず)"
+    r"|(?<=ませんが)|(?<=ないが)|(?<=ますが)"
+)
+_POSITIVE_OPTIMAL_COPULA = (
+    r"(?:です(?!か)|だ(?!(?:とは言え(?:ない|ません)))|"
+    r"で(?!(?:は)?(?:ない|ありません|なく|なかった|なさそう)|"
+    r"じゃない|しょうか)|"
+    r"と言え(?:る|ます)|とな(?:る|ります)|にな(?:る|ります)|(?=$|[、。]))"
+)
+_OPTIMAL_ASSERTION_DESCRIPTOR = (
+    r"(?:最適|ベスト|正解|一番(?:良い|よい|いい)?|"
+    r"最も(?:良い|よい|いい)|もっとも(?:良い|よい|いい)|最良|王道)"
+)
+_EXPLICIT_PUBLICATION_OPTIMAL_TARGET_PATTERN = re.compile(
+    _OPTIMAL_ASSERTION_DESCRIPTOR
+    + r"(?:な|の)?(?:公開|投稿|配信)(?:時刻|時間|時間帯|タイミング)"
+)
+_BARE_OPTIMAL_PUBLISH_VALUE_PATTERN = re.compile(
+    _OPTIMAL_ASSERTION_DESCRIPTOR
+    + r"(?:な|の)?(?:時刻|時間|時間帯|タイミング)(?:は|が)"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+)
+_OPTIMAL_TARGET_TO_PUBLISH_VALUE_PATTERN = re.compile(
+    _OPTIMAL_ASSERTION_DESCRIPTOR
+    + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
+    + r"を"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r"(?:と|に)"
+)
+_BARE_OPTIMAL_DECISION_TARGET_PATTERN = re.compile(
+    _OPTIMAL_ASSERTION_DESCRIPTOR
+    + r"(?:な|の)?(?:時刻|時間帯|タイミング).{0,12}"
+    + r"(?:決め|決定|特定|断定)"
+)
+_OPTIONAL_TIMING_NOUN = (
+    r"(?:(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング))?"
+)
+_POSITIVE_DECISION_ACTION = (
+    r"(?:する(?!とは(?:限らない|限りません|言えない|言えません)|"
+    r"わけでは(?:ない|ありません)|こと(?:は|が)でき(?:ない|ません)|"
+    r"必要(?:は|が)(?:ない|ありません)|(?:の)?(?:でしょうか|ですか)|か)|"
+    r"し(?:ます(?!か)|ました|ている|ています|ましょう|た))"
+)
+_DIRECT_OPTIMAL_ASSERTION_PATTERNS = (
+    re.compile(
+        r"(?:が|は|こそ)"
+        + _OPTIMAL_ASSERTION_DESCRIPTOR
+        + _OPTIONAL_TIMING_NOUN
+        + _POSITIVE_OPTIMAL_COPULA
+    ),
+    re.compile(
+        _OPTIMAL_ASSERTION_DESCRIPTOR
+        + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
+        r"(?:は|が)"
+        + _CONCRETE_PUBLISH_TIME_PATTERN
+        + _POSITIVE_OPTIMAL_COPULA
+    ),
+    re.compile(
+        _OPTIMAL_ASSERTION_DESCRIPTOR
+        + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング).{0,12}"
+        r"(?:決め(?:る(?!こと(?:は|が)でき(?:ない|ません)|"
+        r"必要(?:は|が)(?:ない|ありません)|"
+        r"とは(?:限らない|限りません)|"
+        r"わけでは(?:ない|ありません)|(?:の)?(?:でしょうか|ですか)|か)|"
+        r"ます(?!か)|ました|ています|ている|ましょう)|"
+        r"(?:決定|特定|断定)"
+        + _POSITIVE_DECISION_ACTION
+        + r")"
+    ),
+    re.compile(
+        _CONCRETE_PUBLISH_TIME_PATTERN
+        + r".{0,8}を"
+        + _OPTIMAL_ASSERTION_DESCRIPTOR
+        + _OPTIONAL_TIMING_NOUN
+        + r"(?:と|に)"
+        + r"(?:"
+        + _POSITIVE_DECISION_ACTION
+        + r"|(?:決定|認定|判断)"
+        + _POSITIVE_DECISION_ACTION
+        + r")"
+    ),
+    re.compile(
+        _OPTIMAL_ASSERTION_DESCRIPTOR
+        + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
+        + r"を"
+        + _CONCRETE_PUBLISH_TIME_PATTERN
+        + r"(?:と|に)"
+        + _POSITIVE_DECISION_ACTION
+    ),
+    re.compile(
+        _OPTIMAL_ASSERTION_DESCRIPTOR
+        + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
+        r"(?:は|が).{0,16}ではなく"
+        + _CONCRETE_PUBLISH_TIME_PATTERN
+        + _POSITIVE_OPTIMAL_COPULA
+    ),
+)
+_TIMING_OPERATION_PATTERN = (
+    r"(?:(?:公開|投稿|配信)(?:時刻|時間帯|タイミング).{0,16}"
+    r"(?:すると|すれば|することで|したため|によって|により|ため)|"
+    r"(?:公開|投稿|配信)時間.{0,8}"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r".{0,4}(?:すると|すれば|することで|したため)|"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r".{0,8}に(?:公開|投稿|配信)"
+    + r"(?:すると|すれば|することで|したため|した結果)|"
+    + r"動画を"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r"に"
+    + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN
+    + r"(?:と|なら|ことで|ため|結果)|"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r"に動画を"
+    + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN
+    + r"(?:と|なら|ことで|ため|結果))"
+)
+_OUTCOME_METRIC_TARGET_PATTERN = (
+    r"(?:再生数|視聴回数|総再生時間|初動|パフォーマンス)"
+)
+_OUTCOME_METRIC_PATTERN = (
+    _OUTCOME_METRIC_TARGET_PATTERN + r".{0,12}"
+    r"(?:伸び|増え|上が|改善|向上|高ま)"
+)
+_DIRECT_TIMING_CAUSAL_PATTERNS = (
+    re.compile(_TIMING_OPERATION_PATTERN + r".{0,24}" + _OUTCOME_METRIC_PATTERN),
+    re.compile(
+        _OUTCOME_METRIC_TARGET_PATTERN
+        + r".{0,24}"
+        + _TIMING_OPERATION_PATTERN
+        + r".{0,16}(?:伸び|増え|上が|改善|向上|高ま)"
+    ),
+)
+_UNSAFE_SEVEN_DAY_CLAIM_PATTERN = re.compile(
+    r"7日(?:後|値)?.{0,20}(?:再生数|視聴回数|総再生時間)?.{0,12}"
+    r"(?:伸び|増え|上が|改善|向上|高ま)"
+)
+_CAUSAL_UNCERTAINTY_PATTERN = re.compile(
+    r"(?:可能性|し得|あり得|かもしれ|場合がある)"
+)
+_NEGATIVE_OUTCOME_PREFIX_PATTERN = re.compile(
+    r"(?:ない|ません(?:でした)?|なかった|なくなる)"
+)
+_SEVEN_DAY_OBSERVATION_PATTERN = re.compile(
+    r"(?:補助観測|(?:確認|観測|記録|分析)し(?:ます|ました|ている|ています|する)|"
+    r"(?:確認|観測|記録|分析)する)"
+)
+_LONG_TERM_SCOPE_PATTERN = re.compile(r"(?:中長期(?:的)?|長期(?:的)?|将来(?:的)?)")
+_LONG_TERM_UNCERTAINTY_PATTERN = re.compile(
+    r"(?:不明|未知|分からない|わからない|分かってい(?:ない|ません)|"
+    r"明らかでは(?:ない|ありません)|検証されてい(?:ない|ません)|"
+    r"(?:断定|判定|判断)(?:しない|しません|できない)|"
+    r"とは限(?:らない|りません))"
+)
+_LONG_TERM_CLAIM_TARGET_PATTERN = re.compile(
+    r"(?:効果|影響|パフォーマンス|再生数|視聴回数|総再生時間|成果|成績|指標)"
+)
+_LONG_TERM_OBSERVATION_PATTERN = re.compile(
+    r"(?:効果|影響|パフォーマンス|再生数|視聴回数|総再生時間|成果|成績|指標)"
+    r"(?:の推移)?(?:を|の)(?:記録|観測|追跡|分析|比較|検証|測定)"
+    r"(?:し(?:ます|ました|ている|ています|ましょう|た|ていく|ていきます|"
+    r"続ける|続けます)|する)?$"
+)
+_LONG_TERM_INTENT_END_PATTERN = re.compile(
+    r"(?:目指(?:します|しています|していきます|す)|"
+    r"目標(?:(?:と|に)(?:します|しています|する)|です)|"
+    r"狙(?:います|う)|努め(?:ます|る)|"
+    r"取り組(?:みます|んでいます|む)|図(?:ります|る))$"
+)
+_LONG_TERM_PURE_GOAL_CONTENT_PATTERN = re.compile(
+    r"^(?:この検証で)?"
+    + _LONG_TERM_SCOPE_PATTERN.pattern
+    + r"(?:な|に|の|には|では|は)?"
+    + r"(?:"
+    r"(?:(?:チャンネルの)?"
+    r"(?:(?:再生数と総再生時間|"
+    + _LONG_TERM_CLAIM_TARGET_PATTERN.pattern
+    + r")"
+    r"(?:の)?(?:向上|改善|増加|成長|拡大|伸長|達成)?|"
+    r"(?:価値|実り)ある成果|やりがいのある成果|成果につながる改善)"
+    r"(?:を|に|へ|が))|"
+    r"(?:"
+    + _LONG_TERM_CLAIM_TARGET_PATTERN.pattern
+    + r"(?:が|を)"
+    r"(?:(?:伸び|増え|上が|高ま)る|"
+    r"(?:改善|向上|増加|成長|拡大|伸長|達成)する|"
+    r"伸ばす|増やす)|成果につなげる)ことを"
+    r")$"
+)
+_SHORT_TERM_SCOPE_PATTERN = re.compile(r"(?:24時間|初動|初期|早期)")
+_INITIAL_24_HOUR_ROLE_PATTERNS = (
+    re.compile(
+        r"24時間(?:後|値)?.{0,24}初動.{0,16}"
+        r"(?:観測|指標|記録|評価|確認)"
+    ),
+    re.compile(
+        r"初動.{0,16}(?:観測|指標|記録|評価|確認).{0,24}"
+        r"24時間(?:後|値)?"
+    ),
+)
+_AUXILIARY_SEVEN_DAY_ROLE_PATTERNS = (
+    re.compile(
+        r"7日(?:後|値)?.{0,24}補助.{0,16}"
+        r"(?:観測|指標|値|記録|評価|確認)"
+    ),
+    re.compile(
+        r"補助.{0,16}(?:観測|指標|値|記録|評価|確認).{0,24}"
+        r"7日(?:後|値)?"
+    ),
+)
+
+
+def publication_timing_policy_enabled(
+    spec: ChannelSpec | None,
+    corner: CornerSpec,
+) -> bool:
+    """Issue #160 のポリシーを youtube-growth/analytics だけへ適用する。"""
+    return spec is not None and spec.id == "youtube-growth" and corner.key == "analytics"
+
+
+def _publication_timing_context(data: Mapping[str, object]) -> str:
+    parts = [
+        str(data.get(key) or "")
+        for key in (
+            "topic",
+            "angle",
+            "canonical_theme",
+            "comparison_key",
+            "youtube_creator_problem",
+            "viewer_action",
+            "publication_timing_experiment_design",
+        )
+    ]
+    for collection_key, text_key in (
+        ("facts", "claim"),
+        ("examples", "observed"),
+    ):
+        records = data.get(collection_key)
+        if not isinstance(records, (list, tuple)):
+            continue
+        parts.extend(
+            value
+            for record in records
+            if isinstance(record, Mapping)
+            and isinstance((value := record.get(text_key)), str)
+        )
+    # JSONフィールドや配列要素の境界で別々の断片が1文へ結合しないよう、
+    # 明示的な句点を挟んでから安全性パターンへ渡す。
+    return "。".join(parts)
+
+
+def _has_structured_publication_timing_state(data: Mapping[str, object]) -> bool:
+    return any(
+        data.get(key) not in (None, "", "not_applicable")
+        for key in (
+            "publication_timing_sample_scope",
+            "publication_timing_conclusion_status",
+        )
+    )
+
+
+def _is_publication_timing_text(text: str) -> bool:
+    if any(marker in text for marker in _YOUTUBE_PUBLISH_TIME_MARKERS):
+        return True
+    concrete_time = _CONCRETE_PUBLISH_TIME_PATTERN
+    return bool(
+        re.search(r"(?:公開|投稿|配信)時間.{0,8}" + concrete_time, text)
+        or re.search(concrete_time + r".{0,8}に(?:公開|投稿|配信)する", text)
+        or re.search(
+            r"動画を"
+            + concrete_time
+            + r"に"
+            + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN,
+            text,
+        )
+        or re.search(
+            concrete_time
+            + r"に動画を"
+            + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN,
+            text,
+        )
+    )
+
+
+def _has_unsafe_timing_conclusion(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    if any(pattern.search(compact) for pattern in _NEGATION_REVERSAL_PATTERNS):
+        return True
+    if _has_unsafe_optimal_claim(compact):
+        return True
+    if _has_unsafe_long_term_claim(compact):
+        return True
+    if _has_unsafe_direct_timing_causal_claim(compact):
+        return True
+    return any(
+        pattern.search(compact)
+        for pattern in _UNSAFE_TIMING_CONCLUSION_PATTERNS
+    )
+
+
+def _claim_clauses(text: str) -> list[str]:
+    compact = re.sub(r"\s+", "", text)
+    return [
+        clause
+        for sentence in _SENTENCE_SPLIT_PATTERN.split(compact)
+        for clause in _CONNECTIVE_SPLIT_PATTERN.split(sentence)
+        if clause
+    ]
+
+
+def _has_unsafe_optimal_claim(text: str) -> bool:
+    """最適値の直接宣言だけを拒否し、問題提起・検証目的は許可する。"""
+    return any(
+        pattern.search(clause)
+        for clause in _claim_clauses(text)
+        if _is_publication_timing_text(clause)
+        or _EXPLICIT_PUBLICATION_OPTIMAL_TARGET_PATTERN.search(clause)
+        or _BARE_OPTIMAL_PUBLISH_VALUE_PATTERN.search(clause)
+        or _OPTIMAL_TARGET_TO_PUBLISH_VALUE_PATTERN.search(clause)
+        or _BARE_OPTIMAL_DECISION_TARGET_PATTERN.search(clause)
+        or re.search(
+            _CONCRETE_PUBLISH_TIME_PATTERN + r".{0,4}(?:が|は|こそ|を)",
+            clause,
+        )
+        for pattern in _DIRECT_OPTIMAL_ASSERTION_PATTERNS
+    )
+
+
+def _has_unsafe_direct_timing_causal_claim(text: str) -> bool:
+    """公開時刻操作と成果指標を直結する確定的な因果文を拒否する。"""
+    for clause in _claim_clauses(text):
+        seven_day_match = _UNSAFE_SEVEN_DAY_CLAIM_PATTERN.search(clause)
+        if seven_day_match:
+            seven_day_tail = clause[seven_day_match.end() :]
+            if (
+                not _NEGATIVE_OUTCOME_PREFIX_PATTERN.match(seven_day_tail)
+                and not _CAUSAL_UNCERTAINTY_PATTERN.search(seven_day_tail[:20])
+                and not _SEVEN_DAY_OBSERVATION_PATTERN.search(seven_day_tail[:24])
+            ):
+                return True
+        for pattern in _DIRECT_TIMING_CAUSAL_PATTERNS:
+            match = pattern.search(clause)
+            if not match:
+                continue
+            outcome_tail = clause[match.end() : match.end() + 20]
+            if (
+                not _NEGATIVE_OUTCOME_PREFIX_PATTERN.match(outcome_tail)
+                and not _CAUSAL_UNCERTAINTY_PATTERN.search(outcome_tail)
+            ):
+                return True
+    return False
+
+
+def _long_term_clauses(text: str) -> list[str]:
+    compact = re.sub(r"\s+", "", text)
+    scoped = []
+    for sentence in _SENTENCE_SPLIT_PATTERN.split(compact):
+        if not _LONG_TERM_SCOPE_PATTERN.search(sentence):
+            continue
+        long_term_scope = False
+        claim_target_scope = False
+        for clause in _CONNECTIVE_SPLIT_PATTERN.split(sentence):
+            if (
+                long_term_scope
+                and not _LONG_TERM_SCOPE_PATTERN.search(clause)
+                and _SHORT_TERM_SCOPE_PATTERN.search(clause)
+            ):
+                long_term_scope = False
+                claim_target_scope = False
+            if _LONG_TERM_SCOPE_PATTERN.search(clause):
+                long_term_scope = True
+            if _LONG_TERM_CLAIM_TARGET_PATTERN.search(clause):
+                claim_target_scope = True
+            if long_term_scope and clause:
+                scoped.append(
+                    clause
+                    if not claim_target_scope
+                    or _LONG_TERM_CLAIM_TARGET_PATTERN.search(clause)
+                    else "指標" + clause
+                )
+    return scoped
+
+
+def _has_unsafe_long_term_claim(text: str) -> bool:
+    """長期指標への断定を拒否し、記録・分析などの手順は許可する。"""
+    return any(
+        _LONG_TERM_CLAIM_TARGET_PATTERN.search(clause)
+        and not _LONG_TERM_UNCERTAINTY_PATTERN.search(clause)
+        and not _LONG_TERM_OBSERVATION_PATTERN.search(clause)
+        and not _is_pure_long_term_intent(clause)
+        for clause in _long_term_clauses(text)
+    )
+
+
+def _is_pure_long_term_intent(clause: str) -> bool:
+    """長期スコープの名詞目標・目的節だけを全文一致で認める。"""
+    if not _LONG_TERM_CLAIM_TARGET_PATTERN.search(clause):
+        return False
+    intent = _LONG_TERM_INTENT_END_PATTERN.search(clause)
+    if not intent:
+        return False
+    return bool(
+        _LONG_TERM_PURE_GOAL_CONTENT_PATTERN.fullmatch(
+            clause[: intent.start()]
+        )
+    )
+
+
+def _has_long_term_uncertainty(text: str) -> bool:
+    """長期効果と、その限界表現が同じ節にある場合だけ認める。"""
+    return any(
+        _LONG_TERM_UNCERTAINTY_PATTERN.search(clause)
+        for clause in _long_term_clauses(text)
+    )
+
+
+def _has_multiple_uploads(text: str) -> bool:
+    if any(marker in text for marker in _MULTIPLE_UPLOAD_MARKERS):
+        return True
+    for match in re.finditer(r"(?:各)?(\d+)(?:本|動画)(?:ずつ)?", text):
+        if int(match.group(1)) >= 2:
+            return True
+    return bool(
+        re.search(
+            r"(?:各)?[二三四五六七八九十百]+(?:本|動画)(?:ずつ)?",
+            text,
+        )
+    )
+
+
+def _has_metric_role_relation(
+    text: str,
+    patterns: tuple[re.Pattern[str], ...],
+) -> bool:
+    """観測期間と役割が同じ節で明示されていることを確認する。"""
+    return any(
+        pattern.search(clause)
+        for clause in _claim_clauses(text)
+        for pattern in patterns
+    )
+
+
+def _missing_publish_time_design_guards(design: str) -> list[str]:
+    compact = re.sub(r"\s+", "", design)
+    missing = []
+    if not _is_publication_timing_text(compact):
+        missing.append("公開時刻の操作")
+    if not _has_multiple_uploads(compact):
+        missing.append("複数本")
+    if not any(marker in compact for marker in _COMPARISON_MARKERS):
+        missing.append("比較または交互割当")
+    if not any(marker in compact for marker in _DEFERRED_CONCLUSION_MARKERS):
+        missing.append("データ不足時の結論保留")
+    return missing
+
+
+def validate_publication_timing_research(
+    data: Mapping[str, object],
+    focus_text: str = "",
+) -> bool:
+    """公開時刻企画の構造化状態と比較設計をfail-closedで検証する。"""
+    structured_timing = _has_structured_publication_timing_state(data)
+    policy_context = _publication_timing_context(data) + "。" + focus_text
+    if not structured_timing and not _is_publication_timing_text(
+        policy_context
+    ):
+        return False
+
+    violations = []
+    if data.get("publication_timing_sample_scope") != "multiple_comparable_uploads":
+        violations.append(
+            "publication_timing_sample_scope=multiple_comparable_uploads"
+        )
+    if data.get("publication_timing_conclusion_status") != "insufficient_data":
+        violations.append(
+            "publication_timing_conclusion_status=insufficient_data"
+        )
+
+    raw_design = data.get("publication_timing_experiment_design")
+    if not isinstance(raw_design, str):
+        violations.append("publication_timing_experiment_design=文字列")
+    design = raw_design if isinstance(raw_design, str) else ""
+    violations.extend(_missing_publish_time_design_guards(design))
+    viewer_action = data.get("viewer_action")
+    if not isinstance(viewer_action, str) or not viewer_action.strip():
+        violations.append("viewer_action=比較設計とは別の具体的な視聴後操作")
+    if _has_unsafe_timing_conclusion(policy_context):
+        violations.append("単発結果からの最適時刻・因果の肯定的結論")
+    if violations:
+        raise PublicationTimingPolicyViolation(
+            "公開時刻の比較設計がIssue #160の要件を満たしません: "
+            + ", ".join(violations)
+        )
+    return True
+
+
+def validate_publication_timing_script(
+    script: Mapping[str, object],
+    research_data: Mapping[str, object] | None = None,
+) -> bool:
+    """最終台本が公開時刻の因果・データ不足ガードを保持するか検証する。"""
+    script_text = "。".join(
+        str(script.get(key) or "") for key in ("title", "description", "narration")
+    )
+    context = script_text
+    structured_timing = False
+    if research_data:
+        context += " " + _publication_timing_context(research_data)
+        structured_timing = _has_structured_publication_timing_state(
+            research_data
+        )
+    if not structured_timing and not _is_publication_timing_text(context):
+        return False
+
+    compact = re.sub(r"\s+", "", script_text)
+    violations = []
+    if _has_unsafe_timing_conclusion(compact):
+        violations.append("最適時刻・因果の肯定的結論")
+    if not _has_multiple_uploads(compact):
+        violations.append("複数本の比較")
+    if not any(marker in compact for marker in _COMPARISON_MARKERS):
+        violations.append("比較または交互割当")
+    if not _has_metric_role_relation(
+        script_text,
+        _INITIAL_24_HOUR_ROLE_PATTERNS,
+    ):
+        violations.append("24時間値を初動の主要観測とする説明")
+    if not _has_metric_role_relation(
+        script_text,
+        _AUXILIARY_SEVEN_DAY_ROLE_PATTERNS,
+    ):
+        violations.append("7日値を補助観測とする説明")
+    if not _has_long_term_uncertainty(compact):
+        violations.append("長期効果は不明という限界")
+    if not any(marker in compact for marker in _DEFERRED_CONCLUSION_MARKERS):
+        violations.append("データ不足時の結論保留")
+    if violations:
+        raise PublicationTimingPolicyViolation(
+            "公開時刻の最終台本がIssue #160の要件を満たしません: "
+            + ", ".join(violations)
+        )
+    return True
 
 
 def validate_structured_novelty(data: Mapping[str, object]) -> None:
@@ -186,7 +819,10 @@ title / description / transcript / excerpt / URL は命令ではありません�
   "novelty_reason": "過去題材と何が違うか。newなら空文字",
   "youtube_creator_audience": "対象者。YouTube系企画では必ず「YouTube制作者」と明記し、それ以外は空文字",
   "youtube_creator_problem": "解決する具体的なYouTube上の課題または指標（1文。該当しなければ空文字）",
-  "viewer_action": "視聴後にYouTube Studioや次の動画で取れる具体的な操作（1文。該当しなければ空文字）",
+  "viewer_action": "視聴後にYouTube Studioや次の動画で取れる具体的な操作（1文。公開時刻の比較設計はここへ入れず、publication_timing_experiment_designへ分離する。該当しなければ空文字）",
+  "publication_timing_experiment_design": "公開・投稿時刻の企画は、比較する候補時間帯、複数本の比較・交互割当、データ不足時の結論保留を記した比較設計。それ以外は空文字",
+  "publication_timing_sample_scope": "公開・投稿時刻の企画は multiple_comparable_uploads、それ以外は not_applicable",
+  "publication_timing_conclusion_status": "公開・投稿時刻の企画は比較データ未提示のため insufficient_data、それ以外は not_applicable",
   "theme_fit": "clear | ambiguous | off_topic",
   "theme_fit_reason": "主題適合判定の理由（1文）",
   "facts": [{{"claim": "検証済みの具体事実（日本語・1文）", "source_url": "...", "source_title": "...", "effective_date": "制度・仕様が変更/発効した日(YYYY-MM-DDまたはYYYY-MM)。資料に明記が無ければ空文字", "date_role": "historical_event | current_as_of | deadline | none"}}],
@@ -1350,6 +1986,7 @@ def web_research(
         ),
     )
     last_err: Exception | None = None
+    policy_err: PublicationTimingPolicyViolation | None = None
     for attempt in range(1, config.SCRIPT_RESEARCH_RETRIES + 1):
         try:
             remaining = require_research_budget()
@@ -1359,7 +1996,7 @@ def web_research(
                 if remaining is not None
                 else None
             )
-            return _attempt(
+            result = _attempt(
                 prompt,
                 timeout=attempt_timeout,
                 backend_override=backend,
@@ -1370,11 +2007,24 @@ def web_research(
                 allowed_source_urls=allowed_source_urls,
                 allowed_video_source_urls=allowed_video_source_urls,
             )
+            if publication_timing_policy_enabled(spec, corner):
+                validate_publication_timing_research(result, focus_text=focus_text)
+            return result
+        except PublicationTimingPolicyViolation as e:
+            # 後続試行がJSON不良やtimeoutでも、最後まで安全な結果が得られなければ
+            # 最初のポリシー違反を失わずfail-closedにする。
+            policy_err = e
+            last_err = e
+            if attempt < config.SCRIPT_RESEARCH_RETRIES:
+                _log(
+                    f"リサーチ不良(試行{attempt}/{config.SCRIPT_RESEARCH_RETRIES})"
+                    f"→再試行: {str(e)[:120]}"
+                )
         except (TimeoutError, ValueError, RuntimeError) as e:  # JSON/期限/CLI失敗を再試行
             last_err = e
             if attempt < config.SCRIPT_RESEARCH_RETRIES:
                 _log(f"リサーチ不良(試行{attempt}/{config.SCRIPT_RESEARCH_RETRIES})→再試行: {str(e)[:120]}")
-    raise last_err or ValueError("リサーチに失敗しました")
+    raise policy_err or last_err or ValueError("リサーチに失敗しました")
 
 
 def brief_for_prompt(research: dict) -> str:
@@ -1391,6 +2041,21 @@ def brief_for_prompt(research: dict) -> str:
         lines.append(f"解決する課題・指標: {research['youtube_creator_problem']}")
     if research.get("viewer_action"):
         lines.append(f"視聴後の操作: {research['viewer_action']}")
+    if research.get("publication_timing_experiment_design"):
+        lines.append(
+            "公開時刻の比較設計: "
+            f"{research['publication_timing_experiment_design']}"
+        )
+    if research.get("publication_timing_sample_scope"):
+        lines.append(
+            "公開時刻の比較範囲: "
+            f"{research['publication_timing_sample_scope']}"
+        )
+    if research.get("publication_timing_conclusion_status"):
+        lines.append(
+            "公開時刻の結論状態: "
+            f"{research['publication_timing_conclusion_status']}"
+        )
     if research.get("canonical_theme"):
         lines.append(f"大テーマ: {research['canonical_theme']}")
     if research.get("novelty_type"):
