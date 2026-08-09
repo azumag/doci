@@ -273,7 +273,7 @@ def publication_timing_policy_enabled(
 
 
 def _publication_timing_context(data: Mapping[str, object]) -> str:
-    return "。".join(
+    parts = [
         str(data.get(key) or "")
         for key in (
             "topic",
@@ -284,7 +284,23 @@ def _publication_timing_context(data: Mapping[str, object]) -> str:
             "viewer_action",
             "publication_timing_experiment_design",
         )
-    )
+    ]
+    for collection_key, text_key in (
+        ("facts", "claim"),
+        ("examples", "observed"),
+    ):
+        records = data.get(collection_key)
+        if not isinstance(records, (list, tuple)):
+            continue
+        parts.extend(
+            value
+            for record in records
+            if isinstance(record, Mapping)
+            and isinstance((value := record.get(text_key)), str)
+        )
+    # JSONフィールドや配列要素の境界で別々の断片が1文へ結合しないよう、
+    # 明示的な句点を挟んでから安全性パターンへ渡す。
+    return "。".join(parts)
 
 
 def _has_structured_publication_timing_state(data: Mapping[str, object]) -> bool:

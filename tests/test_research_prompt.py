@@ -1209,6 +1209,37 @@ class ResearchPromptTest(unittest.TestCase):
             research.validate_publication_timing_research(payload)
         )
 
+    def test_publication_timing_research_checks_nested_claims_and_observations(
+        self,
+    ) -> None:
+        payload = {
+            "topic": "YouTube動画の公開時刻を検証する",
+            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
+            "publication_timing_experiment_design": (
+                "公開時刻A/Bを各3本ずつ比較し、"
+                "データ不足なら結論を保留します"
+            ),
+            "publication_timing_sample_scope": "multiple_comparable_uploads",
+            "publication_timing_conclusion_status": "insufficient_data",
+        }
+        nested_claims = (
+            ("facts", "claim", "公開時刻を夜にすると再生数が伸びます"),
+            ("examples", "observed", "動画を夜に出すと再生数が伸びます"),
+        )
+        for collection_key, text_key, unsafe_text in nested_claims:
+            with self.subTest(collection_key=collection_key):
+                candidate = dict(payload)
+                candidate[collection_key] = [{text_key: unsafe_text}]
+                with self.assertRaises(
+                    research.PublicationTimingPolicyViolation
+                ):
+                    research.validate_publication_timing_research(candidate)
+
+        payload["facts"] = [{"claim": "夜が"}, {"claim": "ベストですとは言えません"}]
+        context = research._publication_timing_context(payload)
+        self.assertIn("夜が。ベスト", context)
+        self.assertTrue(research.validate_publication_timing_research(payload))
+
     def test_live_stream_duration_is_not_publication_timing(self) -> None:
         payload = {
             "topic": "ライブ配信時間と平均視聴時間の関係",
