@@ -367,6 +367,45 @@ factcheck = false
 
         dispatch_mock.assert_not_called()
 
+    def test_publication_timing_factcheck_research_violation_fails_closed(
+        self,
+    ) -> None:
+        spec = channel.load("youtube-growth")
+        spec.pipeline.update(research=False, plan=False, factcheck=True)
+        raw = json.dumps(
+            {
+                "title": "YouTube動画の公開時刻を検証する",
+                "description": "公開時刻A/Bの比較手順です。",
+                "tags": [],
+                "narration": (
+                    "公開時刻A/Bは同じ形式の動画を複数本で交互に比較します。"
+                    "24時間値を初動の主要観測、7日値を補助観測にします。"
+                    "長期効果は不明で、データ不足の間は最適時刻を決めません。"
+                ),
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            },
+            ensure_ascii=False,
+        )
+        violation = research_mod.PublicationTimingPolicyViolation(
+            "unsafe publication timing factcheck research"
+        )
+        with (
+            patch.object(config, "FACTCHECK_BACKEND", "opencode_go"),
+            patch.object(config, "SCRIPT_FACTCHECK_RESEARCH", True),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+            patch("doci.research.web_research", side_effect=violation),
+            patch("doci.factcheck.verify_and_correct") as verify_mock,
+        ):
+            with self.assertRaises(research_mod.PublicationTimingPolicyViolation):
+                ai_text.generate(
+                    spec,
+                    spec.corners["analytics"],
+                    "2026-08-09",
+                    [],
+                )
+
+        verify_mock.assert_not_called()
+
     def test_publication_timing_draft_violation_retries_until_safe(self) -> None:
         spec = channel.load("youtube-growth")
         spec.pipeline.update(research=False, plan=False, factcheck=False)

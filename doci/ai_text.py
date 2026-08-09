@@ -1796,6 +1796,10 @@ def generate(
                 ),
                 require_youtube_examples=False,
             )
+        except research_mod.PublicationTimingPolicyViolation:
+            # 前段リサーチと同様、Issue #160 の違反は一過性障害として
+            # factcheck_research=None へ劣化させず、公開工程をfail-closedする。
+            raise
         except Exception as e:  # noqa: BLE001
             _log(f"ファクトチェック用リサーチ失敗→原文維持: {e}")
             factcheck_research = None
