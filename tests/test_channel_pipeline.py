@@ -15,6 +15,7 @@ from doci import (
     corners,
     history,
     publish,
+    research as research_mod,
     run_daily,
     topic_ledger,
     voicevox,
@@ -219,6 +220,38 @@ voice = "voice_b"
             f"{ideology_persona}\n\n{common_rules}\n\n{ideology_corner_body}\n",
         )
 
+    def test_youtube_growth_analytics_prompt_guards_publish_time_causality(self) -> None:
+        spec = channel.load("youtube-growth")
+        analytics_prompt = corners.build_prompt(
+            spec,
+            spec.corners["analytics"],
+            "2026-08-09",
+            [],
+        )
+
+        for rule in (
+            "1本だけの変更は予備観測",
+            "長期的なパフォーマンスへの影響は不明",
+            "候補時間帯A/Bを複数本にわたり交互に比較",
+            "動画ID、公開曜日、予定時刻、実公開時刻",
+            "タイトル・サムネイルの同時変更有無",
+            "24時間値は初動の主要観測",
+            "7日値は初動差がその後どうなったかを見る補助値",
+            "insufficient_data",
+            "最適時刻を決めません",
+        ):
+            self.assertIn(rule, analytics_prompt)
+
+        for key in ("shorts", "video"):
+            with self.subTest(corner=key):
+                prompt = corners.build_prompt(
+                    spec,
+                    spec.corners[key],
+                    "2026-08-09",
+                    [],
+                )
+                self.assertNotIn("候補時間帯A/Bを複数本にわたり交互に比較", prompt)
+
     def test_history_is_isolated_by_channel(self) -> None:
         alpha = self._make_spec("alpha")
         beta = self._make_spec("beta")
@@ -311,6 +344,103 @@ factcheck = false
 
         claude_mock.assert_not_called()
         self.assertLessEqual(dispatch_mock.call_args.kwargs["timeout"], 900)
+
+    def test_publication_timing_research_violation_does_not_fallback_to_draft(
+        self,
+    ) -> None:
+        spec = channel.load("youtube-growth")
+        spec.pipeline.update(research=True, plan=False, factcheck=False)
+        violation = research_mod.PublicationTimingPolicyViolation(
+            "unsafe publication timing research"
+        )
+        with (
+            patch("doci.research.web_research", side_effect=violation),
+            patch.object(ai_text, "_dispatch") as dispatch_mock,
+        ):
+            with self.assertRaises(research_mod.PublicationTimingPolicyViolation):
+                ai_text.generate(
+                    spec,
+                    spec.corners["analytics"],
+                    "2026-08-09",
+                    [],
+                )
+
+        dispatch_mock.assert_not_called()
+
+    def test_publication_timing_draft_violation_retries_until_safe(self) -> None:
+        spec = channel.load("youtube-growth")
+        spec.pipeline.update(research=False, plan=False, factcheck=False)
+
+        def raw(narration: str) -> str:
+            return json.dumps(
+                {
+                    "title": "YouTube動画の公開時刻を検証する",
+                    "description": "公開時刻A/Bの比較手順です。",
+                    "tags": [],
+                    "narration": narration,
+                    "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+                },
+                ensure_ascii=False,
+            )
+
+        unsafe = raw(
+            "次の動画だけ公開時刻を変え、7日後に最適時刻を決める。"
+        )
+        safe = raw(
+            "公開時刻A/Bは同じ形式の動画を複数本で交互に比較します。"
+            "24時間値を初動の主要観測、7日値を補助観測にします。"
+            "長期効果は不明で、データ不足の間は最適時刻を決めません。"
+        )
+        with (
+            patch.object(config, "SCRIPT_DRAFT_RETRIES", 2),
+            patch.object(ai_text, "_dispatch", side_effect=[unsafe, safe]) as dispatch_mock,
+        ):
+            script = ai_text.generate(
+                spec,
+                spec.corners["analytics"],
+                "2026-08-09",
+                [],
+            )
+
+        self.assertEqual(dispatch_mock.call_count, 2)
+        self.assertIn("データ不足", script["narration"])
+
+    def test_publication_timing_factcheck_cannot_reintroduce_unsafe_conclusion(
+        self,
+    ) -> None:
+        spec = channel.load("youtube-growth")
+        spec.pipeline.update(research=False, plan=False, factcheck=True)
+        raw = json.dumps(
+            {
+                "title": "YouTube動画の公開時刻を検証する",
+                "description": "公開時刻A/Bの比較手順です。",
+                "tags": [],
+                "narration": (
+                    "公開時刻A/Bは同じ形式の動画を複数本で交互に比較します。"
+                    "24時間値を初動の主要観測、7日値を補助観測にします。"
+                    "長期効果は不明で、データ不足の間は最適時刻を決めません。"
+                ),
+                "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
+            },
+            ensure_ascii=False,
+        )
+        corrected = {
+            "narration": "次の動画だけ公開時刻を変え、7日後に最適時刻を決める。",
+            "changed": True,
+            "issues": ["公開時刻"],
+        }
+        with (
+            patch.object(config, "SCRIPT_FACTCHECK_RESEARCH", False),
+            patch.object(ai_text, "_dispatch", return_value=raw),
+            patch("doci.factcheck.verify_and_correct", return_value=corrected),
+        ):
+            with self.assertRaises(research_mod.PublicationTimingPolicyViolation):
+                ai_text.generate(
+                    spec,
+                    spec.corners["analytics"],
+                    "2026-08-09",
+                    [],
+                )
 
     def test_generate_stops_retrying_after_draft_total_budget(self) -> None:
         spec = self._make_spec(
