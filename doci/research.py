@@ -65,7 +65,9 @@ _STRUCTURED_NOVELTY_FIELDS = (
 )
 
 _CONCRETE_PUBLISH_TIME_PATTERN = (
-    r"(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|\d{1,2}(?::\d{2}|時))"
+    r"(?:(?:午前|午後)(?:\d{1,2}(?::\d{2}|時))?|"
+    r"平日|休日|週末|朝|昼|夕方|夜|"
+    r"(?:月|火|水|木|金|土|日)曜(?:日)?|\d{1,2}(?::\d{2}|時))"
 )
 _NATURAL_VIDEO_PUBLISH_VERB_PATTERN = (
     r"(?:出す|上げる|アップ(?:ロード)?する|"
@@ -162,8 +164,35 @@ _OPTIMAL_ASSERTION_DESCRIPTOR = (
     r"(?:最適|ベスト|正解|一番(?:良い|よい|いい)?|"
     r"最も(?:良い|よい|いい)|もっとも(?:良い|よい|いい)|最良|王道)"
 )
+_EXPLICIT_PUBLICATION_OPTIMAL_TARGET_PATTERN = re.compile(
+    _OPTIMAL_ASSERTION_DESCRIPTOR
+    + r"(?:な|の)?(?:公開|投稿|配信)(?:時刻|時間|時間帯|タイミング)"
+)
+_BARE_OPTIMAL_PUBLISH_VALUE_PATTERN = re.compile(
+    _OPTIMAL_ASSERTION_DESCRIPTOR
+    + r"(?:な|の)?(?:時刻|時間|時間帯|タイミング)(?:は|が)"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+)
+_OPTIMAL_TARGET_TO_PUBLISH_VALUE_PATTERN = re.compile(
+    _OPTIMAL_ASSERTION_DESCRIPTOR
+    + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
+    + r"を"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r"(?:と|に)"
+)
+_BARE_OPTIMAL_DECISION_TARGET_PATTERN = re.compile(
+    _OPTIMAL_ASSERTION_DESCRIPTOR
+    + r"(?:な|の)?(?:時刻|時間帯|タイミング).{0,12}"
+    + r"(?:決め|決定|特定|断定)"
+)
 _OPTIONAL_TIMING_NOUN = (
     r"(?:(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング))?"
+)
+_POSITIVE_DECISION_ACTION = (
+    r"(?:する(?!とは(?:限らない|限りません|言えない|言えません)|"
+    r"わけでは(?:ない|ありません)|こと(?:は|が)でき(?:ない|ません)|"
+    r"必要(?:は|が)(?:ない|ありません)|(?:の)?(?:でしょうか|ですか)|か)|"
+    r"し(?:ます(?!か)|ました|ている|ています|ましょう|た))"
 )
 _DIRECT_OPTIMAL_ASSERTION_PATTERNS = (
     re.compile(
@@ -173,26 +202,49 @@ _DIRECT_OPTIMAL_ASSERTION_PATTERNS = (
         + _POSITIVE_OPTIMAL_COPULA
     ),
     re.compile(
-        r"最適(?:な)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
-        r"(?:は|が)(?:午前|午後)?(?:\d{1,2}(?::\d{2}|時)|"
-        r"平日|休日|週末|朝|昼|夕方|夜)"
+        _OPTIMAL_ASSERTION_DESCRIPTOR
+        + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
+        r"(?:は|が)"
+        + _CONCRETE_PUBLISH_TIME_PATTERN
         + _POSITIVE_OPTIMAL_COPULA
     ),
     re.compile(
-        r"最適(?:な)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング).{0,12}"
-        r"(?:決め(?:る(?!ことはできない)|ます|ました|ています|ている|ましょう)|"
-        r"(?:決定|特定|断定)し(?:ます|ました|た|ている|ています|ましょう|する))"
+        _OPTIMAL_ASSERTION_DESCRIPTOR
+        + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング).{0,12}"
+        r"(?:決め(?:る(?!こと(?:は|が)でき(?:ない|ません)|"
+        r"必要(?:は|が)(?:ない|ありません)|"
+        r"とは(?:限らない|限りません)|"
+        r"わけでは(?:ない|ありません)|(?:の)?(?:でしょうか|ですか)|か)|"
+        r"ます(?!か)|ました|ています|ている|ましょう)|"
+        r"(?:決定|特定|断定)"
+        + _POSITIVE_DECISION_ACTION
+        + r")"
     ),
     re.compile(
-        r"(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|\d{1,2}(?::\d{2}|時))"
-        r".{0,8}を(?:最適|ベスト|正解)(?:と|に)"
-        r"(?:し(?:ます|ました|ている|ています|ましょう|た|する)|"
-        r"(?:決定|認定|判断)し(?:ます|ました|た|する))"
+        _CONCRETE_PUBLISH_TIME_PATTERN
+        + r".{0,8}を"
+        + _OPTIMAL_ASSERTION_DESCRIPTOR
+        + _OPTIONAL_TIMING_NOUN
+        + r"(?:と|に)"
+        + r"(?:"
+        + _POSITIVE_DECISION_ACTION
+        + r"|(?:決定|認定|判断)"
+        + _POSITIVE_DECISION_ACTION
+        + r")"
     ),
     re.compile(
-        r"最適(?:な)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
+        _OPTIMAL_ASSERTION_DESCRIPTOR
+        + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
+        + r"を"
+        + _CONCRETE_PUBLISH_TIME_PATTERN
+        + r"(?:と|に)"
+        + _POSITIVE_DECISION_ACTION
+    ),
+    re.compile(
+        _OPTIMAL_ASSERTION_DESCRIPTOR
+        + r"(?:な|の)?(?:公開|投稿|配信)?(?:時刻|時間|時間帯|タイミング)"
         r"(?:は|が).{0,16}ではなく"
-        r"(?:午前|午後)?(?:\d{1,2}(?::\d{2}|時)|平日|休日|週末|朝|昼|夕方|夜)"
+        + _CONCRETE_PUBLISH_TIME_PATTERN
         + _POSITIVE_OPTIMAL_COPULA
     ),
 )
@@ -200,12 +252,12 @@ _TIMING_OPERATION_PATTERN = (
     r"(?:(?:公開|投稿|配信)(?:時刻|時間帯|タイミング).{0,16}"
     r"(?:すると|すれば|することで|したため|によって|により|ため)|"
     r"(?:公開|投稿|配信)時間.{0,8}"
-    r"(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|\d{1,2}(?::\d{2}|時))"
-    r".{0,4}(?:すると|すれば|することで|したため)|"
-    r"(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|\d{1,2}(?::\d{2}|時))"
-    r".{0,8}に(?:公開|投稿|配信)"
-    r"(?:すると|すれば|することで|したため|した結果)|"
-    r"動画を"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r".{0,4}(?:すると|すれば|することで|したため)|"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r".{0,8}に(?:公開|投稿|配信)"
+    + r"(?:すると|すれば|することで|したため|した結果)|"
+    + r"動画を"
     + _CONCRETE_PUBLISH_TIME_PATTERN
     + r"に"
     + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN
@@ -245,6 +297,7 @@ _SEVEN_DAY_OBSERVATION_PATTERN = re.compile(
     r"(?:補助観測|(?:確認|観測|記録|分析)し(?:ます|ました|ている|ています|する)|"
     r"(?:確認|観測|記録|分析)する)"
 )
+_LONG_TERM_SCOPE_PATTERN = re.compile(r"(?:中長期(?:的)?|長期(?:的)?|将来(?:的)?)")
 _LONG_TERM_UNCERTAINTY_PATTERN = re.compile(
     r"(?:不明|未知|分からない|わからない|分かってい(?:ない|ません)|"
     r"明らかでは(?:ない|ありません)|検証されてい(?:ない|ません)|"
@@ -259,6 +312,32 @@ _LONG_TERM_OBSERVATION_PATTERN = re.compile(
     r"(?:の推移)?(?:を|の)(?:記録|観測|追跡|分析|比較|検証|測定)"
     r"(?:し(?:ます|ました|ている|ています|ましょう|た|ていく|ていきます|"
     r"続ける|続けます)|する)?$"
+)
+_LONG_TERM_INTENT_END_PATTERN = re.compile(
+    r"(?:目指(?:します|しています|していきます|す)|"
+    r"目標(?:(?:と|に)(?:します|しています|する)|です)|"
+    r"狙(?:います|う)|努め(?:ます|る)|"
+    r"取り組(?:みます|んでいます|む)|図(?:ります|る))$"
+)
+_LONG_TERM_PURE_GOAL_CONTENT_PATTERN = re.compile(
+    r"^(?:この検証で)?"
+    + _LONG_TERM_SCOPE_PATTERN.pattern
+    + r"(?:な|に|の|には|では|は)?"
+    + r"(?:"
+    r"(?:(?:チャンネルの)?"
+    r"(?:(?:再生数と総再生時間|"
+    + _LONG_TERM_CLAIM_TARGET_PATTERN.pattern
+    + r")"
+    r"(?:の)?(?:向上|改善|増加|成長|拡大|伸長|達成)?|"
+    r"(?:価値|実り)ある成果|やりがいのある成果|成果につながる改善)"
+    r"(?:を|に|へ|が))|"
+    r"(?:"
+    + _LONG_TERM_CLAIM_TARGET_PATTERN.pattern
+    + r"(?:が|を)"
+    r"(?:(?:伸び|増え|上が|高ま)る|"
+    r"(?:改善|向上|増加|成長|拡大|伸長|達成)する|"
+    r"伸ばす|増やす)|成果につなげる)ことを"
+    r")$"
 )
 _SHORT_TERM_SCOPE_PATTERN = re.compile(r"(?:24時間|初動|初期|早期)")
 _INITIAL_24_HOUR_ROLE_PATTERNS = (
@@ -386,6 +465,15 @@ def _has_unsafe_optimal_claim(text: str) -> bool:
     return any(
         pattern.search(clause)
         for clause in _claim_clauses(text)
+        if _is_publication_timing_text(clause)
+        or _EXPLICIT_PUBLICATION_OPTIMAL_TARGET_PATTERN.search(clause)
+        or _BARE_OPTIMAL_PUBLISH_VALUE_PATTERN.search(clause)
+        or _OPTIMAL_TARGET_TO_PUBLISH_VALUE_PATTERN.search(clause)
+        or _BARE_OPTIMAL_DECISION_TARGET_PATTERN.search(clause)
+        or re.search(
+            _CONCRETE_PUBLISH_TIME_PATTERN + r".{0,4}(?:が|は|こそ|を)",
+            clause,
+        )
         for pattern in _DIRECT_OPTIMAL_ASSERTION_PATTERNS
     )
 
@@ -419,19 +507,19 @@ def _long_term_clauses(text: str) -> list[str]:
     compact = re.sub(r"\s+", "", text)
     scoped = []
     for sentence in _SENTENCE_SPLIT_PATTERN.split(compact):
-        if "長期" not in sentence:
+        if not _LONG_TERM_SCOPE_PATTERN.search(sentence):
             continue
         long_term_scope = False
         claim_target_scope = False
         for clause in _CONNECTIVE_SPLIT_PATTERN.split(sentence):
             if (
                 long_term_scope
-                and "長期" not in clause
+                and not _LONG_TERM_SCOPE_PATTERN.search(clause)
                 and _SHORT_TERM_SCOPE_PATTERN.search(clause)
             ):
                 long_term_scope = False
                 claim_target_scope = False
-            if "長期" in clause:
+            if _LONG_TERM_SCOPE_PATTERN.search(clause):
                 long_term_scope = True
             if _LONG_TERM_CLAIM_TARGET_PATTERN.search(clause):
                 claim_target_scope = True
@@ -451,7 +539,22 @@ def _has_unsafe_long_term_claim(text: str) -> bool:
         _LONG_TERM_CLAIM_TARGET_PATTERN.search(clause)
         and not _LONG_TERM_UNCERTAINTY_PATTERN.search(clause)
         and not _LONG_TERM_OBSERVATION_PATTERN.search(clause)
+        and not _is_pure_long_term_intent(clause)
         for clause in _long_term_clauses(text)
+    )
+
+
+def _is_pure_long_term_intent(clause: str) -> bool:
+    """長期スコープの名詞目標・目的節だけを全文一致で認める。"""
+    if not _LONG_TERM_CLAIM_TARGET_PATTERN.search(clause):
+        return False
+    intent = _LONG_TERM_INTENT_END_PATTERN.search(clause)
+    if not intent:
+        return False
+    return bool(
+        _LONG_TERM_PURE_GOAL_CONTENT_PATTERN.fullmatch(
+            clause[: intent.start()]
+        )
     )
 
 
