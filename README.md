@@ -317,6 +317,45 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
 evaluated → reported`（または`expired`）として追記される。全cornerが「新仮説なし
 かつ未報告の検証結果なし」ならissue作成自体をスキップする（無内容issueの防止）。
 
+### YouTube Studioのタイトル・サムネイルA/Bテスト（issue #151）
+
+通常動画のネイティブA/BテストはYouTube Studio上で人が開始する。dociはStudioを
+自動操作せず、登録する2〜3案を不変のマニフェストへ固定し、テスト開始と結果だけを
+`output/<channel>/youtube_ab_tests/<experiment-id>/`へ記録する。対象はdoci履歴で
+`published`、`tier=longform`、公開設定が`public`または`unlisted`と確認できる動画に
+限定する。Shorts・private動画・履歴外動画はfail-closedで拒否する。
+
+```bash
+# タイトルだけを2〜3案で比較する計画を作成
+python -m doci.youtube_ab_test plan \
+  --channel youtube-growth --video-id <video-id> --mode title \
+  --title "案A" --title "案B" --title "案C" \
+  --confirm-studio-eligible
+
+# サムネイルだけなら --mode thumbnail と --thumbnail を2〜3回指定。
+# 両方なら --mode both とし、同じ順序・同じ数の --title / --thumbnail を指定。
+
+# plan.mdと同じ案をパソコン版Studioへ登録した後だけrunningへ進める
+python -m doci.youtube_ab_test start \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --confirm-studio-started
+
+# Studioの総再生時間シェアによる結果を記録
+python -m doci.youtube_ab_test complete \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --outcome winner --winner B --confirm-no-manual-change \
+  --notes "次回企画で検証する仮説"
+```
+
+結果は`manifest.json`と`next_idea_memo.md`へ保存する。`performed_same`と
+`inconclusive`では勝者を記録せず、テスト中にタイトルまたはサムネイルを手動変更した
+場合は`--outcome stopped_manual_change`で`invalidated`にする。1動画に対する
+`planned`/`running`テストは同時に1件だけ許可し、結果を別動画へ自動適用しない。
+YouTube公式仕様どおり、判定指標はクリック率ではなく総再生時間シェアとして記録する。
+通常結果の記録には`--confirm-no-manual-change`が必須。計画全体のチェックサムと
+コピー済みサムネイルのSHA-256を`start`時に再検証し、計画後に案が変わっていれば
+Studioでの開始記録を拒否する。
+
 起動間隔は`StartInterval=86400`（毎日）でlaunchdジョブを登録し、Python側の
 `PERFORMANCE_REPORT_MIN_INTERVAL_HOURS`（既定72時間）ゲートで実質「3日に1回程度」
 に保つ。`StartInterval`を3日(259200秒)に直接設定しない理由は、スリープ/再起動で
@@ -393,6 +432,7 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/topic_ledger.py` 全チャネル共通の日次投稿枠・投稿状態管理（題材の跨ぎ照合はしない）
 - `doci/performance.py` 実績readbackと形式仮説の生成（自動適用はしない）
 - `doci/performance_report.py` 3日毎の実績レポートissueサイクル（issue #92、`run_daily`とは独立）
+- `doci/youtube_ab_test.py` YouTube Studioの通常動画A/Bテスト計画・結果記録（YouTube書込みなし）
 - `doci/feedback_issues.py` issueの重複防止・週次レート制御・GitHub I/O基盤
 - `doci/tactic_issues.py` 動画が紹介するYouTube運用施策(viewer_action)の検知・issue化（issue #90）
 - `channels/<id>/` チャンネル定義・ペルソナ・声・BGM
