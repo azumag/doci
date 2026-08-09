@@ -64,6 +64,13 @@ _STRUCTURED_NOVELTY_FIELDS = (
     "theme_fit_reason",
 )
 
+_CONCRETE_PUBLISH_TIME_PATTERN = (
+    r"(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|\d{1,2}(?::\d{2}|時))"
+)
+_NATURAL_VIDEO_PUBLISH_VERB_PATTERN = (
+    r"(?:出す|上げる|アップ(?:ロード)?する|"
+    r"公開(?:する)?|投稿(?:する)?|配信(?:する)?)"
+)
 _YOUTUBE_PUBLISH_TIME_MARKERS = (
     "公開時刻",
     "投稿時刻",
@@ -89,6 +96,15 @@ _YOUTUBE_PUBLISH_TIME_MARKERS = (
     "動画を投稿する時間",
     "動画を投稿する時刻",
     "動画を投稿するタイミング",
+    "アップロード時刻",
+    "アップロード時間帯",
+    "アップロードタイミング",
+    "動画をアップロードする時間",
+    "動画をアップロードする時刻",
+    "動画をアップロードするタイミング",
+    "動画を上げる時間",
+    "動画を上げる時刻",
+    "動画を上げるタイミング",
 )
 _MULTIPLE_UPLOAD_MARKERS = (
     "複数本",
@@ -189,12 +205,15 @@ _TIMING_OPERATION_PATTERN = (
     r"(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|\d{1,2}(?::\d{2}|時))"
     r".{0,8}に(?:公開|投稿|配信)"
     r"(?:すると|すれば|することで|したため|した結果)|"
-    r"動画を(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|"
-    r"\d{1,2}(?::\d{2}|時))に出す"
-    r"(?:と|なら|ことで|ため|結果)|"
-    r"(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|"
-    r"\d{1,2}(?::\d{2}|時))に動画を出す"
-    r"(?:と|なら|ことで|ため|結果))"
+    r"動画を"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r"に"
+    + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN
+    + r"(?:と|なら|ことで|ため|結果)|"
+    + _CONCRETE_PUBLISH_TIME_PATTERN
+    + r"に動画を"
+    + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN
+    + r"(?:と|なら|ことで|ため|結果))"
 )
 _OUTCOME_METRIC_TARGET_PATTERN = (
     r"(?:再生数|視聴回数|総再生時間|初動|パフォーマンス)"
@@ -316,14 +335,23 @@ def _has_structured_publication_timing_state(data: Mapping[str, object]) -> bool
 def _is_publication_timing_text(text: str) -> bool:
     if any(marker in text for marker in _YOUTUBE_PUBLISH_TIME_MARKERS):
         return True
-    concrete_time = (
-        r"(?:午前|午後|平日|休日|週末|朝|昼|夕方|夜|\d{1,2}(?::\d{2}|時))"
-    )
+    concrete_time = _CONCRETE_PUBLISH_TIME_PATTERN
     return bool(
         re.search(r"(?:公開|投稿|配信)時間.{0,8}" + concrete_time, text)
         or re.search(concrete_time + r".{0,8}に(?:公開|投稿|配信)する", text)
-        or re.search(r"動画を" + concrete_time + r"に(?:出す|公開|投稿|配信)", text)
-        or re.search(concrete_time + r"に動画を(?:出す|公開|投稿|配信)", text)
+        or re.search(
+            r"動画を"
+            + concrete_time
+            + r"に"
+            + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN,
+            text,
+        )
+        or re.search(
+            concrete_time
+            + r"に動画を"
+            + _NATURAL_VIDEO_PUBLISH_VERB_PATTERN,
+            text,
+        )
     )
 
 

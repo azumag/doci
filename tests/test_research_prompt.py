@@ -903,6 +903,8 @@ class ResearchPromptTest(unittest.TestCase):
             "夜に公開すれば再生数が伸びます。",
             "夜に公開することで再生数が伸びます。",
             "動画を夜に出すと再生数が伸びます。",
+            "動画を夜にアップロードすると再生数が伸びます。",
+            "動画を夜に上げるのが一番です。",
             "最適時刻を決めることはできないとは言えません。",
             "最適時刻を決めることはできないとは限りません。",
         ):
@@ -1089,6 +1091,8 @@ class ResearchPromptTest(unittest.TestCase):
             "公開時間を夜にすると再生数が伸びます。",
             "夜に公開すれば再生数が伸びます。",
             "夜に公開することで再生数が伸びます。",
+            "動画を夜にアップロードすると再生数が伸びます。",
+            "動画を夜に上げるのが一番です。",
             "最適時刻を決めることはできないとは言えません。",
             "最適時刻を決めることはできないとは限りません。",
         ):
@@ -1261,21 +1265,27 @@ class ResearchPromptTest(unittest.TestCase):
         )
 
     def test_natural_publish_time_wording_triggers_policy(self) -> None:
-        payload = {
-            "topic": "動画を夜に出すと再生数が伸びる",
-            "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
-        }
-        with self.assertRaises(research.PublicationTimingPolicyViolation):
-            research.validate_publication_timing_research(payload)
-
-        with self.assertRaises(research.PublicationTimingPolicyViolation):
-            research.validate_publication_timing_script(
-                {
-                    "title": "動画を夜に出すと再生数が伸びる",
-                    "description": "公開後の実績を確認します。",
-                    "narration": "次の一本で試します。",
+        for wording in (
+            "動画を夜に出すと再生数が伸びる",
+            "動画を夜にアップロードすると再生数が伸びる",
+            "夜に動画を上げるのが一番です",
+        ):
+            with self.subTest(wording=wording):
+                payload = {
+                    "topic": wording,
+                    "viewer_action": "YouTube Studioで公開後24時間の実績を確認する",
                 }
-            )
+                with self.assertRaises(research.PublicationTimingPolicyViolation):
+                    research.validate_publication_timing_research(payload)
+
+                with self.assertRaises(research.PublicationTimingPolicyViolation):
+                    research.validate_publication_timing_script(
+                        {
+                            "title": wording,
+                            "description": "公開後の実績を確認します。",
+                            "narration": "次の一本で試します。",
+                        }
+                    )
 
     def test_structured_state_triggers_script_guard_for_ambiguous_time_word(
         self,
