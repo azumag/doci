@@ -1794,7 +1794,7 @@ def web_research(
                 allowed_source_urls=allowed_source_urls,
                 allowed_video_source_urls=allowed_video_source_urls,
             )
-            if publication_timing_policy_enabled(spec, corner) and not focus_text:
+            if publication_timing_policy_enabled(spec, corner):
                 validate_publication_timing_research(result)
             return result
         except PublicationTimingPolicyViolation as e:

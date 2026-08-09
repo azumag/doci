@@ -1186,6 +1186,38 @@ class ResearchPromptTest(unittest.TestCase):
 
         self.assertEqual(run_mock.call_count, 2)
 
+    def test_publication_timing_policy_applies_to_focus_text_research(self) -> None:
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["analytics"]
+        unsafe = json.dumps(
+            {
+                "topic": "公開時刻のファクトチェック",
+                "viewer_action": "公開時刻を夜にすると再生数が伸びます",
+                "publication_timing_sample_scope": "not_applicable",
+                "publication_timing_conclusion_status": "not_applicable",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/141805",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+            mock.patch.object(research.llm, "run_claude", return_value=unsafe),
+        ):
+            with self.assertRaises(research.PublicationTimingPolicyViolation):
+                research.web_research(
+                    corner,
+                    [],
+                    spec,
+                    backend_override="claude",
+                    focus_text="公開時刻を夜にすると再生数が伸びます",
+                    require_youtube_examples=False,
+                )
+
     def test_publication_timing_policy_retry_accepts_later_safe_result(self) -> None:
         spec = channel_mod.load("youtube-growth")
         corner = spec.corners["analytics"]
