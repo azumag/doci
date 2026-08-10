@@ -483,6 +483,85 @@ class PerformanceFeedbackTest(unittest.TestCase):
             [{"term": "ネタ切れ 解消", "views": 20}],
         )
 
+    def test_search_terms_unavailable_when_all_videos_fail_video_specific(self) -> None:
+        """issue #164 (Sol review指摘): 全動画が動画固有エラーで失敗した場合、
+        video_search_terms() が例外を送出し search_terms.available=False になる。"""
+        self._history(count=1)
+        rows = [
+            {
+                "ts": "2026-07-01T00:00:00+00:00",
+                "channel": self.spec.id,
+                "corner": "shorts",
+                "title": "Title 0",
+                "topic": "Topic 0",
+                "video_id": "id-0",
+                "status": "published",
+                "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+            }
+        ]
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_analytics",
+                return_value=[
+                    {
+                        "video_id": "id-0",
+                        "views": 100,
+                        "engaged_views": 60,
+                        "estimated_minutes_watched": 90.0,
+                        "average_view_duration": 45.0,
+                        "average_view_percentage": 72.4,
+                        "likes": 5,
+                        "comments": 2,
+                    }
+                ],
+            ),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                side_effect=RuntimeError("all videos failed video-specific error"),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(snapshot["search_terms"]["available"])
+        self.assertIn(
+            "all videos failed",
+            snapshot["search_terms"]["reason"],
+        )
+        # traffic sourceの実データは保持される。
+        self.assertTrue(snapshot["traffic_sources"]["available"])
+        self.assertEqual(
+            snapshot["videos"][0]["analytics"]["traffic_sources"],
+            {"YT_SEARCH": 40},
+        )
+
     def test_format_traits_are_scoped_and_exclude_topic_text(self) -> None:
         workdir = self.root / "run"
         workdir.mkdir()

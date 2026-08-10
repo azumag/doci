@@ -407,7 +407,7 @@ class YouTubeSearchTest(unittest.TestCase):
             "rows": [["コンテンツギャップ", 12]],
         }
         http_error = HttpError(
-            SimpleNamespace(status=400, reason="privacy threshold"),
+            SimpleNamespace(status=400, reason="privacy"),
             b"privacy threshold",
         )
         reports.query.return_value.execute.side_effect = [http_error, ok_page]
@@ -453,6 +453,63 @@ class YouTubeSearchTest(unittest.TestCase):
 
         # 1件目で即時中断（2件目以降へは進まない）。
         self.assertEqual(reports.query.call_count, 1)
+
+    def test_video_search_terms_invalid_filters_is_global_error(self) -> None:
+        """issue #164 (Sol review指摘): invalidFilters等のリクエスト構造不備
+        （HTTP 400）は動画固有エラーとせず、全体障害として1件目で中断する。"""
+        reports = mock.Mock()
+        http_error = HttpError(
+            SimpleNamespace(status=400, reason="invalidFilters"),
+            b"invalidFilters",
+        )
+        reports.query.return_value.execute.side_effect = http_error
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaises(HttpError):
+                youtube.video_search_terms(
+                    ["a", "b"],
+                    start_date="2026-07-01",
+                    end_date="2026-07-26",
+                )
+        self.assertEqual(reports.query.call_count, 1)
+
+    def test_video_search_terms_raises_when_all_videos_fail_video_specific(self) -> None:
+        """issue #164: 全動画が動画固有エラー（HTTP 400 privacy等）で失敗した
+        場合は、部分取得成功とせず例外を再送出する。"""
+        reports = mock.Mock()
+        http_error = HttpError(
+            SimpleNamespace(status=400, reason="privacy"),
+            b"privacy threshold",
+        )
+        reports.query.return_value.execute.side_effect = http_error
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaises(HttpError):
+                youtube.video_search_terms(
+                    ["a", "b"],
+                    start_date="2026-07-01",
+                    end_date="2026-07-26",
+                )
+        # 全動画が失敗するまでは照会する（部分成功と区別するため）。
+        self.assertEqual(reports.query.call_count, 2)
+
+    def test_video_search_terms_empty_input_returns_tuple(self) -> None:
+        """issue #164 (Sol review指摘): 空入力でも通常時と同じタプルを返す。"""
+        by_video, failed = youtube.video_search_terms(
+            [],
+            start_date="2026-07-01",
+            end_date="2026-07-26",
+        )
+        self.assertEqual(by_video, {})
+        self.assertEqual(failed, {})
 
 
 if __name__ == "__main__":
