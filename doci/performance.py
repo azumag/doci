@@ -181,11 +181,16 @@ def sync(
                 )
             try:
                 # 検索語句は動画ごとにAPIを呼ぶため、コンテンツギャップ企画
-                # （gap_query記録）の動画だけへ照会対象を絞る。
+                # （gap_query記録）の動画だけへ照会対象を絞る。さらに今回の
+                # snapshot出力（details）で使われる動画へ積集合で絞り、
+                # 削除済み等でData APIが返さない古い動画へ無駄にAPIを呼ばない
+                # （Claude review指摘）。
+                sync_ids = {str(detail.get("video_id") or "") for detail in details}
                 gap_video_ids = [
                     video_id
                     for video_id, row in history_rows.items()
-                    if str(
+                    if video_id in sync_ids
+                    and str(
                         (history._row_topic_metadata(row)).get("gap_query") or ""
                     ).strip()
                 ]

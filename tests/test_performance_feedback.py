@@ -247,6 +247,80 @@ class PerformanceFeedbackTest(unittest.TestCase):
         # gap_query付き動画だけが検索語句APIの照会対象になる（Sol review指摘）。
         self.assertEqual(search_mock.call_args.args[0], ["id-0"])
 
+    def test_search_terms_only_queries_videos_returned_by_data_api(self) -> None:
+        """issue #164 (Claude review指摘): gap_query付きでも、Data APIが
+        snapshot出力に返さない動画（削除済み等）は検索語句APIの照会対象にしない。"""
+        rows = []
+        for index in range(3):
+            rows.append(
+                {
+                    "ts": f"2026-07-{index + 1:02d}T00:00:00+00:00",
+                    "channel": self.spec.id,
+                    "corner": "shorts",
+                    "title": f"Title {index}",
+                    "topic": f"Topic {index}",
+                    "video_id": f"id-{index}",
+                    "status": "published",
+                    "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+                }
+            )
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        # id-2 は Data API が返さない（削除済み等）。
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(2)
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=(
+                    {"id-0": [{"term": "ショート 企画", "views": 30}]},
+                    {},
+                ),
+            ) as search_mock,
+        ):
+            performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        # id-2（Data APIが返さない）は照会対象外。snapshot出力に使われる
+        # id-0 / id-1 だけが照会される。
+        self.assertEqual(search_mock.call_args.args[0], ["id-0", "id-1"])
+
     def test_traffic_status_change_writes_new_snapshot_row(self) -> None:
         """issue #164 (Sol review指摘4): traffic_sources のavailable/reasonが
         変化した場合、snapshot署名に含まれ新しい行が追記される。"""

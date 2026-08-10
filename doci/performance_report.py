@@ -585,10 +585,15 @@ def build_cycle_candidate(
     # issue #164: 形式仮説の有無に関わらず、gap動画の検索発見・視聴後評価
     # が揃っていれば報告候補として扱う（snapshot未指定の従来呼び出しは
     # 従来どおりsection内容だけで判定）。
+    # 表示対象はsectionのcornerと一致する動画だけ。cornerがどのsectionにも
+    # 存在しない動画のgap_queryは、無内容issueを防ぐため候補判定に含めない
+    # （Claude review指摘）。
     has_gap_discovery = False
     if isinstance(snapshot, dict):
+        section_corners = {section["corner"] for section in sections}
         has_gap_discovery = any(
             str((row.get("topic_metadata") or {}).get("gap_query") or "").strip()
+            and str(row.get("corner") or "") in section_corners
             for row in snapshot.get("videos", [])
         )
     has_content = has_section_content or has_gap_discovery

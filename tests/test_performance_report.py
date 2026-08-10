@@ -529,6 +529,36 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertIn("取得できませんでした", candidate["body"])
 
+    def test_build_cycle_candidate_ignores_gap_video_with_missing_corner_section(self) -> None:
+        """issue #164 (Claude review指摘): gap_query付きでも、そのcornerが
+        sectionsに存在しない動画は候補判定に含めない（無内容issueの防止）。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        # sectionsはvideo cornerのみ（shorts sectionが存在しない）。
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "video", decision, [], set()
+        )
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "gap-shorts",
+                    "corner": "shorts",
+                    "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+                    "analytics": {
+                        "views": 100,
+                        "traffic_sources": {"YT_SEARCH": 40},
+                        "search_terms": [{"term": "ネタ切れ 解消", "views": 40}],
+                    },
+                }
+            ]
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec, [section], datetime(2026, 7, 26, tzinfo=timezone.utc), snapshot
+        )
+
+        self.assertIsNone(candidate)
+
     def test_build_cycle_candidate_aggregates_multiple_corners(self) -> None:
         spec = SimpleNamespace(id="youtube-growth")
         active_section = performance_report.build_corner_section(
