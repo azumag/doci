@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from googleapiclient.errors import HttpError
 from types import SimpleNamespace
 import tempfile
 from pathlib import Path
@@ -368,7 +369,7 @@ class YouTubeSearchTest(unittest.TestCase):
             mock.patch.object(youtube, "_load_credentials", return_value=object()),
             mock.patch("googleapiclient.discovery.build", return_value=service),
         ):
-            by_video = youtube.video_search_terms(
+            by_video, failed = youtube.video_search_terms(
                 ["abc123"],
                 start_date="2026-07-01",
                 end_date="2026-07-26",
@@ -383,6 +384,7 @@ class YouTubeSearchTest(unittest.TestCase):
                 ]
             },
         )
+        self.assertEqual(failed, {})
         self.assertEqual(
             reports.query.call_args.kwargs["dimensions"],
             "insightTrafficSourceDetail",
@@ -396,9 +398,6 @@ class YouTubeSearchTest(unittest.TestCase):
     def test_video_search_terms_keeps_partial_results_on_individual_failure(self) -> None:
         """issue #164 (Sol review指摘): 1動画の取得不能が他動画の結果へ
         波及しない。成功した動画の検索語句は保持する。"""
-        class Boom(Exception):
-            pass
-
         reports = mock.Mock()
         ok_page = {
             "columnHeaders": [
@@ -407,23 +406,18 @@ class YouTubeSearchTest(unittest.TestCase):
             ],
             "rows": [["コンテンツギャップ", 12]],
         }
-        calls = 0
-
-        def _side_effect(*_args, **_kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise Boom("privacy threshold")
-            return ok_page
-
-        reports.query.return_value.execute.side_effect = _side_effect
+        http_error = HttpError(
+            SimpleNamespace(status=400, reason="privacy threshold"),
+            b"privacy threshold",
+        )
+        reports.query.return_value.execute.side_effect = [http_error, ok_page]
         service = mock.Mock()
         service.reports.return_value = reports
         with (
             mock.patch.object(youtube, "_load_credentials", return_value=object()),
             mock.patch("googleapiclient.discovery.build", return_value=service),
         ):
-            by_video = youtube.video_search_terms(
+            by_video, failed = youtube.video_search_terms(
                 ["fail-1", "ok-2"],
                 start_date="2026-07-01",
                 end_date="2026-07-26",
@@ -433,30 +427,32 @@ class YouTubeSearchTest(unittest.TestCase):
             by_video,
             {"ok-2": [{"term": "コンテンツギャップ", "views": 12}]},
         )
+        self.assertIn("HTTP 400", failed["fail-1"])
 
-    def test_video_search_terms_raises_after_consecutive_failures(self) -> None:
-        """issue #164: 連続失敗が続く全体的障害では無制限に照会し続けず、
-        例外を呼び出し元へ伝える。"""
-        class Boom(Exception):
-            pass
-
+    def test_video_search_terms_raises_immediately_on_global_error(self) -> None:
+        """issue #164: 認証・権限・クォータ等の全体障害（HTTP 403等）は
+        動画固有エラーと区別して即時中断し、残りを照会し続けない。"""
         reports = mock.Mock()
-        reports.query.return_value.execute.side_effect = Boom("auth failure")
+        http_error = HttpError(
+            SimpleNamespace(status=403, reason="quota exceeded"),
+            b"quota exceeded",
+        )
+        reports.query.return_value.execute.side_effect = http_error
         service = mock.Mock()
         service.reports.return_value = reports
         with (
             mock.patch.object(youtube, "_load_credentials", return_value=object()),
             mock.patch("googleapiclient.discovery.build", return_value=service),
         ):
-            with self.assertRaisesRegex(Boom, "auth failure"):
+            with self.assertRaises(HttpError):
                 youtube.video_search_terms(
                     ["a", "b", "c", "d"],
                     start_date="2026-07-01",
                     end_date="2026-07-26",
                 )
 
-        # 3連続失敗で中断（4件目へは進まない）。
-        self.assertEqual(reports.query.call_count, 3)
+        # 1件目で即時中断（2件目以降へは進まない）。
+        self.assertEqual(reports.query.call_count, 1)
 
 
 if __name__ == "__main__":

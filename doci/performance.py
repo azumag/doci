@@ -56,6 +56,7 @@ def _snapshot_signature(snapshot: dict) -> str:
         # issue #164: トラフィックreadbackのavailable/reason変化も署名へ含め、
         # statusだけの変化でも新しいsnapshot行を追記できるようにする。
         "traffic_sources": snapshot.get("traffic_sources", {}),
+        "search_terms": snapshot.get("search_terms", {}),
         "videos": snapshot.get("videos", []),
     }
     return hashlib.sha256(
@@ -139,6 +140,7 @@ def sync(
     }
     analytics_rows: list[dict] = []
     traffic_status: dict = {"available": False, "source": "youtube_analytics_api_v2"}
+    search_status: dict = {"available": False, "source": "youtube_analytics_api_v2"}
     traffic_by_id: dict[str, dict[str, int]] = {}
     search_by_id: dict[str, list[dict]] = {}
     if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
@@ -161,7 +163,8 @@ def sync(
             )
             # issue #164: トラフィックソースと検索語句はAnalytics APIが
             # 返せる範囲だけ取得する。取得できない動画・種別は0や「なし」と
-            # 推測せず、空のまま（fail-closed）。
+            # 推測せず、空のまま（fail-closed）。両者は別々のtry/statusで
+            # 管理し、片方の失敗が他方の実データを「取得不可」にしない。
             try:
                 traffic_by_id = youtube.video_traffic_sources(
                     video_ids,
@@ -170,6 +173,13 @@ def sync(
                     token_file=spec.publish.youtube.token,
                     client_secret_file=spec.publish.youtube.client_secret,
                 )
+                traffic_status.update({"available": True})
+            except Exception as exc:
+                traffic_status["reason"] = (
+                    "トラフィックソースreadback失敗。retention指標のみ保存: "
+                    f"{str(exc)[:400]}"
+                )
+            try:
                 # 検索語句は動画ごとにAPIを呼ぶため、コンテンツギャップ企画
                 # （gap_query記録）の動画だけへ照会対象を絞る。
                 gap_video_ids = [
@@ -179,18 +189,22 @@ def sync(
                         (history._row_topic_metadata(row)).get("gap_query") or ""
                     ).strip()
                 ]
+                search_failures: dict[str, str] = {}
                 if gap_video_ids:
-                    search_by_id = youtube.video_search_terms(
+                    search_by_id, search_failures = youtube.video_search_terms(
                         gap_video_ids,
                         start_date=start,
                         end_date=end,
                         token_file=spec.publish.youtube.token,
                         client_secret_file=spec.publish.youtube.client_secret,
                     )
-                traffic_status.update({"available": True})
+                search_status.update({"available": True})
+                if search_failures:
+                    search_status["failed_video_ids"] = sorted(search_failures)
+                    search_status["failures"] = search_failures
             except Exception as exc:
-                traffic_status["reason"] = (
-                    "トラフィックソースreadback失敗。retention指標のみ保存: "
+                search_status["reason"] = (
+                    "検索語句readback失敗。traffic sourceは保存: "
                     f"{str(exc)[:400]}"
                 )
         except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
@@ -248,6 +262,7 @@ def sync(
         "source": "youtube_data_api_v3",
         "analytics": analytics_status,
         "traffic_sources": traffic_status,
+        "search_terms": search_status,
         "videos": videos,
     }
     path = _snapshot_path(spec)
