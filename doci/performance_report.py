@@ -570,6 +570,7 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
     failed = retention_status.get("failed_video_ids") or []
     lines: list[str] = []
     reported_moments = 0
+    truncated = False
     for row in corner_videos:
         video_id = str(row.get("video_id") or "")
         if video_id in failed:
@@ -581,6 +582,10 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
         analytics = row.get("analytics")
         analytics = analytics if isinstance(analytics, dict) else {}
         curve = analytics.get("retention_curve")
+        # 照会対象外（Analytics実績が無い古い動画等）はanalyticsに
+        # retention_curve キー自体が無いため、取得不可と誤表示しない。
+        if "retention_curve" not in analytics:
+            continue
         curve = curve if isinstance(curve, list) else []
         if not curve:
             lines.append(
@@ -605,9 +610,7 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
         lines.append(f"- `{video_id}`: 維持率カーブの山/谷")
         for moment in annotated:
             if reported_moments >= 10:
-                lines.append(
-                    "  - 他にも山/谷がありますが、レポートは先頭10件まで表示します"
-                )
+                truncated = True
                 break
             reported_moments += 1
             kind = "山（spike）" if moment["kind"] == "spike" else "谷（dip）"
@@ -628,6 +631,12 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
                     f"  - {kind}: 約{second}秒付近。"
                     "該当箇所の内容と照合して理由を確認してください"
                 )
+        if truncated:
+            break
+    if truncated:
+        lines.append(
+            "- 他にも山/谷がありますが、レポートは先頭10件まで表示します"
+        )
     lines.append(
         "- 山/谷は再視聴・巻き戻し・スキップ・離脱のいずれかが起きた場所の手がかり"
         "であり、それだけで成功・失敗を判定しません。"

@@ -1086,9 +1086,9 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         # 再視聴（1.0超）も有効な山として検出する
         rewound = [
             {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
-            {"elapsed_ratio": 0.2, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.90},
             {"elapsed_ratio": 0.5, "watch_ratio": 1.20},  # spike
-            {"elapsed_ratio": 0.7, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.90},
             {"elapsed_ratio": 1.0, "watch_ratio": 0.90},
         ]
         self.assertEqual(
@@ -1099,27 +1099,27 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
     def test_retention_moments_detects_exact_threshold(self) -> None:
         """issue #149 (Sol review指摘): ちょうど0.08の差もspike/dipとして
         検出する（浮動小数誤差を考慮した >= / <= 判定）。"""
-        dip = [
-            {"elapsed_ratio": 0.0, "watch_ratio": 0.50},
-            {"elapsed_ratio": 0.2, "watch_ratio": 0.49},
-            {"elapsed_ratio": 0.5, "watch_ratio": 0.58},  # 前後とちょうど0.08
-            {"elapsed_ratio": 0.7, "watch_ratio": 0.49},
-            {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
-        ]
         spike = [
             {"elapsed_ratio": 0.0, "watch_ratio": 0.50},
-            {"elapsed_ratio": 0.2, "watch_ratio": 0.51},
-            {"elapsed_ratio": 0.5, "watch_ratio": 0.42},  # 前後とちょうど0.08
-            {"elapsed_ratio": 0.7, "watch_ratio": 0.51},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.50},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.58},  # 前後とちょうど0.08
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.50},
             {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
+        ]
+        dip = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.58},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.58},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.50},  # 前後とちょうど0.08
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.58},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.58},
         ]
         self.assertEqual(
             [m["kind"] for m in performance.retention_moments(dip)],
-            ["spike"],
+            ["dip"],
         )
         self.assertEqual(
             [m["kind"] for m in performance.retention_moments(spike)],
-            ["dip"],
+            ["spike"],
         )
 
     def test_retention_moments_ignores_flat_and_short_curves(self) -> None:

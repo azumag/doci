@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import statistics
 from collections import Counter
@@ -192,7 +193,17 @@ def retention_moments(
         nxt = curve[index + 1]["watch_ratio"]
         if abs(prev - curr) < min_delta and abs(nxt - curr) < min_delta:
             continue
-        if curr >= prev + threshold and curr >= nxt + threshold:
+        # 浮動小数誤差を考慮し、前後点との差が閾値以上（isclose併用）で判定。
+        delta_prev = curr - prev
+        delta_next = curr - nxt
+        if (
+            delta_prev > 0
+            and delta_next > 0
+            and (
+                min(delta_prev, delta_next) >= threshold
+                or math.isclose(min(delta_prev, delta_next), threshold, abs_tol=1e-9)
+            )
+        ):
             moments.append(
                 {
                     "elapsed_ratio": curve[index]["elapsed_ratio"],
@@ -200,7 +211,16 @@ def retention_moments(
                     "kind": "spike",
                 }
             )
-        elif curr <= prev - threshold and curr <= nxt - threshold:
+        elif (
+            delta_prev < 0
+            and delta_next < 0
+            and (
+                -min(delta_prev, delta_next) >= threshold
+                or math.isclose(
+                    -min(delta_prev, delta_next), threshold, abs_tol=1e-9
+                )
+            )
+        ):
             moments.append(
                 {
                     "elapsed_ratio": curve[index]["elapsed_ratio"],
