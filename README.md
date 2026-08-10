@@ -319,6 +319,16 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
   取得不可と明記する。通常動画（`gap_query`未記録）はこの節の評価対象にしない。
   形式仮説が無くても、`gap_query`が記録されたgap動画がsnapshotにあれば
   レポート候補として扱う（検索流入・検索語句だけを持つ通常動画では候補にしない）。
+- **維持率カーブの山/谷とシーン照合**（issue #149）:
+  Analytics APIの`audienceWatchRatio`（比率。0.9=90%）を
+  `elapsedVideoTimeRatio`ディメンションで動画ごとに取得し、前後点より8%ポイント
+  （0.08）以上高い点を山（spike）、低い点を谷（dip）として検出する。動画長は
+  Data APIの`duration`（ISO 8601）から秒へ変換し、秒位置を算出する。検出した
+  時点を`script.json`のscenes（均等割近似）と照合して「どのシーンで維持率が
+  上がった/下がったか」をレポートに載せる。山=成功・谷=失敗と断定せず、
+  再視聴・巻き戻し・スキップ・離脱の確認は運用者が動画内容と照合して行う。
+  API全体の失敗は取得失敗と明記し、Shorts等でカーブが返らない場合と区別する
+  （推測で補わない）。
 
 状態は`output/<channel>/performance_experiments.jsonl`に`proposed → applied →
 evaluated → reported`（または`expired`）として追記される。全cornerが「新仮説なし

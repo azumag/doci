@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import re
 import statistics
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -57,6 +59,7 @@ def _snapshot_signature(snapshot: dict) -> str:
         # statusだけの変化でも新しいsnapshot行を追記できるようにする。
         "traffic_sources": snapshot.get("traffic_sources", {}),
         "search_terms": snapshot.get("search_terms", {}),
+        "retention_curve": snapshot.get("retention_curve", {}),
         "videos": snapshot.get("videos", []),
     }
     return hashlib.sha256(
@@ -119,6 +122,189 @@ def _format_traits(spec: ChannelSpec, recorded: dict) -> list[str]:
     return traits
 
 
+def _safe_workdir(spec: ChannelSpec, workdir_raw: str) -> str:
+    """snapshotへ保存するworkdirが出力領域配下であることを検証する。
+
+    `_format_traits` と同じ境界を使い、出力領域外や存在しないパスは空文字に
+    する（任意パスの読み取りを防ぐ）。
+    """
+    if not workdir_raw:
+        return ""
+    workdir = Path(workdir_raw).resolve()
+    output_root = spec.output_dir.resolve()
+    if not workdir.is_relative_to(output_root):
+        return ""
+    return str(workdir)
+
+
+def _scene_time_windows(script: dict, total_seconds: float) -> list[dict]:
+    """scenesの時間窓を均等割で近似する（compose.pyの実合成に合わせる）。
+
+    `compose._scene_boundaries()` は均等割を基準にTTS文末時刻へ最大2.5秒
+    スナップする。ここではその近似として均等割を使う（実境界は生成物
+    メタデータに無いため、照合の目安）。
+    """
+    scenes = script.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        return []
+    if total_seconds <= 0:
+        total_seconds = 1.0
+    windows: list[dict] = []
+    cursor = 0.0
+    span = total_seconds / len(scenes)
+    for index in range(len(scenes)):
+        start = cursor
+        end = cursor + span
+        windows.append(
+            {
+                "index": index,
+                "caption": str(scenes[index].get("caption") or ""),
+                "start": round(start, 3),
+                "end": round(end, 3),
+            }
+        )
+        cursor = end
+    if windows:
+        windows[-1]["end"] = round(total_seconds, 3)
+    return windows
+
+
+def retention_moments(
+    curve: list[dict],
+    *,
+    threshold: float = 0.08,
+    min_delta: float = 0.02,
+) -> list[dict]:
+    """維持率カーブからスパイク（山）とディップ（谷）を検出する（issue #149）。
+
+    各点のwatch_ratioを前後の点と比較し、前後より`threshold`以上高い点を
+    spike、低い点を dip とする。端点やデータが少なすぎる場合は検出しない
+    （山=成功・谷=失敗と断定しないために、形状だけから結論を出さない）。
+    `audienceWatchRatio` は比率（0.9=90%）であり、閾値も比率で指定する。
+    ちょうど閾値（0.08）も検出する（浮動小数誤差を考慮して `>=` 相当で判定）。
+    返り値は `{elapsed_ratio, watch_ratio, kind}` のリスト。
+    """
+    if not curve or len(curve) < 5:
+        return []
+    moments: list[dict] = []
+    for index in range(1, len(curve) - 1):
+        prev = curve[index - 1]["watch_ratio"]
+        curr = curve[index]["watch_ratio"]
+        nxt = curve[index + 1]["watch_ratio"]
+        if abs(prev - curr) < min_delta and abs(nxt - curr) < min_delta:
+            continue
+        # 浮動小数誤差を考慮し、前後点との差が閾値以上（isclose併用）で判定。
+        delta_prev = curr - prev
+        delta_next = curr - nxt
+        if (
+            delta_prev > 0
+            and delta_next > 0
+            and (
+                min(delta_prev, delta_next) >= threshold
+                or math.isclose(min(delta_prev, delta_next), threshold, abs_tol=1e-9)
+            )
+        ):
+            moments.append(
+                {
+                    "elapsed_ratio": curve[index]["elapsed_ratio"],
+                    "watch_ratio": curr,
+                    "kind": "spike",
+                }
+            )
+        elif delta_prev < 0 and delta_next < 0:
+            # dipは前後両方との差が閾値以上の場合だけ検出する
+            # （片側だけの落差では検出しない。Sol review指摘）。
+            dip_delta = min(prev - curr, nxt - curr)
+            if not (
+                dip_delta >= threshold
+                or math.isclose(dip_delta, threshold, abs_tol=1e-9)
+            ):
+                continue
+            moments.append(
+                {
+                    "elapsed_ratio": curve[index]["elapsed_ratio"],
+                    "watch_ratio": curr,
+                    "kind": "dip",
+                }
+            )
+    return moments
+
+
+def retention_moment_scenes(
+    moments: list[dict],
+    script: dict,
+    duration_iso: str | None = None,
+    *,
+    total_seconds: float | None = None,
+) -> list[dict]:
+    """検出した山/谷を、台本のscenesと照合して「何秒付近・どのシーン」を返す。
+
+    該当sceneが特定できない場合は `scene_index=None` のまま（推測しない）。
+    `duration_iso`（Data APIのISO 8601動画長）から全長を秒へ変換し、
+    elapsed_ratio × 全長で秒位置を算出する。変換不能・ゼロの場合は
+    「位置不明」（elapsed_seconds=None）として fail-closed にする。
+    """
+    seconds = total_seconds
+    if seconds is None:
+        seconds = _iso8601_duration_seconds(duration_iso)
+    windows = _scene_time_windows(script, seconds or 1.0)
+    annotated: list[dict] = []
+    for moment in moments:
+        second = (
+            moment["elapsed_ratio"] * seconds
+            if seconds and seconds > 0
+            else None
+        )
+        scene = next(
+            (
+                win
+                for win in windows
+                if second is not None and win["start"] <= second <= win["end"]
+            ),
+            None,
+        )
+        annotated.append(
+            {
+                **moment,
+                "elapsed_seconds": round(second, 1) if second is not None else None,
+                "scene_index": scene["index"] if scene else None,
+                "scene_caption": scene["caption"] if scene else "",
+            }
+        )
+    return annotated
+
+
+def _iso8601_duration_seconds(duration_iso: str | None) -> float | None:
+    """ISO 8601動画長（PT1M30S 等）を秒へ変換する。
+
+    Data APIが取り得る `PTnHnMnS` / `PTnMnS` / `PTnS` / `PTnM` のみ受け付ける。
+    末尾単位欠落・単位順序不正・重複単位・日数付きは None（fail-closed）。
+    """
+    if not duration_iso:
+        return None
+    text = str(duration_iso).strip()
+    if not text.startswith("PT"):
+        return None
+    match = re.fullmatch(
+        r"PT(?:(?P<h>\d+(?:\.\d+)?)H)?(?:(?P<m>\d+(?:\.\d+)?)M)?"
+        r"(?:(?P<s>\d+(?:\.\d+)?)S)?",
+        text,
+    )
+    if match is None:
+        return None
+    parts = match.groupdict()
+    if not any(parts.values()):
+        return None
+    total = 0.0
+    if parts["h"]:
+        total += float(parts["h"]) * 3600
+    if parts["m"]:
+        total += float(parts["m"]) * 60
+    if parts["s"]:
+        total += float(parts["s"])
+    return total if total > 0 else None
+
+
 def sync(
     spec: ChannelSpec,
     *,
@@ -141,8 +327,14 @@ def sync(
     analytics_rows: list[dict] = []
     traffic_status: dict = {"available": False, "source": "youtube_analytics_api_v2"}
     search_status: dict = {"available": False, "source": "youtube_analytics_api_v2"}
+    retention_status: dict = {
+        "available": False,
+        "source": "youtube_analytics_api_v2",
+    }
     traffic_by_id: dict[str, dict[str, int]] = {}
     search_by_id: dict[str, list[dict]] = {}
+    retention_by_id: dict[str, list[dict]] = {}
+    retention_failures: dict[str, str] = {}
     if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
         start = (current.date() - timedelta(days=lookback_days)).isoformat()
         end = current.date().isoformat()
@@ -212,6 +404,41 @@ def sync(
                     "検索語句readback失敗。traffic sourceは保存: "
                     f"{str(exc)[:400]}"
                 )
+            try:
+                # issue #149: 維持率カーブはShorts等でAPIが返さない場合が
+                # あるため、取得できる範囲だけ保存する（fail-closed）。
+                # 照会対象は、対象期間にAnalytics実績がある動画（analytics_rows）
+                # かつ Data API が現存する動画（details）へ絞る。古い無実績
+                # 動画を毎回照会してAPI呼び出し数を無制限に増やさない
+                # （Sol review指摘8）。
+                sync_ids = {str(detail.get("video_id") or "") for detail in details}
+                analytics_ids = {
+                    str(row.get("video_id") or "") for row in analytics_rows
+                }
+                retention_ids = [
+                    video_id
+                    for video_id in video_ids
+                    if video_id in sync_ids and video_id in analytics_ids
+                ]
+                if retention_ids:
+                    retention_by_id, retention_failures = youtube.video_retention_curves(
+                        retention_ids,
+                        start_date=start,
+                        end_date=end,
+                        token_file=spec.publish.youtube.token,
+                        client_secret_file=spec.publish.youtube.client_secret,
+                    )
+                retention_status.update({"available": True})
+                if retention_failures:
+                    retention_status["failed_video_ids"] = sorted(
+                        retention_failures
+                    )
+                    retention_status["failures"] = retention_failures
+            except Exception as exc:
+                retention_status["reason"] = (
+                    "維持率カーブreadback失敗。平均指標のみ保存: "
+                    f"{str(exc)[:400]}"
+                )
         except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
             analytics_status["reason"] = (
                 "Analytics readback失敗。Data API snapshotのみ保存: "
@@ -238,7 +465,9 @@ def sync(
                 **analytics,
                 "traffic_sources": traffic_by_id.get(video_id, {}),
                 "search_terms": search_by_id.get(video_id, []),
+                "retention_curve": retention_by_id.get(video_id, []),
             }
+        workdir = _safe_workdir(spec, str(recorded.get("workdir") or ""))
         videos.append(
             {
                 "video_id": video_id,
@@ -246,6 +475,7 @@ def sync(
                 "corner": str(recorded.get("corner") or ""),
                 "topic": topic,
                 "topic_metadata": history._row_topic_metadata(recorded),
+                "workdir": workdir,
                 "format_traits": _format_traits(spec, recorded),
                 "history_ts": str(recorded.get("ts") or ""),
                 "published_at": str(detail.get("published_at") or ""),
@@ -268,6 +498,7 @@ def sync(
         "analytics": analytics_status,
         "traffic_sources": traffic_status,
         "search_terms": search_status,
+        "retention_curve": retention_status,
         "videos": videos,
     }
     path = _snapshot_path(spec)

@@ -459,6 +459,72 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertIn("検索発見（Discovery）", candidate["body"])
 
+    def test_build_cycle_candidate_includes_retention_moments_without_proposal(self) -> None:
+        """issue #149 (Sol review指摘): 形式仮説・gap動画が無くても、matching
+        cornerに明瞭な維持率の山/谷があればレポート候補を生成する。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "video", decision, [], set()
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "data_api": {"duration": "PT1M"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.2, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.3, "watch_ratio": 0.40},  # dip
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.6, "watch_ratio": 0.40},  # dip
+                            {"elapsed_ratio": 0.7, "watch_ratio": 0.80},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec, [section], datetime(2026, 7, 26, tzinfo=timezone.utc), snapshot
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("維持率カーブの山/谷", candidate["body"])
+
+    def test_build_cycle_candidate_ignores_flat_retention_curve(self) -> None:
+        """issue #149: 山/谷の無い平坦なカーブでは無内容issueを作らない。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "video", decision, [], set()
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": i / 10, "watch_ratio": 0.70}
+                            for i in range(11)
+                        ]
+                    },
+                }
+            ],
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec, [section], datetime(2026, 7, 26, tzinfo=timezone.utc), snapshot
+        )
+
+        self.assertIsNone(candidate)
+
     def test_build_cycle_candidate_without_snapshot_keeps_legacy_behavior(self) -> None:
         """issue #164: snapshot未指定の呼び出しは従来どおりsection内容のみで
         判定する（非gapの通常ケースでNoneを維持）。"""
@@ -979,6 +1045,287 @@ class RunAllTest(unittest.TestCase):
         statuses = {row["channel"]: row["status"] for row in summary["channels"]}
         self.assertEqual(statuses["broken"], "error")
         self.assertEqual(statuses["alpha"], "skipped")  # performance_feedback未設定
+
+
+class RetentionCurveAnalysisTest(unittest.TestCase):
+    """issue #149: 維持率カーブの山/谷検出・シーン照合・レポート表示。"""
+
+    def test_retention_moments_detects_spike_and_dip(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.85},
+            {"elapsed_ratio": 0.4, "watch_ratio": 0.40},  # dip
+            {"elapsed_ratio": 0.6, "watch_ratio": 0.80},
+            {"elapsed_ratio": 0.8, "watch_ratio": 0.90},  # spike
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
+        ]
+        moments = performance.retention_moments(curve)
+        kinds = {m["kind"] for m in moments}
+        self.assertIn("dip", kinds)
+        self.assertIn("spike", kinds)
+
+    def test_retention_moments_uses_ratio_thresholds(self) -> None:
+        """issue #149: 閾値は比率（0.08=8%ポイント）で判定する。"""
+        at_threshold = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.40},  # dip（差0.48）
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.88},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.90},
+        ]
+        self.assertEqual(
+            [m["kind"] for m in performance.retention_moments(at_threshold)],
+            ["dip"],
+        )
+        below = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.83},  # 差0.06 < 0.08
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.89},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.90},
+        ]
+        self.assertEqual(performance.retention_moments(below), [])
+        # 再視聴（1.0超）も有効な山として検出する
+        rewound = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.5, "watch_ratio": 1.20},  # spike
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.90},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.90},
+        ]
+        self.assertEqual(
+            [m["kind"] for m in performance.retention_moments(rewound)],
+            ["spike"],
+        )
+
+    def test_retention_moments_detects_exact_threshold(self) -> None:
+        """issue #149 (Sol review指摘): ちょうど0.08の差もspike/dipとして
+        検出する（浮動小数誤差を考慮した >= / <= 判定）。"""
+        spike = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.50},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.50},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.58},  # 前後とちょうど0.08
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.50},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
+        ]
+        dip = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.58},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.58},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.50},  # 前後とちょうど0.08
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.58},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.58},
+        ]
+        self.assertEqual(
+            [m["kind"] for m in performance.retention_moments(dip)],
+            ["dip"],
+        )
+        self.assertEqual(
+            [m["kind"] for m in performance.retention_moments(spike)],
+            ["spike"],
+        )
+
+    def test_retention_moments_dip_requires_both_sides_over_threshold(self) -> None:
+        """issue #149 (Sol review指摘): dipは前後両方との差が閾値以上の場合
+        だけ検出する。片側だけの落差（左0.10・右0.01）では検出しない。"""
+        one_sided = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.60},  # 前0.10・後0.01
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.61},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.70},
+        ]
+        self.assertEqual(performance.retention_moments(one_sided), [])
+
+        both_sides = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.60},  # 前0.10・後0.10
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.70},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.70},
+        ]
+        self.assertEqual(
+            [m["kind"] for m in performance.retention_moments(both_sides)],
+            ["dip"],
+        )
+
+    def test_retention_curve_text_limits_headings_after_ten_moments(self) -> None:
+        """issue #149 (Sol review指摘): 10件到達後は動画見出しを追加せず、
+        省略通知を一度だけ表示する。"""
+        videos = []
+        for index in range(6):
+            videos.append(
+                {
+                    "video_id": f"v{index}",
+                    "corner": "video",
+                    "data_api": {"duration": "PT1M"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.2, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.3, "watch_ratio": 0.40},  # dip
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.6, "watch_ratio": 0.40},  # dip
+                            {"elapsed_ratio": 0.7, "watch_ratio": 0.80},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
+                        ]
+                    },
+                }
+            )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": videos,
+        }
+
+        text = performance_report._retention_curve_text(snapshot, "video")
+
+        # 各動画4モーメント × 6動画 = 24。10件まで表示（動画3件目の途中で
+        # 到達するため、見出しは10モーメント分＝動画3件分以内）。
+        self.assertLessEqual(text.count("維持率カーブの山/谷"), 10)
+        self.assertEqual(text.count("先頭10件まで表示します"), 1)
+        self.assertNotIn("- `v5`", text)
+
+    def test_retention_moments_ignores_flat_and_short_curves(self) -> None:
+        flat = [
+            {"elapsed_ratio": i / 10, "watch_ratio": 0.70} for i in range(11)
+        ]
+        self.assertEqual(performance.retention_moments(flat), [])
+        self.assertEqual(performance.retention_moments(flat[:4]), [])
+        self.assertEqual(performance.retention_moments([]), [])
+
+    def test_retention_moment_scenes_annotates_with_caption(self) -> None:
+        moments = [
+            {
+                "elapsed_ratio": 0.4,
+                "watch_ratio": 0.40,
+                "kind": "dip",
+            }
+        ]
+        script = {
+            "scenes": [
+                {"caption": "導入"},
+                {"caption": "展開"},
+                {"caption": "結び"},
+            ],
+        }
+        annotated = performance.retention_moment_scenes(moments, script, "PT100S")
+        self.assertEqual(annotated[0]["scene_index"], 1)
+        self.assertEqual(annotated[0]["scene_caption"], "展開")
+        self.assertAlmostEqual(annotated[0]["elapsed_seconds"], 40.0, delta=1.0)
+
+    def test_retention_moment_scenes_returns_moments_without_script(self) -> None:
+        moments = [
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.50, "kind": "dip"}
+        ]
+        annotated = performance.retention_moment_scenes(moments, {}, "PT100S")
+        self.assertEqual(annotated[0]["scene_index"], None)
+        self.assertEqual(annotated[0]["scene_caption"], "")
+
+    def test_retention_moment_scenes_unknown_duration_is_fail_closed(self) -> None:
+        """issue #149: 動画長を取得できない場合は位置不明（秒を捏造しない）。"""
+        moments = [
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.50, "kind": "dip"}
+        ]
+        annotated = performance.retention_moment_scenes(moments, {}, None)
+        self.assertIsNone(annotated[0]["elapsed_seconds"])
+        self.assertIsNone(annotated[0]["scene_index"])
+
+    def test_iso8601_duration_seconds(self) -> None:
+        self.assertEqual(performance._iso8601_duration_seconds("PT1M"), 60.0)
+        self.assertEqual(performance._iso8601_duration_seconds("PT1M30S"), 90.0)
+        self.assertEqual(performance._iso8601_duration_seconds("PT1H2M3S"), 3723.0)
+        self.assertEqual(performance._iso8601_duration_seconds("PT30S"), 30.0)
+        self.assertIsNone(performance._iso8601_duration_seconds("bad"))
+        self.assertIsNone(performance._iso8601_duration_seconds(""))
+        self.assertIsNone(performance._iso8601_duration_seconds(None))
+        # 末尾単位欠落・順序不正・重複単位・日数付きは fail-closed
+        self.assertIsNone(performance._iso8601_duration_seconds("PT1M30"))
+        self.assertIsNone(performance._iso8601_duration_seconds("PT30S1M"))
+        self.assertIsNone(performance._iso8601_duration_seconds("PT1M1M"))
+        self.assertIsNone(performance._iso8601_duration_seconds("P1DT1H"))
+        self.assertIsNone(performance._iso8601_duration_seconds("PT"))
+
+    def test_retention_moment_scenes_uses_duration_not_average_watch_time(self) -> None:
+        """issue #149: 秒位置は動画全長（ISO 8601）から算出する。"""
+        moments = [
+            {"elapsed_ratio": 0.8, "watch_ratio": 0.40, "kind": "dip"}
+        ]
+        annotated = performance.retention_moment_scenes(moments, {}, "PT1M")
+        self.assertAlmostEqual(annotated[0]["elapsed_seconds"], 48.0, delta=1.0)
+
+    def test_retention_curve_text_reports_moments_without_judging(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "workdir": str(Path(self._workdir())),
+                    "data_api": {"duration": "PT1M40S"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.2, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.4, "watch_ratio": 0.40},
+                            {"elapsed_ratio": 0.6, "watch_ratio": 0.70},
+                            {"elapsed_ratio": 0.8, "watch_ratio": 0.60},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.30},
+                        ],
+                    },
+                }
+            ],
+            "retention_curve": {"available": True},
+        }
+        text = performance_report._retention_curve_text(snapshot, "video")
+        self.assertIn("谷（dip）", text)
+        self.assertIn("成功・失敗を判定しません", text)
+        self.assertIn("該当箇所の内容と照合", text)
+
+    def test_retention_curve_text_fail_closed_when_no_curve(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "analytics": {"retention_curve": []},
+                }
+            ],
+            "retention_curve": {"available": True},
+        }
+        text = performance_report._retention_curve_text(snapshot, "video")
+        self.assertIn("取得できませんでした", text)
+        self.assertIn("推測で補いません", text)
+
+    def test_retention_curve_text_reports_global_failure(self) -> None:
+        """issue #149: カーブAPI全体の失敗は「Shortsで返さない」ではなく
+        取得失敗と明記する。"""
+        snapshot = {
+            "videos": [
+                {"video_id": "v1", "corner": "video", "analytics": {}}
+            ],
+            "retention_curve": {
+                "available": False,
+                "reason": "quota exceeded",
+            },
+        }
+        text = performance_report._retention_curve_text(snapshot, "video")
+        self.assertIn("取得に失敗しました", text)
+        self.assertIn("quota exceeded", text)
+
+    def _workdir(self) -> str:
+        import tempfile
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "script.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "narration": "あ" * 20 + "い" * 30,
+                    "scenes": [{"caption": "導入"}, {"caption": "展開"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return tmp.name
 
 
 if __name__ == "__main__":

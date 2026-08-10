@@ -390,6 +390,117 @@ def video_analytics(
     return results
 
 
+def video_retention_curves(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """動画別の視聴者維持率カーブを読み取る（issue #149）。
+
+    `audienceWatchRatio`（各時点の視聴維持率。0.9=90%）を
+    `elapsedVideoTimeRatio`（経過時間比率 0〜1）ディメンションで取得する。
+    Audience retention report の `video` filter は単一IDのみのため、動画ごとに
+    1リクエストを発行する。動画固有と確認済みの理由（プライバシー閾値等）だけ
+    `failed_by_video` へ記録して継続する。`invalidFilters` 等のリクエスト構造
+    不備や 401/403/429/5xx・ネットワーク障害は全体障害として即時 raise する。
+    Shorts等でAPIがデータを返さない場合は空のまま（欠落を0や「なし」と断定
+    しない fail-closed）。
+
+    戻り値は `(by_video, failed_by_video)` のタプル。
+    """
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+
+    # 動画固有と確認済みのHttpError reason（allow-list）。`invalidFilters` 等の
+    # リクエスト構造不備は含めない。
+    video_specific_reasons = frozenset(
+        {
+            "privacy",
+            "private",
+            "videonotfound",
+            "invalidvideoid",
+            "forbidden",
+        }
+    )
+
+    def _http_reason(exc: HttpError) -> str:
+        try:
+            details = exc.error_details
+        except Exception:
+            details = None
+        if isinstance(details, list):
+            for entry in details:
+                if isinstance(entry, dict) and entry.get("reason"):
+                    return " ".join(str(entry["reason"]).split()).casefold()
+        try:
+            public_reason = exc.reason
+        except Exception:
+            public_reason = None
+        if public_reason:
+            return " ".join(str(public_reason).split()).casefold()
+        return ""
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return {}, {}
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    by_video: dict[str, list[dict]] = {}
+    failed_by_video: dict[str, str] = {}
+    for video_id in ids:
+        try:
+            data = (
+                service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="audienceWatchRatio",
+                    dimensions="elapsedVideoTimeRatio",
+                    filters=f"video=={video_id}",
+                    maxResults=100,
+                )
+                .execute()
+            )
+        except HttpError as exc:
+            status = exc.resp.status
+            reason = _http_reason(exc)
+            if status in (400, 404) and reason in video_specific_reasons:
+                failed_by_video[video_id] = f"HTTP {status}: {reason}"
+                continue
+            raise
+        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        points: list[dict] = []
+        for values in data.get("rows", []):
+            row = dict(zip(headers, values))
+            ratio = row.get("elapsedVideoTimeRatio")
+            watch_ratio = row.get("audienceWatchRatio")
+            if ratio is None or watch_ratio is None:
+                continue
+            try:
+                ratio_value = float(ratio)
+                watch_value = float(watch_ratio)
+            except (TypeError, ValueError):
+                continue
+            if not (0.0 <= ratio_value <= 1.0):
+                continue
+            points.append(
+                {"elapsed_ratio": ratio_value, "watch_ratio": watch_value}
+            )
+        if points:
+            points.sort(key=lambda item: item["elapsed_ratio"])
+            by_video[video_id] = points
+    return by_video, failed_by_video
+
+
 def video_traffic_sources(
     video_ids: list[str],
     *,

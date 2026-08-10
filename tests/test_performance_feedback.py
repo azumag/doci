@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from doci import history, performance
+from doci import history, performance, performance_report
 
 
 class PerformanceFeedbackTest(unittest.TestCase):
@@ -320,6 +320,347 @@ class PerformanceFeedbackTest(unittest.TestCase):
         # id-2（Data APIが返さない）は照会対象外。snapshot出力に使われる
         # id-0 / id-1 だけが照会される。
         self.assertEqual(search_mock.call_args.args[0], ["id-0", "id-1"])
+
+    def test_sync_records_retention_curves(self) -> None:
+        """issue #149: Analyticsが返す維持率カーブをsnapshotの各videoの
+        analyticsへ保存する。取得できない動画は空のまま。"""
+        self._history(count=1)
+        rows = [
+            {
+                "ts": "2026-07-01T00:00:00+00:00",
+                "channel": self.spec.id,
+                "corner": "video",
+                "title": "Title 0",
+                "topic": "Topic 0",
+                "video_id": "id-0",
+                "status": "published",
+            }
+        ]
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=(
+                    {
+                        "id-0": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.40},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.30},
+                        ]
+                    },
+                    {},
+                ),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(snapshot["retention_curve"]["available"])
+        self.assertEqual(
+            snapshot["videos"][0]["analytics"]["retention_curve"],
+            [
+                {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                {"elapsed_ratio": 0.5, "watch_ratio": 0.40},
+                {"elapsed_ratio": 1.0, "watch_ratio": 0.30},
+            ],
+        )
+
+    def test_retention_queries_only_videos_with_analytics_rows(self) -> None:
+        """issue #149 (Sol review指摘): Analytics実績が無い動画は維持率APIの
+        照会対象にしない。snapshotには retention_curve キーを付けない。"""
+        rows = []
+        for index in range(2):
+            rows.append(
+                {
+                    "ts": f"2026-07-{index + 1:02d}T00:00:00+00:00",
+                    "channel": self.spec.id,
+                    "corner": "video",
+                    "title": f"Title {index}",
+                    "topic": f"Topic {index}",
+                    "video_id": f"id-{index}",
+                    "status": "published",
+                    "workdir": str(self.root / "run-0"),
+                }
+            )
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(2)
+        ]
+        # id-0 のみAnalytics実績あり（id-1は古い/無実績）
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=(
+                    {"id-0": [{"elapsed_ratio": 0.5, "watch_ratio": 0.60}]},
+                    {},
+                ),
+            ) as retention_mock,
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(retention_mock.call_args.args[0], ["id-0"])
+        self.assertEqual(
+            snapshot["videos"][0]["analytics"]["retention_curve"],
+            [{"elapsed_ratio": 0.5, "watch_ratio": 0.60}],
+        )
+        # 照会対象外の id-1 は retention_curve キー自体を持たない。
+        analytics_v1 = snapshot["videos"][1]["analytics"]
+        if isinstance(analytics_v1, dict):
+            self.assertNotIn("retention_curve", analytics_v1)
+        else:
+            self.assertIsNone(analytics_v1)
+
+    def test_retention_sync_workdir_is_scoped_to_output_dir(self) -> None:
+        """issue #149 (Sol review指摘): snapshotへ保存されるworkdirは出力領域
+        配下のみ。領域外パスは空になる。"""
+        self._history(count=1)
+        rows = [
+            {
+                "ts": "2026-07-01T00:00:00+00:00",
+                "channel": self.spec.id,
+                "corner": "video",
+                "title": "Title 0",
+                "topic": "Topic 0",
+                "video_id": "id-0",
+                "status": "published",
+                "workdir": "/etc/passwd-adjacent",
+            }
+        ]
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=(
+                    {"id-0": [{"elapsed_ratio": 0.5, "watch_ratio": 0.60}]},
+                    {},
+                ),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(snapshot["videos"][0]["workdir"], "")
+
+    def test_retention_snapshot_workdir_enables_scene_readback(self) -> None:
+        """issue #149: 出力領域内のworkdirがsnapshotへ保存され、そこから
+        script.json の scene caption を読み取れる（sync→report実経路の回帰）。"""
+        workdir = self.root / "run-0"
+        workdir.mkdir()
+        (workdir / "script.json").write_text(
+            json.dumps(
+                {
+                    "narration": "あ" * 50,
+                    "scenes": [{"caption": "導入"}, {"caption": "展開"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        rows = [
+            {
+                "ts": "2026-07-01T00:00:00+00:00",
+                "channel": self.spec.id,
+                "corner": "video",
+                "title": "Title 0",
+                "topic": "Topic 0",
+                "video_id": "id-0",
+                "status": "published",
+                "workdir": str(workdir),
+            }
+        ]
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=(
+                    {
+                        "id-0": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.40},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.30},
+                        ]
+                    },
+                    {},
+                ),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        row = snapshot["videos"][0]
+        self.assertEqual(row["workdir"], str(workdir.resolve()))
+        script = performance_report._script_for_video(row)
+        self.assertEqual(script["scenes"][0]["caption"], "導入")
 
     def test_traffic_status_change_writes_new_snapshot_row(self) -> None:
         """issue #164 (Sol review指摘4): traffic_sources のavailable/reasonが
