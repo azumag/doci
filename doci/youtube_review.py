@@ -36,6 +36,21 @@ _YOUTUBE_CONTEXT_MARKERS = (
     "ショート",
     "shorts",
 )
+_CONTENT_GAP_MARKERS = (
+    "コンテンツギャップ",
+    "コンテンツ ギャップ",
+    "content gap",
+)
+_CONTENT_GAP_MISLEADING_MARKERS = (
+    "検索されていないテーマ",
+    "検索されていない答え",
+    "検索されてないテーマ",
+    "検索されてない答え",
+    "検索されていない話題",
+    "検索されてない話題",
+    "検索されていない題材",
+    "検索されてない題材",
+)
 _YOUTUBE_OPERATION_MARKERS = (
     "ctr",
     "サムネ",
@@ -52,6 +67,10 @@ _YOUTUBE_OPERATION_MARKERS = (
     "チャンネル登録",
     "関連動画",
     "流入元",
+    "検索流入",
+    "検索語句",
+    "コンテンツギャップ",
+    "コンテンツ ギャップ",
     "タイトル",
     "冒頭",
 )
@@ -67,6 +86,8 @@ _PROBLEM_SIGNAL_MARKERS = (
     "インプレッション",
     "流入元",
     "関連動画",
+    "検索流入",
+    "検索語句",
     "低い",
     "下が",
     "伸びない",
@@ -106,6 +127,7 @@ _ACTION_MARKERS = (
     "調整",
     "開く",
     "選ぶ",
+    "選び",
     "削る",
     "追加",
 )
@@ -153,6 +175,24 @@ def _matched_markers(value: str, markers: tuple[str, ...]) -> set[str]:
     return {marker for marker in markers if marker in folded}
 
 
+def _misleading_content_gap(gap_query: str, *values: str) -> bool:
+    """コンテンツギャップを「検索されていないテーマ」と誤解する表現を検出する。
+
+    issue #164: 公式の説明ではコンテンツギャップは「検索されているのに十分な
+    結果がない検索領域」であり、「検索されていないテーマ」ではない。誤解表現が
+    タイトル等に含まれる場合は自動公開にしない（推測・断定を公開経路へ通さない）。
+    `gap_query` が非空の企画はコンテンツギャップ企画として扱い、本文に
+    「コンテンツギャップ」という語が無くても誤解表現を検出する。
+    """
+    joined = " ".join(values).casefold()
+    gap_context = _contains_any(joined, _CONTENT_GAP_MARKERS) or bool(
+        str(gap_query or "").strip()
+    )
+    if not gap_context:
+        return False
+    return any(marker in joined for marker in _CONTENT_GAP_MISLEADING_MARKERS)
+
+
 def assess(script: dict) -> ThemeAssessment:
     """3明示項目と主題適合が全て厳格に確認できる場合だけ自動公開可とする。"""
     research = script.get("_research")
@@ -167,6 +207,7 @@ def assess(script: dict) -> ThemeAssessment:
     angle = _text(research.get("angle"))
     description = _text(script.get("description"))
     narration = _text(script.get("narration"), limit=5000)
+    gap_query = _text(research.get("gap_query"), limit=200)
 
     audience_clear = audience.casefold() == "youtube制作者".casefold()
     problem_markers = _matched_markers(problem, _YOUTUBE_OPERATION_MARKERS)
@@ -211,6 +252,16 @@ def assess(script: dict) -> ThemeAssessment:
             narration,
             theme_fit_reason,
         )
+        and not _misleading_content_gap(
+            gap_query,
+            problem,
+            viewer_action,
+            topic,
+            angle,
+            title,
+            description,
+            narration,
+        )
     )
 
     reasons: list[str] = []
@@ -225,7 +276,21 @@ def assess(script: dict) -> ThemeAssessment:
     if not theme_fit_reason:
         reasons.append("主題適合の理由がない")
     if not subject_clear:
-        reasons.append("企画・タイトルからYouTube主題を明確に確認できない")
+        if _misleading_content_gap(
+            gap_query,
+            problem,
+            viewer_action,
+            topic,
+            angle,
+            title,
+            description,
+            narration,
+        ):
+            reasons.append(
+                "コンテンツギャップを「検索されていないテーマ」と誤解する表現がある"
+            )
+        else:
+            reasons.append("企画・タイトルからYouTube主題を明確に確認できない")
 
     return ThemeAssessment(
         audience=audience,

@@ -198,6 +198,12 @@ _TOPIC_METADATA_FIELDS = (
     "comparison_key",
     "youtube_creator_problem",
     "viewer_action",
+    # issue #164: コンテンツギャップ企画の選定情報。企画時に選んだ検索語と
+    # 確認日時・表示理由・UI確認情報を保存し、公開後に検索流入と対応付ける。
+    "gap_query",
+    "gap_observed_at",
+    "gap_context",
+    "trend_ui_version",
 )
 _GENERIC_CANONICAL_THEMES = frozenset(
     {
@@ -321,6 +327,13 @@ def topic_metadata(
         # doci運用への適用要否は人間が判断する(tactic_issues.py参照)。
         "youtube_creator_problem": text("youtube_creator_problem", 200),
         "viewer_action": text("viewer_action", 300),
+        # issue #164: コンテンツギャップ企画の選定情報は題材台帳にも
+        # bounded な文字列として残す（検索語が空でも「選んでいない」を区別
+        # できるよう、unknown は付けずに空文字のまま保存する）。
+        "gap_query": text("gap_query", 200),
+        "gap_observed_at": text("gap_observed_at", 40),
+        "gap_context": text("gap_context", 300),
+        "trend_ui_version": text("trend_ui_version", 80),
     }
 
 
@@ -434,6 +447,10 @@ def _row_topic_metadata(
                     ("comparison_key", "comparison_key"),
                     ("youtube_creator_problem", "youtube_creator_problem"),
                     ("viewer_action", "viewer_action"),
+                    ("gap_query", "gap_query"),
+                    ("gap_observed_at", "gap_observed_at"),
+                    ("gap_context", "gap_context"),
+                    ("trend_ui_version", "trend_ui_version"),
                 ):
                     if (
                         source_key in research

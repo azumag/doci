@@ -2124,6 +2124,15 @@ class ResearchPromptTest(unittest.TestCase):
         self.assertIn("分野名・チャンネル名だけにせず", prompt)
         self.assertIn("迷った場合は必ず ambiguous", prompt)
         self.assertIn("既存台本: 視聴維持率の確認手順です。", prompt)
+        # issue #164: コンテンツギャップの正確な説明・記録フィールド・
+        # UI段階導入の注記がプロンプトへ反映されている。
+        self.assertIn("検索されているのに十分な", prompt)
+        self.assertIn("結果がない検索領域", prompt)
+        self.assertIn("gap_query", prompt)
+        self.assertIn("gap_observed_at", prompt)
+        self.assertIn("gap_context", prompt)
+        self.assertIn("trend_ui_version", prompt)
+        self.assertIn("固定UIとして断定しない", prompt)
         self.assertEqual(result["topic"], "題材")
         self.assertEqual(len(result["facts"]), 3)
         self.assertEqual(len(result["examples"]), 2)

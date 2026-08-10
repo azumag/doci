@@ -1,12 +1,42 @@
 from __future__ import annotations
 
+import json
 import unittest
+from googleapiclient.errors import HttpError
 from types import SimpleNamespace
 import tempfile
 from pathlib import Path
 from unittest import mock
 
 from doci import youtube
+
+
+class _FakeResp:
+    """httplib2 Responseと同様にdict-likeアクセスを持つ最小スタブ。"""
+
+    def __init__(self, status: int, reason: str) -> None:
+        self.status = status
+        self.reason = reason
+
+    def get(self, key: str, default=None):
+        return {"content-type": "application/json"}.get(key, default)
+
+
+def _google_http_error(status: int, reason: str) -> HttpError:
+    """Google APIの実際のJSONエラー形状からHttpErrorを生成する。"""
+    body = json.dumps(
+        {
+            "error": {
+                "code": status,
+                "message": reason,
+                "errors": [{"reason": reason, "message": reason}],
+            }
+        }
+    ).encode("utf-8")
+    return HttpError(
+        _FakeResp(status, "Bad Request" if status == 400 else "Not Found"),
+        body,
+    )
 
 
 class _Request:
@@ -242,6 +272,261 @@ class YouTubeSearchTest(unittest.TestCase):
                 end_date="2026-07-26",
             )
         self.assertEqual(results[0]["engaged_views"], 0)
+
+    def test_video_traffic_sources_maps_source_type_views(self) -> None:
+        """issue #164: トラフィックソース種別ごとのviewsをvideo_idで返す。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "insightTrafficSourceType"},
+                {"name": "views"},
+            ],
+            "rows": [
+                ["abc123", "YT_SEARCH", 42],
+                ["abc123", "SHORTS", 10],
+                ["def456", "YT_SEARCH", 7],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video = youtube.video_traffic_sources(
+                ["abc123", "def456"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(
+            by_video,
+            {
+                "abc123": {"YT_SEARCH": 42, "SHORTS": 10},
+                "def456": {"YT_SEARCH": 7},
+            },
+        )
+        self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video,insightTrafficSourceType")
+        self.assertEqual(reports.query.call_args.kwargs["metrics"], "views")
+
+    def test_video_traffic_sources_drops_zero_and_empty_rows(self) -> None:
+        """issue #164: views0や空の種別は欠落を0と断定せず結果から除く。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "insightTrafficSourceType"},
+                {"name": "views"},
+            ],
+            "rows": [
+                ["abc123", "YT_SEARCH", 0],
+                ["abc123", "", 5],
+                ["", "YT_SEARCH", 9],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video = youtube.video_traffic_sources(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+        self.assertEqual(by_video, {})
+
+    def test_video_traffic_sources_paginates_beyond_200_rows(self) -> None:
+        """issue #164 (Sol review指摘5): 200行を超えるsourceが複数ページに
+        分かれても、startIndexページングで全行を結合する。"""
+        first_page = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "insightTrafficSourceType"},
+                {"name": "views"},
+            ],
+            "rows": [
+                ["abc123", f"TYPE_{index}", index + 1] for index in range(200)
+            ],
+        }
+        second_page = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "insightTrafficSourceType"},
+                {"name": "views"},
+            ],
+            "rows": [["abc123", "EXTRA", 999]],
+        }
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [first_page, second_page]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video = youtube.video_traffic_sources(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(len(by_video["abc123"]), 201)
+        self.assertEqual(by_video["abc123"]["EXTRA"], 999)
+        calls = reports.query.call_args_list
+        self.assertEqual(calls[0].kwargs["startIndex"], 1)
+        self.assertEqual(calls[1].kwargs["startIndex"], 201)
+
+    def test_video_search_terms_maps_terms_and_views(self) -> None:
+        """issue #164: 具体的な検索語句をviews付きで返す。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "insightTrafficSourceDetail"},
+                {"name": "views"},
+            ],
+            "rows": [
+                ["ショート 企画", 30],
+                ["コンテンツギャップ", 12],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video, failed = youtube.video_search_terms(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(
+            by_video,
+            {
+                "abc123": [
+                    {"term": "ショート 企画", "views": 30},
+                    {"term": "コンテンツギャップ", "views": 12},
+                ]
+            },
+        )
+        self.assertEqual(failed, {})
+        self.assertEqual(
+            reports.query.call_args.kwargs["dimensions"],
+            "insightTrafficSourceDetail",
+        )
+        self.assertEqual(
+            reports.query.call_args.kwargs["filters"],
+            "video==abc123;insightTrafficSourceType==YT_SEARCH",
+        )
+        self.assertEqual(reports.query.call_args.kwargs["maxResults"], 25)
+
+    def test_video_search_terms_keeps_partial_results_on_individual_failure(self) -> None:
+        """issue #164 (Sol review指摘): 1動画の取得不能が他動画の結果へ
+        波及しない。成功した動画の検索語句は保持する。"""
+        reports = mock.Mock()
+        ok_page = {
+            "columnHeaders": [
+                {"name": "insightTrafficSourceDetail"},
+                {"name": "views"},
+            ],
+            "rows": [["コンテンツギャップ", 12]],
+        }
+        http_error = _google_http_error(400, "privacy")
+        reports.query.return_value.execute.side_effect = [http_error, ok_page]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video, failed = youtube.video_search_terms(
+                ["fail-1", "ok-2"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(
+            by_video,
+            {"ok-2": [{"term": "コンテンツギャップ", "views": 12}]},
+        )
+        self.assertIn("HTTP 400", failed["fail-1"])
+
+    def test_video_search_terms_raises_immediately_on_global_error(self) -> None:
+        """issue #164: 認証・権限・クォータ等の全体障害（HTTP 403等）は
+        動画固有エラーと区別して即時中断し、残りを照会し続けない。"""
+        reports = mock.Mock()
+        http_error = _google_http_error(403, "quotaExceeded")
+        reports.query.return_value.execute.side_effect = http_error
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaises(HttpError):
+                youtube.video_search_terms(
+                    ["a", "b", "c", "d"],
+                    start_date="2026-07-01",
+                    end_date="2026-07-26",
+                )
+
+        # 1件目で即時中断（2件目以降へは進まない）。
+        self.assertEqual(reports.query.call_count, 1)
+
+    def test_video_search_terms_invalid_filters_is_global_error(self) -> None:
+        """issue #164 (Sol review指摘): invalidFilters等のリクエスト構造不備
+        （HTTP 400）は動画固有エラーとせず、全体障害として1件目で中断する。"""
+        reports = mock.Mock()
+        http_error = _google_http_error(400, "invalidFilters")
+        reports.query.return_value.execute.side_effect = http_error
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaises(HttpError):
+                youtube.video_search_terms(
+                    ["a", "b"],
+                    start_date="2026-07-01",
+                    end_date="2026-07-26",
+                )
+        self.assertEqual(reports.query.call_count, 1)
+
+    def test_video_search_terms_raises_when_all_videos_fail_video_specific(self) -> None:
+        """issue #164: 全動画が動画固有エラー（HTTP 400 privacy等）で失敗した
+        場合は、部分取得成功とせず例外を再送出する。"""
+        reports = mock.Mock()
+        http_error = _google_http_error(400, "privacy")
+        reports.query.return_value.execute.side_effect = http_error
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaises(HttpError):
+                youtube.video_search_terms(
+                    ["a", "b"],
+                    start_date="2026-07-01",
+                    end_date="2026-07-26",
+                )
+        # 全動画が失敗するまでは照会する（部分成功と区別するため）。
+        self.assertEqual(reports.query.call_count, 2)
+
+    def test_video_search_terms_empty_input_returns_tuple(self) -> None:
+        """issue #164 (Sol review指摘): 空入力でも通常時と同じタプルを返す。"""
+        by_video, failed = youtube.video_search_terms(
+            [],
+            start_date="2026-07-01",
+            end_date="2026-07-26",
+        )
+        self.assertEqual(by_video, {})
+        self.assertEqual(failed, {})
 
 
 if __name__ == "__main__":

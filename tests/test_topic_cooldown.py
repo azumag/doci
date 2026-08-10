@@ -594,6 +594,62 @@ class TopicCooldownTest(unittest.TestCase):
             metadata["viewer_action"], "オートダビングを1本の動画で有効にして確認する"
         )
 
+    def test_topic_metadata_saves_content_gap_selection_fields(self) -> None:
+        # issue #164: コンテンツギャップ企画の選定情報（検索語・確認日時・
+        # 表示理由・UI確認）を題材台帳へ永続化できることを固定する。
+        metadata = history.topic_metadata(
+            "検索されているのに足りない答えから次のショートを作る",
+            {
+                "gap_query": "ショート 企画 ネタ切れ",
+                "gap_observed_at": "2026-08-09 15:58",
+                "gap_context": "検索結果がない",
+                "trend_ui_version": "新UI 段階導入 2026-07",
+            },
+        )
+        self.assertEqual(metadata["gap_query"], "ショート 企画 ネタ切れ")
+        self.assertEqual(metadata["gap_observed_at"], "2026-08-09 15:58")
+        self.assertEqual(metadata["gap_context"], "検索結果がない")
+        self.assertEqual(metadata["trend_ui_version"], "新UI 段階導入 2026-07")
+
+    def test_topic_metadata_defaults_content_gap_fields_to_empty(self) -> None:
+        # issue #164: gapフィールドが無い企画では空文字のまま（無害）であること。
+        metadata = history.topic_metadata("通常の題材", {})
+        self.assertEqual(metadata["gap_query"], "")
+        self.assertEqual(metadata["gap_observed_at"], "")
+        self.assertEqual(metadata["gap_context"], "")
+        self.assertEqual(metadata["trend_ui_version"], "")
+
+    def test_row_topic_metadata_recovers_content_gap_fields_from_script(self) -> None:
+        # issue #164: topic_metadata未保存の旧history行でも、workdirの
+        # script.jsonの_researchからgap系フィールドを復元できることを固定する。
+        workdir = self.root / "old-gap-run"
+        workdir.mkdir()
+        (workdir / "script.json").write_text(
+            json.dumps(
+                {
+                    "_research": {
+                        "gap_query": "コンテンツギャップ ショート",
+                        "gap_observed_at": "2026-08-09",
+                        "gap_context": "関連性の高い動画が古い",
+                        "trend_ui_version": "新UI 2026-08-10",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        row = {
+            "topic": "コンテンツギャップから次の1本を選ぶ",
+            "workdir": str(workdir),
+        }
+
+        metadata = history._row_topic_metadata(row)
+
+        self.assertEqual(metadata["gap_query"], "コンテンツギャップ ショート")
+        self.assertEqual(metadata["gap_observed_at"], "2026-08-09")
+        self.assertEqual(metadata["gap_context"], "関連性の高い動画が古い")
+        self.assertEqual(metadata["trend_ui_version"], "新UI 2026-08-10")
+
     def test_rotation_ignores_queue_skip_and_cancel_events(self) -> None:
         self._append(
             {

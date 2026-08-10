@@ -390,6 +390,193 @@ def video_analytics(
     return results
 
 
+def video_traffic_sources(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict[str, dict[str, int]]:
+    """動画別トラフィックソース種別のviewsを読み取る（issue #164）。
+
+    `insightTrafficSourceType` ディメンションで、`YT_SEARCH`（YouTube検索）等の
+    種別ごとの views を返す。取得できない動画・種別は含めない（取得可能な
+    readbackであり、欠落を0として推測しない）。Shorts等でAPIがデータを返さない
+    場合は空のまま（fail-closed）。
+    """
+    from googleapiclient.discovery import build
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return {}
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    by_video: dict[str, dict[str, int]] = {}
+    for offset in range(0, len(ids), 200):
+        # startIndexページング: 200動画×複数sourceで200行を超えると
+        # 下位行が暗黙に切り捨てられるため、APIが返せる全行を読む
+        # （Sol review指摘5）。
+        start_index = 1
+        while True:
+            data = (
+                service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="views",
+                    dimensions="video,insightTrafficSourceType",
+                    filters=f"video=={','.join(ids[offset : offset + 200])}",
+                    sort="-views",
+                    maxResults=200,
+                    startIndex=start_index,
+                )
+                .execute()
+            )
+            headers = [
+                header.get("name", "") for header in data.get("columnHeaders", [])
+            ]
+            rows = data.get("rows", [])
+            for values in rows:
+                row = dict(zip(headers, values))
+                video_id = str(row.get("video", ""))
+                source_type = str(row.get("insightTrafficSourceType", "") or "")
+                views = int(row.get("views", 0) or 0)
+                if not video_id or not source_type or views <= 0:
+                    continue
+                by_video.setdefault(video_id, {})[source_type] = views
+            if len(rows) < 200:
+                break
+            start_index += len(rows)
+    return by_video
+
+
+def video_search_terms(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """動画別の具体的な検索語句とviewsを読み取る（issue #164）。
+
+    `insightTrafficSourceDetail` ディメンション（公式仕様）で、YouTube検索
+    （`insightTrafficSourceType==YT_SEARCH`）から流入した検索語句を動画単位で
+    返す。`maxResults` は公式上限の25。APIがShorts等でデータを返さない場合は
+    空リスト（欠落を0や「なし」と断定しない）。取得できる範囲だけ記録する。
+
+    戻り値は `(by_video, failed_by_video)` のタプル。動画固有と確認済みの理由
+    （`insightTrafficSourceType` 除外・プライバシー閾値・動画ID不明）だけを
+    `failed_by_video` へ記録し、成功分は保持する。`invalidFilters` 等の
+    リクエスト構造不備・認証・権限・クォータ・サーバ障害（401/403/429/5xx）や
+    ネットワーク障害は全体障害として即時 raise する。
+    """
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+
+    # 動画固有の取得不能として許容するHttpError reason（allow-list）。
+    # `invalidFilters` 等のリクエスト構造不備や、動画IDとは無関係の理由は含めない。
+    video_specific_reasons = frozenset(
+        {
+            "insighttrafficsourcedetail",
+            "insighttrafficsourcetype",
+            "privacy",
+            "private",
+            "videonotfound",
+            "invalidvideoid",
+        }
+    )
+
+    def _http_reason(exc: HttpError) -> str:
+        """Google APIエラーのsemantic reasonを抽出する。
+
+        `resp.reason` は通常「Bad Request」等のHTTP reason phraseであり分類に
+        使えないため、semantic reasonは `error_details[].reason` → 公開属性
+        `exc.reason` の順で取り、どちらも無ければ空文字を返す。
+        """
+        try:
+            details = exc.error_details
+        except Exception:
+            details = None
+        if isinstance(details, list):
+            for entry in details:
+                if isinstance(entry, dict) and entry.get("reason"):
+                    return " ".join(str(entry["reason"]).split()).casefold()
+        public_reason = getattr(exc, "reason", None)
+        if public_reason:
+            return " ".join(str(public_reason).split()).casefold()
+        return ""
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return {}, {}
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    by_video: dict[str, list[dict]] = {}
+    failed_by_video: dict[str, str] = {}
+    last_video_specific_error: HttpError | None = None
+    all_failed = True
+    for video_id in ids:
+        try:
+            data = (
+                service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="views",
+                    dimensions="insightTrafficSourceDetail",
+                    filters=f"video=={video_id};insightTrafficSourceType==YT_SEARCH",
+                    sort="-views",
+                    maxResults=25,
+                )
+                .execute()
+            )
+            all_failed = False
+        except HttpError as exc:
+            status = exc.resp.status
+            reason = _http_reason(exc)
+            if status in (400, 404) and reason in video_specific_reasons:
+                # 動画固有と確認済みの理由（プライバシー閾値・不正ID等）だけ
+                # 他動画の結果へ波及させずスキップし、失敗情報だけ記録する。
+                failed_by_video[video_id] = (
+                    f"HTTP {status}: {reason or 'unknown'}"
+                )
+                last_video_specific_error = exc
+                continue
+            # invalidFilters・不正dimensions/date等のリクエスト不備や
+            # 認証・クォータ・サーバ障害は全体障害として即時中断する。
+            raise
+        except Exception:
+            # 非HttpError（ネットワーク等）は全体障害として即時中断する。
+            raise
+        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        for values in data.get("rows", []):
+            row = dict(zip(headers, values))
+            term = str(row.get("insightTrafficSourceDetail", "") or "")
+            views = int(row.get("views", 0) or 0)
+            if not term or views <= 0:
+                continue
+            by_video.setdefault(video_id, []).append({"term": term, "views": views})
+    if all_failed and last_video_specific_error is not None:
+        # 全動画が動画固有エラーで失敗した場合、部分取得成功ではなく
+        # 全体障害として扱い呼び出し元が status へ記録できるよう再送出する。
+        raise last_video_specific_error
+    return by_video, failed_by_video
+
+
 def _video_id(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()

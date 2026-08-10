@@ -409,7 +409,146 @@ def _cycle_title(spec: ChannelSpec, now: datetime, fp: str) -> str:
     return f"[feedback] {spec.id} 実績レポート {now.date().isoformat()} ({fp[:8]})"
 
 
-def _cycle_body(spec: ChannelSpec, sections: list[dict], fp: str, now: datetime) -> str:
+def _normalise_term(value: str) -> str:
+    """検索語句の正規化（空白畳み込み＋小文字化）。完全一致判定に使う。"""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _gap_match_status(gap_query: str, terms: list[dict]) -> str:
+    """gap_query と実検索語句の対応を判定する（issue #164）。
+
+    - `matched`: gap_query が実検索語句と正規化完全一致
+    - `not_confirmed`: 取得できた上位語句に完全一致がない。意味的一致や上位25件
+      外に存在する可能性を否定しない（「流入語句なし」と断定しない）
+    - `not_evaluated`: gap_query または実検索語句が取得できていない（推測しない）
+    """
+    gap = _normalise_term(gap_query)
+    if not gap or not terms:
+        return "not_evaluated"
+    actual = {_normalise_term(item.get("term")) for item in terms}
+    return "matched" if gap in actual else "not_confirmed"
+
+
+def _clean_text(value: object, limit: int = 200) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
+    """検索発見（Discovery）と視聴後評価（Satisfaction）を分離して表示する。
+
+    issue #164: コンテンツギャップ企画の検証は「狙った検索需要から見つけられたか」
+    （検索流入）と「見つけた視聴者が視聴を続けたか」（維持率）を別々に扱う。
+    Analytics APIが返さない指標は0や「なし」と断定せず、取得不可と明記する。
+    """
+    if not isinstance(snapshot, dict):
+        return "- Discovery / Satisfaction: snapshot未取得のため評価しません"
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    gap_videos: list[tuple[dict, str]] = []
+    for row in corner_videos:
+        metadata = row.get("topic_metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        gap_query = _clean_text(metadata.get("gap_query"), limit=200)
+        if gap_query:
+            gap_videos.append((row, gap_query))
+    if not corner_videos:
+        return "- Discovery / Satisfaction: このcornerの動画がsnapshotにありません"
+    if not gap_videos:
+        return (
+            "- Discovery / Satisfaction: このcornerにコンテンツギャップ企画"
+            "（gap_query記録）の動画がありません。通常動画は対象外です"
+        )
+    discovery_lines: list[str] = []
+    satisfaction_lines: list[str] = []
+
+    def format_terms(terms: list[dict]) -> str:
+        if not terms:
+            return ""
+        top_terms = ", ".join(
+            f"「{t.get('term')}」({int(t.get('views', 0) or 0)}回)"
+            for t in sorted(
+                terms,
+                key=lambda item: int(item.get("views", 0) or 0),
+                reverse=True,
+            )[:3]
+        )
+        return f"  - 検索語句: {top_terms}"
+
+    for row, gap_query in gap_videos:
+        video_id = str(row.get("video_id") or "")
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        traffic = analytics.get("traffic_sources")
+        traffic = traffic if isinstance(traffic, dict) else {}
+        terms = analytics.get("search_terms")
+        terms = terms if isinstance(terms, list) else []
+        total_views = int(analytics.get("views", 0) or 0)
+        search_views = int(traffic.get("YT_SEARCH", 0) or 0)
+        gap_line = ""
+        gap_status = _gap_match_status(gap_query, terms)
+        if gap_query:
+            gap_line = {
+                "matched": f"（狙った検索語「{gap_query}」と完全一致）",
+                "not_confirmed": (
+                    f"（取得できた上位語句に「{gap_query}」の完全一致なし。"
+                    "意味的一致・上位25件外は未評価）"
+                ),
+                "not_evaluated": "（gap_queryとの一致判定は材料不足で保留）",
+            }[gap_status]
+        if total_views > 0 and search_views > 0:
+            share = search_views * 100.0 / total_views
+            discovery_lines.append(
+                f"- `{video_id}`: YouTube検索からの視聴 {search_views} 回"
+                f"（全体の {share:.1f}%）{gap_line}"
+            )
+            term_line = format_terms(terms)
+            if term_line:
+                discovery_lines.append(term_line)
+        elif terms:
+            # traffic sourceのバッチ取得が失敗しても、検索語句（動画個別取得）
+            # が成功していれば実データを表示する。流入回数は不明として
+            # 0や「なし」と断定しない（Claude review指摘）。
+            discovery_lines.append(
+                f"- `{video_id}`: YouTube検索からの流入回数は取得できませんでした"
+                f"（traffic source取得不可）。検索語句は取得済み{gap_line}"
+            )
+            term_line = format_terms(terms)
+            if term_line:
+                discovery_lines.append(term_line)
+        else:
+            discovery_lines.append(
+                f"- `{video_id}`: YouTube検索からの流入を取得できませんでした"
+                "（Analytics APIが返さない場合は推測で補いません）"
+            )
+        avg_percent = analytics.get("average_view_percentage")
+        if avg_percent is not None:
+            satisfaction_lines.append(
+                f"- `{video_id}`: 平均視聴維持率 {float(avg_percent):.1f}%"
+            )
+        else:
+            satisfaction_lines.append(
+                f"- `{video_id}`: 維持率を取得できませんでした（推測で補いません）"
+            )
+    return (
+        "### 検索発見（Discovery）\n\n"
+        + "\n".join(discovery_lines)
+        + "\n\n### 視聴後評価（Satisfaction）\n\n"
+        + "\n".join(satisfaction_lines)
+    )
+
+
+def _cycle_body(
+    spec: ChannelSpec,
+    sections: list[dict],
+    fp: str,
+    now: datetime,
+    snapshot: dict | None = None,
+) -> str:
     lines: list[str] = [
         feedback_issues.feedback_marker(fp),
         feedback_issues.channel_marker(spec.id),
@@ -437,6 +576,8 @@ def _cycle_body(spec: ChannelSpec, sections: list[dict], fp: str, now: datetime)
             "### 前回提案の効果検証",
             "",
             _evaluation_text(section.get("evaluations") or []),
+            "",
+            _discovery_satisfaction_text(snapshot, section["corner"]),
         ]
     lines += [
         "",
@@ -451,11 +592,31 @@ def _cycle_body(spec: ChannelSpec, sections: list[dict], fp: str, now: datetime)
     return "\n".join(lines) + "\n"
 
 
-def build_cycle_candidate(spec: ChannelSpec, sections: list[dict], now: datetime) -> dict | None:
-    has_content = any(
+def build_cycle_candidate(
+    spec: ChannelSpec,
+    sections: list[dict],
+    now: datetime,
+    snapshot: dict | None = None,
+) -> dict | None:
+    has_section_content = any(
         section.get("proposal") is not None or section.get("evaluations")
         for section in sections
     )
+    # issue #164: 形式仮説の有無に関わらず、gap動画の検索発見・視聴後評価
+    # が揃っていれば報告候補として扱う（snapshot未指定の従来呼び出しは
+    # 従来どおりsection内容だけで判定）。
+    # 表示対象はsectionのcornerと一致する動画だけ。cornerがどのsectionにも
+    # 存在しない動画のgap_queryは、無内容issueを防ぐため候補判定に含めない
+    # （Claude review指摘）。
+    has_gap_discovery = False
+    if isinstance(snapshot, dict):
+        section_corners = {section["corner"] for section in sections}
+        has_gap_discovery = any(
+            str((row.get("topic_metadata") or {}).get("gap_query") or "").strip()
+            and str(row.get("corner") or "") in section_corners
+            for row in snapshot.get("videos", [])
+        )
+    has_content = has_section_content or has_gap_discovery
     if not has_content:
         return None
     fp = fingerprint(spec.id, sections)
@@ -468,7 +629,7 @@ def build_cycle_candidate(spec: ChannelSpec, sections: list[dict], now: datetime
         "fingerprint": fp,
         "hypothesis_keys": hypothesis_keys,
         "title": _cycle_title(spec, now, fp),
-        "body": _cycle_body(spec, sections, fp, now),
+        "body": _cycle_body(spec, sections, fp, now, snapshot),
     }
 
 
@@ -551,7 +712,7 @@ def _run_channel_body(spec: ChannelSpec, reference: datetime, *, apply: bool) ->
             build_corner_section(spec, corner_key, decision, evaluations, recent_hyp_keys)
         )
 
-    candidate = build_cycle_candidate(spec, sections, reference)
+    candidate = build_cycle_candidate(spec, sections, reference, snapshot)
     if candidate is None:
         result = {
             "channel": spec.id,

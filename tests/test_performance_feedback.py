@@ -161,6 +161,481 @@ class PerformanceFeedbackTest(unittest.TestCase):
         self.assertEqual(snapshot["videos"][0]["data_api"]["views"], 3)
         self.assertTrue((self.root / "performance.jsonl").exists())
 
+    def test_sync_records_traffic_sources_and_search_terms(self) -> None:
+        """issue #164: Analyticsが返すトラフィックソースと検索語句を
+        snapshotの各videoのanalyticsへ保存する。取得できない動画は空のまま。"""
+        self._history(count=2)
+        rows = []
+        for index in range(2):
+            rows.append(
+                {
+                    "ts": f"2026-07-{index + 1:02d}T00:00:00+00:00",
+                    "channel": self.spec.id,
+                    "corner": "shorts",
+                    "title": f"Title {index}",
+                    "topic": f"Topic {index}",
+                    "video_id": f"id-{index}",
+                    "status": "published",
+                    "topic_metadata": (
+                        {"gap_query": "ネタ切れ 解消"} if index == 0 else {}
+                    ),
+                }
+            )
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(2)
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40, "SHORTS": 10}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=(
+                    {"id-0": [{"term": "ショート 企画", "views": 30}]},
+                    {},
+                ),
+            ) as search_mock,
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(snapshot["traffic_sources"]["available"])
+        video0 = snapshot["videos"][0]
+        self.assertEqual(video0["analytics"]["traffic_sources"], {"YT_SEARCH": 40, "SHORTS": 10})
+        self.assertEqual(
+            video0["analytics"]["search_terms"],
+            [{"term": "ショート 企画", "views": 30}],
+        )
+        # Analytics行が無い動画はtraffic系も空のまま（欠落を0と断定しない）。
+        video1 = snapshot["videos"][1]
+        self.assertIsNone(video1["analytics"])
+        self.assertIn("topic_metadata", video0)
+        # gap_query付き動画だけが検索語句APIの照会対象になる（Sol review指摘）。
+        self.assertEqual(search_mock.call_args.args[0], ["id-0"])
+
+    def test_search_terms_only_queries_videos_returned_by_data_api(self) -> None:
+        """issue #164 (Claude review指摘): gap_query付きでも、Data APIが
+        snapshot出力に返さない動画（削除済み等）は検索語句APIの照会対象にしない。"""
+        rows = []
+        for index in range(3):
+            rows.append(
+                {
+                    "ts": f"2026-07-{index + 1:02d}T00:00:00+00:00",
+                    "channel": self.spec.id,
+                    "corner": "shorts",
+                    "title": f"Title {index}",
+                    "topic": f"Topic {index}",
+                    "video_id": f"id-{index}",
+                    "status": "published",
+                    "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+                }
+            )
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        # id-2 は Data API が返さない（削除済み等）。
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(2)
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=(
+                    {"id-0": [{"term": "ショート 企画", "views": 30}]},
+                    {},
+                ),
+            ) as search_mock,
+        ):
+            performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        # id-2（Data APIが返さない）は照会対象外。snapshot出力に使われる
+        # id-0 / id-1 だけが照会される。
+        self.assertEqual(search_mock.call_args.args[0], ["id-0", "id-1"])
+
+    def test_traffic_status_change_writes_new_snapshot_row(self) -> None:
+        """issue #164 (Sol review指摘4): traffic_sources のavailable/reasonが
+        変化した場合、snapshot署名に含まれ新しい行が追記される。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch.object(performance.youtube, "video_search_terms", return_value={}),
+        ):
+            first = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+        self.assertFalse(first["traffic_sources"]["available"])
+        self.assertIn("boom", first["traffic_sources"]["reason"])
+
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 1}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=(
+                    {"id-0": [{"term": "語句", "views": 1}]},
+                    {},
+                ),
+            ),
+        ):
+            second = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(second["traffic_sources"]["available"])
+        lines = (self.root / "performance.jsonl").read_text().splitlines()
+        self.assertEqual(len(lines), 2)
+
+    def test_search_term_global_failure_keeps_traffic_sources_available(self) -> None:
+        """issue #164 (Sol review指摘): 検索語句の全体障害（HTTP 403等）でも
+        traffic sourceの実データとavailable=Trueは保持し、search_termsの
+        statusは別途Falseにする。"""
+        self._history(count=1)
+        rows = [
+            {
+                "ts": "2026-07-01T00:00:00+00:00",
+                "channel": self.spec.id,
+                "corner": "shorts",
+                "title": "Title 0",
+                "topic": "Topic 0",
+                "video_id": "id-0",
+                "status": "published",
+                "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+            }
+        ]
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                side_effect=RuntimeError("quota exceeded"),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(snapshot["traffic_sources"]["available"])
+        self.assertEqual(
+            snapshot["videos"][0]["analytics"]["traffic_sources"],
+            {"YT_SEARCH": 40},
+        )
+        self.assertFalse(snapshot["search_terms"]["available"])
+        self.assertIn("quota exceeded", snapshot["search_terms"]["reason"])
+
+    def test_search_term_video_specific_failures_recorded_but_keep_available(self) -> None:
+        """issue #164: 動画固有エラー（HTTP 400等）は available=True を維持し
+        失敗video_idをstatusへ記録、成功分の検索語句も保持する。"""
+        self._history(count=2)
+        rows = []
+        for index in range(2):
+            rows.append(
+                {
+                    "ts": f"2026-07-{index + 1:02d}T00:00:00+00:00",
+                    "channel": self.spec.id,
+                    "corner": "shorts",
+                    "title": f"Title {index}",
+                    "topic": f"Topic {index}",
+                    "video_id": f"id-{index}",
+                    "status": "published",
+                    "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+                }
+            )
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(2)
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_analytics",
+                return_value=[
+                    {
+                        "video_id": "id-0",
+                        "views": 100,
+                        "engaged_views": 60,
+                        "estimated_minutes_watched": 90.0,
+                        "average_view_duration": 45.0,
+                        "average_view_percentage": 72.4,
+                        "likes": 5,
+                        "comments": 2,
+                    },
+                    {
+                        "video_id": "id-1",
+                        "views": 100,
+                        "engaged_views": 60,
+                        "estimated_minutes_watched": 90.0,
+                        "average_view_duration": 45.0,
+                        "average_view_percentage": 72.4,
+                        "likes": 5,
+                        "comments": 2,
+                    },
+                ],
+            ),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}, "id-1": {"YT_SEARCH": 20}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=(
+                    {"id-1": [{"term": "ネタ切れ 解消", "views": 20}]},
+                    {"id-0": "HTTP 400: privacy threshold"},
+                ),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(snapshot["search_terms"]["available"])
+        self.assertEqual(snapshot["search_terms"]["failed_video_ids"], ["id-0"])
+        self.assertEqual(
+            snapshot["videos"][1]["analytics"]["search_terms"],
+            [{"term": "ネタ切れ 解消", "views": 20}],
+        )
+
+    def test_search_terms_unavailable_when_all_videos_fail_video_specific(self) -> None:
+        """issue #164 (Sol review指摘): 全動画が動画固有エラーで失敗した場合、
+        video_search_terms() が例外を送出し search_terms.available=False になる。"""
+        self._history(count=1)
+        rows = [
+            {
+                "ts": "2026-07-01T00:00:00+00:00",
+                "channel": self.spec.id,
+                "corner": "shorts",
+                "title": "Title 0",
+                "topic": "Topic 0",
+                "video_id": "id-0",
+                "status": "published",
+                "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+            }
+        ]
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_analytics",
+                return_value=[
+                    {
+                        "video_id": "id-0",
+                        "views": 100,
+                        "engaged_views": 60,
+                        "estimated_minutes_watched": 90.0,
+                        "average_view_duration": 45.0,
+                        "average_view_percentage": 72.4,
+                        "likes": 5,
+                        "comments": 2,
+                    }
+                ],
+            ),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                side_effect=RuntimeError("all videos failed video-specific error"),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(snapshot["search_terms"]["available"])
+        self.assertIn(
+            "all videos failed",
+            snapshot["search_terms"]["reason"],
+        )
+        # traffic sourceの実データは保持される。
+        self.assertTrue(snapshot["traffic_sources"]["available"])
+        self.assertEqual(
+            snapshot["videos"][0]["analytics"]["traffic_sources"],
+            {"YT_SEARCH": 40},
+        )
+
     def test_format_traits_are_scoped_and_exclude_topic_text(self) -> None:
         workdir = self.root / "run"
         workdir.mkdir()
