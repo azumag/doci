@@ -1297,6 +1297,49 @@ class PerformanceFeedbackTest(unittest.TestCase):
             {"shares": 8, "views": 500},
         )
 
+    def test_sync_failure_reasons_do_not_claim_other_status_saved(self) -> None:
+        """issue #144 (Sol review指摘): 各statusの理由文は自身の取得結果だけを
+        説明し、他方の保存状態（90日指標のみ・Data APIのみ等）を断定しない。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_analytics",
+                side_effect=RuntimeError("90d broken"),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                side_effect=RuntimeError("share broken"),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+        analytics_reason = snapshot["analytics"]["reason"]
+        share_reason = snapshot["share_30d"]["reason"]
+        # 90日失敗の理由は90日自身の失敗を説明し、共有率保存を断定しない。
+        self.assertIn("90日Analytics readback失敗", analytics_reason)
+        self.assertNotIn("共有率", analytics_reason)
+        # 共有率失敗の理由は共有率自身の失敗を説明し、90日指標の保存を断定しない。
+        self.assertIn("共有率(30日)readback失敗", share_reason)
+        self.assertNotIn("90日指標のみ保存", share_reason)
+
     def test_analytics_relative_signal_creates_traceable_guarded_guidance(self) -> None:
         videos = []
         for index in range(8):

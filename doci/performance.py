@@ -362,7 +362,7 @@ def sync(
             )
         except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
             analytics_status["reason"] = (
-                "Analytics readback失敗。Data API snapshotのみ保存: "
+                "90日Analytics readback失敗（Data API snapshotは保存）: "
                 f"{str(exc)[:400]}"
             )
         try:
@@ -413,7 +413,7 @@ def sync(
                 }
         except Exception as exc:
             share_30d_status["reason"] = (
-                "共有率(30日)readback失敗。90日指標のみ保存: "
+                "共有率(30日)readback失敗（Data API snapshotは保存）: "
                 f"{str(exc)[:400]}"
             )
         if analytics_status.get("available"):

@@ -686,9 +686,9 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
 
     issue #144 の対象は shorts のみ。`share_30d`（過去30日集計）を使って
     共有率を算出し、1%超の動画の構造（format_traits）を優先表示する。
-    1%超の動画がない場合は、1%以下の動画を最大5本まで参考表示する。
-    表示上限（`_SHARE_DISPLAY_LIMIT`）を超えない。再生数偏重の評価を避けるための
-    補助指標。
+    構造付きの1%超動画が1本もない場合は、1%以下の動画を最大5本まで参考表示する
+    （構造未記録の1%超動画がある場合は件数要約のみ）。表示上限
+    （`_SHARE_DISPLAY_LIMIT`）を超えない。再生数偏重の評価を避けるための補助指標。
     """
     if corner != "shorts":
         return "- 共有率: この節は shorts のみ対象です"
@@ -744,7 +744,7 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
         lines.append(
             f"- 構造未記録の共有率1%超: {no_trait_over_one_percent} 本"
         )
-    if not scored and below_or_missing:
+    if not scored and not no_trait_over_one_percent and below_or_missing:
         for line in below_or_missing[:5]:
             lines.append(line)
         remaining = len(below_or_missing) - 5
