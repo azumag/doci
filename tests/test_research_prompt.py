@@ -1710,13 +1710,14 @@ class ResearchPromptTest(unittest.TestCase):
             self.assertIn(rule, prompt)
 
     def test_youtube_growth_pause_pacing_rule_reaches_research_prompt(self) -> None:
-        """issue #150: corner_shorts.md の「情報を留める間を3箇所」ルールが
-        リサーチプロンプトのチャンネルガイダンスとして反映される。"""
+        """issue #150: corner_shorts.md の「情報を留める間を3箇所」ルールは
+        情報密度以外のテーマでもリサーチプロンプトのチャンネルガイダンスに
+        含まれる（生成と公開ガードの対象範囲が一致する）。"""
         spec = channel_mod.load("youtube-growth")
         corner = spec.corners["shorts"]
         raw = json.dumps(
             {
-                "topic": "ショートの情報密度と緩急設計",
+                "topic": "ショートの冒頭フックで続きを見せる",
                 "viewer_action": (
                     "YouTubeアナリティクスの維持率グラフで急落点を確認する"
                 ),
@@ -1746,8 +1747,7 @@ class ResearchPromptTest(unittest.TestCase):
         for rule in (
             "情報を留める間",
             "3箇所",
-            "離脱の急落点",
-            "1本の結果だけで効果を断定しません",
+            "休止を示す表現",
         ):
             self.assertIn(rule, prompt)
 

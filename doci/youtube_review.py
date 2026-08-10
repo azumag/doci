@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 
 from .channel import ChannelSpec
@@ -51,7 +52,7 @@ _CONTENT_GAP_MISLEADING_MARKERS = (
     "検索されていない題材",
     "検索されてない題材",
 )
-_PAUSE_MARKERS = ("……", "…", "——", "――")
+_PAUSE_SEQUENCE_RE = re.compile(r"[…—―]+")
 _SHORTS_REQUIRED_PAUSE_COUNT = 3
 _YOUTUBE_OPERATION_MARKERS = (
     "ctr",
@@ -196,13 +197,15 @@ def _misleading_content_gap(gap_query: str, *values: str) -> bool:
 
 
 def _pause_count(narration: str) -> int:
-    """narrationに含まれる「情報を留める間」の表現数を数える（issue #150）。"""
+    """narrationに含まれる「情報を留める間」の箇所数を数える（issue #150）。
+
+    連続した休止記号（…—―の並び）を1箇所として数え、本文を挟んだ別々の
+    一致だけを加算する。`……` 1回が「3箇所」にならないよう、記号の文字数では
+    数えない。
+    """
     if not narration:
         return 0
-    count = 0
-    for marker in _PAUSE_MARKERS:
-        count += narration.count(marker)
-    return count
+    return len(_PAUSE_SEQUENCE_RE.findall(narration))
 
 
 def _subject_reason(

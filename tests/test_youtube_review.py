@@ -194,6 +194,25 @@ class ThemeAssessmentTest(unittest.TestCase):
             any("3箇所ありません" in reason for reason in result.reasons)
         )
 
+    def test_single_ellipsis_sequence_counts_as_one_pause(self) -> None:
+        """issue #150 (Sol review指摘): `……` 1回や `………` 1回は1箇所として
+        数え、3箇所と誤判定しない。"""
+        for narration in (
+            "本文……本文",
+            "本文………本文",
+        ):
+            with self.subTest(narration=narration):
+                self.assertEqual(youtube_review._pause_count(narration), 1)
+                script = _assessment_script()
+                script["narration"] = narration
+                result = youtube_review.assess(script, corner_key="shorts")
+                self.assertFalse(result.eligible_for_public)
+
+    def test_separated_three_pause_sequences_count_as_three(self) -> None:
+        """issue #150: 本文で分離された3種類の休止表現は3箇所として数える。"""
+        narration = "一文。……二文。…三文。——四文。"
+        self.assertEqual(youtube_review._pause_count(narration), 3)
+
     def test_shorts_with_three_pauses_is_public_when_other_fields_ok(self) -> None:
         """issue #150: shorts台本に休止表現が3箇所あればpauseガードは発動しない。"""
         script = _assessment_script()
