@@ -550,6 +550,16 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
     """
     if not isinstance(snapshot, dict):
         return "- 維持率カーブ: snapshot未取得のため評価しません"
+    retention_status = snapshot.get("retention_curve")
+    retention_status = (
+        retention_status if isinstance(retention_status, dict) else {}
+    )
+    if not retention_status.get("available"):
+        reason = str(retention_status.get("reason") or "取得不可")
+        return (
+            "- 維持率カーブ: 取得に失敗しました"
+            f"（{reason}。推測で補いません）"
+        )
     corner_videos = [
         row
         for row in snapshot.get("videos", [])
@@ -557,9 +567,16 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
     ]
     if not corner_videos:
         return "- 維持率カーブ: このcornerの動画がsnapshotにありません"
+    failed = retention_status.get("failed_video_ids") or []
     lines: list[str] = []
     for row in corner_videos:
         video_id = str(row.get("video_id") or "")
+        if video_id in failed:
+            lines.append(
+                f"- `{video_id}`: 維持率カーブを取得できませんでした"
+                "（動画固有エラー。推測で補いません）"
+            )
+            continue
         analytics = row.get("analytics")
         analytics = analytics if isinstance(analytics, dict) else {}
         curve = analytics.get("retention_curve")
@@ -572,11 +589,11 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
             continue
         moments = performance.retention_moments(curve)
         script = _script_for_video(row)
-        total_seconds = float(
-            analytics.get("average_view_duration") or 0
-        )
+        data_api = row.get("data_api")
+        data_api = data_api if isinstance(data_api, dict) else {}
+        duration_iso = str(data_api.get("duration") or "")
         annotated = performance.retention_moment_scenes(
-            moments, script, total_seconds
+            moments, script, duration_iso
         )
         if not annotated:
             lines.append(
@@ -589,19 +606,19 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
             kind = "山（spike）" if moment["kind"] == "spike" else "谷（dip）"
             second = moment.get("elapsed_seconds")
             scene = moment.get("scene_caption")
-            if second is not None and scene:
+            if second is None:
+                lines.append(
+                    f"  - {kind}: 位置不明（動画長を取得できませんでした）。"
+                    "該当箇所の内容と照合して理由を確認してください"
+                )
+            elif scene:
                 lines.append(
                     f"  - {kind}: 約{second}秒付近（シーン: {scene}）。"
                     "該当箇所の内容と照合して理由を確認してください"
                 )
-            elif second is not None:
-                lines.append(
-                    f"  - {kind}: 約{second}秒付近。"
-                    "該当箇所の内容と照合して理由を確認してください"
-                )
             else:
                 lines.append(
-                    f"  - {kind}: 位置不明。"
+                    f"  - {kind}: 約{second}秒付近。"
                     "該当箇所の内容と照合して理由を確認してください"
                 )
     lines.append(
@@ -696,6 +713,7 @@ def build_cycle_candidate(
     # 存在しない動画のgap_queryは、無内容issueを防ぐため候補判定に含めない
     # （Claude review指摘）。
     has_gap_discovery = False
+    has_retention_content = False
     if isinstance(snapshot, dict):
         section_corners = {section["corner"] for section in sections}
         has_gap_discovery = any(
@@ -703,7 +721,29 @@ def build_cycle_candidate(
             and str(row.get("corner") or "") in section_corners
             for row in snapshot.get("videos", [])
         )
-    has_content = has_section_content or has_gap_discovery
+        # issue #149: 形式仮説・gap動画が無くても、matching cornerに明瞭な
+        # 維持率の山/谷がある動画があれば候補として報告する（無内容issueは
+        # 防ぎつつ、分析結果を運用者へ届ける）。
+        retention_status = snapshot.get("retention_curve")
+        retention_status = (
+            retention_status if isinstance(retention_status, dict) else {}
+        )
+        failed = set(retention_status.get("failed_video_ids") or [])
+        if retention_status.get("available"):
+            for row in snapshot.get("videos", []):
+                if str(row.get("corner") or "") not in section_corners:
+                    continue
+                if str(row.get("video_id") or "") in failed:
+                    continue
+                analytics = row.get("analytics")
+                analytics = analytics if isinstance(analytics, dict) else {}
+                curve = analytics.get("retention_curve")
+                if not isinstance(curve, list) or not curve:
+                    continue
+                if performance.retention_moments(curve):
+                    has_retention_content = True
+                    break
+    has_content = has_section_content or has_gap_discovery or has_retention_content
     if not has_content:
         return None
     fp = fingerprint(spec.id, sections)

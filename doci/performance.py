@@ -120,26 +120,37 @@ def _format_traits(spec: ChannelSpec, recorded: dict) -> list[str]:
     return traits
 
 
-def _scene_time_windows(script: dict, total_seconds: float) -> list[dict]:
-    """scenesの時間窓をnarration文字数比で按分する（compose.pyと同じ方式）。
+def _safe_workdir(spec: ChannelSpec, workdir_raw: str) -> str:
+    """snapshotへ保存するworkdirが出力領域配下であることを検証する。
 
-    各sceneに対し start/end 秒を返す。文字数が取得できない場合は均等割。
-    これは合成時の実境界（文末スナップ）とは異なる近似であり、照合の目安。
+    `_format_traits` と同じ境界を使い、出力領域外や存在しないパスは空文字に
+    する（任意パスの読み取りを防ぐ）。
+    """
+    if not workdir_raw:
+        return ""
+    workdir = Path(workdir_raw).resolve()
+    output_root = spec.output_dir.resolve()
+    if not workdir.is_relative_to(output_root):
+        return ""
+    return str(workdir)
+
+
+def _scene_time_windows(script: dict, total_seconds: float) -> list[dict]:
+    """scenesの時間窓を均等割で近似する（compose.pyの実合成に合わせる）。
+
+    `compose._scene_boundaries()` は均等割を基準にTTS文末時刻へ最大2.5秒
+    スナップする。ここではその近似として均等割を使う（実境界は生成物
+    メタデータに無いため、照合の目安）。
     """
     scenes = script.get("scenes")
     if not isinstance(scenes, list) or not scenes:
-        return []
-    narration = str(script.get("narration") or "")
-    weights = [max(len(str(s.get("caption") or "")) + 1, 1) for s in scenes]
-    total_weight = sum(weights)
-    if total_weight <= 0:
         return []
     if total_seconds <= 0:
         total_seconds = 1.0
     windows: list[dict] = []
     cursor = 0.0
-    for index, weight in enumerate(weights):
-        span = total_seconds * weight / total_weight
+    span = total_seconds / len(scenes)
+    for index in range(len(scenes)):
         start = cursor
         end = cursor + span
         windows.append(
@@ -151,20 +162,23 @@ def _scene_time_windows(script: dict, total_seconds: float) -> list[dict]:
             }
         )
         cursor = end
+    if windows:
+        windows[-1]["end"] = round(total_seconds, 3)
     return windows
 
 
 def retention_moments(
     curve: list[dict],
     *,
-    threshold: float = 8.0,
-    min_delta: float = 2.0,
+    threshold: float = 0.08,
+    min_delta: float = 0.02,
 ) -> list[dict]:
     """維持率カーブからスパイク（山）とディップ（谷）を検出する（issue #149）。
 
     各点のwatch_ratioを前後の点と比較し、前後より`threshold`以上高い点を
     spike、低い点を dip とする。端点やデータが少なすぎる場合は検出しない
     （山=成功・谷=失敗と断定しないために、形状だけから結論を出さない）。
+    `audienceWatchRatio` は比率（0.9=90%）であり、閾値も比率で指定する。
     返り値は `{elapsed_ratio, watch_ratio, kind}` のリスト。
     """
     if not curve or len(curve) < 5:
@@ -198,43 +212,74 @@ def retention_moments(
 def retention_moment_scenes(
     moments: list[dict],
     script: dict,
-    total_seconds: float,
+    duration_iso: str | None = None,
+    *,
+    total_seconds: float | None = None,
 ) -> list[dict]:
     """検出した山/谷を、台本のscenesと照合して「何秒付近・どのシーン」を返す。
 
     該当sceneが特定できない場合は `scene_index=None` のまま（推測しない）。
+    `duration_iso`（Data APIのISO 8601動画長）から全長を秒へ変換し、
+    elapsed_ratio × 全長で秒位置を算出する。変換不能・ゼロの場合は
+    「位置不明」（elapsed_seconds=None）として fail-closed にする。
     """
-    windows = _scene_time_windows(script, total_seconds)
-    if not windows:
-        return [
-            {
-                **moment,
-                "elapsed_seconds": round(moment["elapsed_ratio"] * total_seconds, 1),
-                "scene_index": None,
-                "scene_caption": "",
-            }
-            for moment in moments
-        ]
+    seconds = total_seconds
+    if seconds is None:
+        seconds = _iso8601_duration_seconds(duration_iso)
+    windows = _scene_time_windows(script, seconds or 1.0)
     annotated: list[dict] = []
     for moment in moments:
-        second = moment["elapsed_ratio"] * total_seconds
+        second = (
+            moment["elapsed_ratio"] * seconds
+            if seconds and seconds > 0
+            else None
+        )
         scene = next(
             (
                 win
                 for win in windows
-                if win["start"] <= second <= win["end"]
+                if second is not None and win["start"] <= second <= win["end"]
             ),
             None,
         )
         annotated.append(
             {
                 **moment,
-                "elapsed_seconds": round(second, 1),
+                "elapsed_seconds": round(second, 1) if second is not None else None,
                 "scene_index": scene["index"] if scene else None,
                 "scene_caption": scene["caption"] if scene else "",
             }
         )
     return annotated
+
+
+def _iso8601_duration_seconds(duration_iso: str | None) -> float | None:
+    """ISO 8601動画長（PT1M30S 等）を秒へ変換する。変換不能は None。"""
+    if not duration_iso:
+        return None
+    text = str(duration_iso).strip()
+    if not text.startswith("PT"):
+        return None
+    total = 0.0
+    number = ""
+    for char in text[2:]:
+        if char.isdigit() or char == ".":
+            number += char
+        elif char in ("H", "M", "S"):
+            try:
+                value = float(number or "0")
+            except ValueError:
+                return None
+            if char == "H":
+                total += value * 3600
+            elif char == "M":
+                total += value * 60
+            else:
+                total += value
+            number = ""
+        else:
+            return None
+    return total if total > 0 else None
 
 
 def sync(
@@ -266,6 +311,7 @@ def sync(
     traffic_by_id: dict[str, dict[str, int]] = {}
     search_by_id: dict[str, list[dict]] = {}
     retention_by_id: dict[str, list[dict]] = {}
+    retention_failures: dict[str, str] = {}
     if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
         start = (current.date() - timedelta(days=lookback_days)).isoformat()
         end = current.date().isoformat()
@@ -338,14 +384,24 @@ def sync(
             try:
                 # issue #149: 維持率カーブはShorts等でAPIが返さない場合が
                 # あるため、取得できる範囲だけ保存する（fail-closed）。
-                retention_by_id = youtube.video_retention_curves(
-                    video_ids,
-                    start_date=start,
-                    end_date=end,
-                    token_file=spec.publish.youtube.token,
-                    client_secret_file=spec.publish.youtube.client_secret,
-                )
+                sync_ids = {str(detail.get("video_id") or "") for detail in details}
+                retention_ids = [
+                    video_id for video_id in video_ids if video_id in sync_ids
+                ]
+                if retention_ids:
+                    retention_by_id, retention_failures = youtube.video_retention_curves(
+                        retention_ids,
+                        start_date=start,
+                        end_date=end,
+                        token_file=spec.publish.youtube.token,
+                        client_secret_file=spec.publish.youtube.client_secret,
+                    )
                 retention_status.update({"available": True})
+                if retention_failures:
+                    retention_status["failed_video_ids"] = sorted(
+                        retention_failures
+                    )
+                    retention_status["failures"] = retention_failures
             except Exception as exc:
                 retention_status["reason"] = (
                     "維持率カーブreadback失敗。平均指標のみ保存: "
@@ -379,6 +435,7 @@ def sync(
                 "search_terms": search_by_id.get(video_id, []),
                 "retention_curve": retention_by_id.get(video_id, []),
             }
+        workdir = _safe_workdir(spec, str(recorded.get("workdir") or ""))
         videos.append(
             {
                 "video_id": video_id,
@@ -386,6 +443,7 @@ def sync(
                 "corner": str(recorded.get("corner") or ""),
                 "topic": topic,
                 "topic_metadata": history._row_topic_metadata(recorded),
+                "workdir": workdir,
                 "format_traits": _format_traits(spec, recorded),
                 "history_ts": str(recorded.get("ts") or ""),
                 "published_at": str(detail.get("published_at") or ""),

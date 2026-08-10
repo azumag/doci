@@ -986,21 +986,55 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
 
     def test_retention_moments_detects_spike_and_dip(self) -> None:
         curve = [
-            {"elapsed_ratio": 0.0, "watch_ratio": 90.0},
-            {"elapsed_ratio": 0.2, "watch_ratio": 85.0},
-            {"elapsed_ratio": 0.4, "watch_ratio": 40.0},  # dip
-            {"elapsed_ratio": 0.6, "watch_ratio": 80.0},
-            {"elapsed_ratio": 0.8, "watch_ratio": 90.0},  # spike
-            {"elapsed_ratio": 1.0, "watch_ratio": 50.0},
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.85},
+            {"elapsed_ratio": 0.4, "watch_ratio": 0.40},  # dip
+            {"elapsed_ratio": 0.6, "watch_ratio": 0.80},
+            {"elapsed_ratio": 0.8, "watch_ratio": 0.90},  # spike
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
         ]
         moments = performance.retention_moments(curve)
         kinds = {m["kind"] for m in moments}
         self.assertIn("dip", kinds)
         self.assertIn("spike", kinds)
 
+    def test_retention_moments_uses_ratio_thresholds(self) -> None:
+        """issue #149: 閾値は比率（0.08=8%ポイント）で判定する。"""
+        at_threshold = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.40},  # dip（差0.48）
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.88},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.90},
+        ]
+        self.assertEqual(
+            [m["kind"] for m in performance.retention_moments(at_threshold)],
+            ["dip"],
+        )
+        below = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.83},  # 差0.06 < 0.08
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.89},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.90},
+        ]
+        self.assertEqual(performance.retention_moments(below), [])
+        # 再視聴（1.0超）も有効な山として検出する
+        rewound = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.5, "watch_ratio": 1.20},  # spike
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.88},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.90},
+        ]
+        self.assertEqual(
+            [m["kind"] for m in performance.retention_moments(rewound)],
+            ["spike"],
+        )
+
     def test_retention_moments_ignores_flat_and_short_curves(self) -> None:
         flat = [
-            {"elapsed_ratio": i / 10, "watch_ratio": 70.0} for i in range(11)
+            {"elapsed_ratio": i / 10, "watch_ratio": 0.70} for i in range(11)
         ]
         self.assertEqual(performance.retention_moments(flat), [])
         self.assertEqual(performance.retention_moments(flat[:4]), [])
@@ -1010,30 +1044,54 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         moments = [
             {
                 "elapsed_ratio": 0.4,
-                "watch_ratio": 40.0,
+                "watch_ratio": 0.40,
                 "kind": "dip",
             }
         ]
         script = {
-            "narration": "あ" * 20 + "い" * 30 + "う" * 50,
             "scenes": [
                 {"caption": "導入"},
                 {"caption": "展開"},
                 {"caption": "結び"},
             ],
         }
-        annotated = performance.retention_moment_scenes(moments, script, 100.0)
+        annotated = performance.retention_moment_scenes(moments, script, "PT100S")
         self.assertEqual(annotated[0]["scene_index"], 1)
         self.assertEqual(annotated[0]["scene_caption"], "展開")
         self.assertAlmostEqual(annotated[0]["elapsed_seconds"], 40.0, delta=1.0)
 
     def test_retention_moment_scenes_returns_moments_without_script(self) -> None:
         moments = [
-            {"elapsed_ratio": 0.5, "watch_ratio": 50.0, "kind": "dip"}
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.50, "kind": "dip"}
         ]
-        annotated = performance.retention_moment_scenes(moments, {}, 100.0)
+        annotated = performance.retention_moment_scenes(moments, {}, "PT100S")
         self.assertEqual(annotated[0]["scene_index"], None)
         self.assertEqual(annotated[0]["scene_caption"], "")
+
+    def test_retention_moment_scenes_unknown_duration_is_fail_closed(self) -> None:
+        """issue #149: 動画長を取得できない場合は位置不明（秒を捏造しない）。"""
+        moments = [
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.50, "kind": "dip"}
+        ]
+        annotated = performance.retention_moment_scenes(moments, {}, None)
+        self.assertIsNone(annotated[0]["elapsed_seconds"])
+        self.assertIsNone(annotated[0]["scene_index"])
+
+    def test_iso8601_duration_seconds(self) -> None:
+        self.assertEqual(performance._iso8601_duration_seconds("PT1M"), 60.0)
+        self.assertEqual(performance._iso8601_duration_seconds("PT1M30S"), 90.0)
+        self.assertEqual(performance._iso8601_duration_seconds("PT1H2M3S"), 3723.0)
+        self.assertIsNone(performance._iso8601_duration_seconds("bad"))
+        self.assertIsNone(performance._iso8601_duration_seconds(""))
+        self.assertIsNone(performance._iso8601_duration_seconds(None))
+
+    def test_retention_moment_scenes_uses_duration_not_average_watch_time(self) -> None:
+        """issue #149: 秒位置は動画全長（ISO 8601）から算出する。"""
+        moments = [
+            {"elapsed_ratio": 0.8, "watch_ratio": 0.40, "kind": "dip"}
+        ]
+        annotated = performance.retention_moment_scenes(moments, {}, "PT1M")
+        self.assertAlmostEqual(annotated[0]["elapsed_seconds"], 48.0, delta=1.0)
 
     def test_retention_curve_text_reports_moments_without_judging(self) -> None:
         snapshot = {
@@ -1042,19 +1100,20 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
                     "video_id": "v1",
                     "corner": "video",
                     "workdir": str(Path(self._workdir())),
+                    "data_api": {"duration": "PT1M40S"},
                     "analytics": {
-                        "average_view_duration": 100.0,
                         "retention_curve": [
-                            {"elapsed_ratio": 0.0, "watch_ratio": 90.0},
-                            {"elapsed_ratio": 0.2, "watch_ratio": 85.0},
-                            {"elapsed_ratio": 0.4, "watch_ratio": 40.0},
-                            {"elapsed_ratio": 0.6, "watch_ratio": 70.0},
-                            {"elapsed_ratio": 0.8, "watch_ratio": 60.0},
-                            {"elapsed_ratio": 1.0, "watch_ratio": 30.0},
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.2, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.4, "watch_ratio": 0.40},
+                            {"elapsed_ratio": 0.6, "watch_ratio": 0.70},
+                            {"elapsed_ratio": 0.8, "watch_ratio": 0.60},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.30},
                         ],
                     },
                 }
-            ]
+            ],
+            "retention_curve": {"available": True},
         }
         text = performance_report._retention_curve_text(snapshot, "video")
         self.assertIn("谷（dip）", text)
@@ -1069,11 +1128,28 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
                     "corner": "video",
                     "analytics": {"retention_curve": []},
                 }
-            ]
+            ],
+            "retention_curve": {"available": True},
         }
         text = performance_report._retention_curve_text(snapshot, "video")
         self.assertIn("取得できませんでした", text)
         self.assertIn("推測で補いません", text)
+
+    def test_retention_curve_text_reports_global_failure(self) -> None:
+        """issue #149: カーブAPI全体の失敗は「Shortsで返さない」ではなく
+        取得失敗と明記する。"""
+        snapshot = {
+            "videos": [
+                {"video_id": "v1", "corner": "video", "analytics": {}}
+            ],
+            "retention_curve": {
+                "available": False,
+                "reason": "quota exceeded",
+            },
+        }
+        text = performance_report._retention_curve_text(snapshot, "video")
+        self.assertIn("取得に失敗しました", text)
+        self.assertIn("quota exceeded", text)
 
     def _workdir(self) -> str:
         import tempfile

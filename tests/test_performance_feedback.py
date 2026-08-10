@@ -381,13 +381,16 @@ class PerformanceFeedbackTest(unittest.TestCase):
             patch.object(
                 performance.youtube,
                 "video_retention_curves",
-                return_value={
-                    "id-0": [
-                        {"elapsed_ratio": 0.0, "watch_ratio": 90.0},
-                        {"elapsed_ratio": 0.5, "watch_ratio": 40.0},
-                        {"elapsed_ratio": 1.0, "watch_ratio": 30.0},
-                    ]
-                },
+                return_value=(
+                    {
+                        "id-0": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.40},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.30},
+                        ]
+                    },
+                    {},
+                ),
             ),
         ):
             snapshot = performance.sync(
@@ -399,9 +402,9 @@ class PerformanceFeedbackTest(unittest.TestCase):
         self.assertEqual(
             snapshot["videos"][0]["analytics"]["retention_curve"],
             [
-                {"elapsed_ratio": 0.0, "watch_ratio": 90.0},
-                {"elapsed_ratio": 0.5, "watch_ratio": 40.0},
-                {"elapsed_ratio": 1.0, "watch_ratio": 30.0},
+                {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                {"elapsed_ratio": 0.5, "watch_ratio": 0.40},
+                {"elapsed_ratio": 1.0, "watch_ratio": 0.30},
             ],
         )
 

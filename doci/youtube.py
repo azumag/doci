@@ -400,15 +400,22 @@ def video_retention_curves(
 ) -> dict[str, list[dict]]:
     """動画別の視聴者維持率カーブを読み取る（issue #149）。
 
-    `audienceWatchRatio`（各時点の視聴維持率%）を `elapsedVideoTimeRatio`
-    （経過時間比率 0〜1）ディメンションで取得する。Shorts等でAPIがデータを
-    返さない場合は空のまま（欠落を0や「なし」と断定しない fail-closed）。
+    `audienceWatchRatio`（各時点の視聴維持率。0.9=90%）を
+    `elapsedVideoTimeRatio`（経過時間比率 0〜1）ディメンションで取得する。
+    Audience retention report の `video` filter は単一IDのみのため、動画ごとに
+    1リクエストを発行する。1動画の取得不能（HTTP 400/404等）は他動画の結果へ
+    波及させず `failed_by_video` へ記録する。全体障害（401/403/429/5xx等）は
+    即時 raise する。Shorts等でAPIがデータを返さない場合は空のまま
+    （欠落を0や「なし」と断定しない fail-closed）。
+
+    戻り値は `(by_video, failed_by_video)` のタプル。
     """
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
 
     ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
     if not ids:
-        return {}
+        return {}, {}
     creds = _load_credentials(
         interactive=False,
         token_file=token_file,
@@ -417,28 +424,35 @@ def video_retention_curves(
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
     by_video: dict[str, list[dict]] = {}
-    for offset in range(0, len(ids), 200):
-        data = (
-            service.reports()
-            .query(
-                ids="channel==MINE",
-                startDate=start_date,
-                endDate=end_date,
-                metrics="audienceWatchRatio",
-                dimensions="video,elapsedVideoTimeRatio",
-                filters=f"video=={','.join(ids[offset : offset + 200])}",
-                sort="-views",
-                maxResults=200,
+    failed_by_video: dict[str, str] = {}
+    for video_id in ids:
+        try:
+            data = (
+                service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="audienceWatchRatio",
+                    dimensions="elapsedVideoTimeRatio",
+                    filters=f"video=={video_id}",
+                    maxResults=100,
+                )
+                .execute()
             )
-            .execute()
-        )
+        except HttpError as exc:
+            status = exc.resp.status
+            if status in (400, 404):
+                failed_by_video[video_id] = f"HTTP {status}"
+                continue
+            raise
         headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        points: list[dict] = []
         for values in data.get("rows", []):
             row = dict(zip(headers, values))
-            video_id = str(row.get("video", ""))
             ratio = row.get("elapsedVideoTimeRatio")
             watch_ratio = row.get("audienceWatchRatio")
-            if not video_id or ratio is None or watch_ratio is None:
+            if ratio is None or watch_ratio is None:
                 continue
             try:
                 ratio_value = float(ratio)
@@ -447,12 +461,13 @@ def video_retention_curves(
                 continue
             if not (0.0 <= ratio_value <= 1.0):
                 continue
-            by_video.setdefault(video_id, []).append(
+            points.append(
                 {"elapsed_ratio": ratio_value, "watch_ratio": watch_value}
             )
-    for points in by_video.values():
-        points.sort(key=lambda item: item["elapsed_ratio"])
-    return by_video
+        if points:
+            points.sort(key=lambda item: item["elapsed_ratio"])
+            by_video[video_id] = points
+    return by_video, failed_by_video
 
 
 def video_traffic_sources(
