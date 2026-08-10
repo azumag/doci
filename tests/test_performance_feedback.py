@@ -161,6 +161,67 @@ class PerformanceFeedbackTest(unittest.TestCase):
         self.assertEqual(snapshot["videos"][0]["data_api"]["views"], 3)
         self.assertTrue((self.root / "performance.jsonl").exists())
 
+    def test_sync_records_traffic_sources_and_search_terms(self) -> None:
+        """issue #164: Analyticsが返すトラフィックソースと検索語句を
+        snapshotの各videoのanalyticsへ保存する。取得できない動画は空のまま。"""
+        self._history(count=2)
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(2)
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40, "SHORTS": 10}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value={"id-0": [{"term": "ショート 企画", "views": 30}]},
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(snapshot["traffic_sources"]["available"])
+        video0 = snapshot["videos"][0]
+        self.assertEqual(video0["analytics"]["traffic_sources"], {"YT_SEARCH": 40, "SHORTS": 10})
+        self.assertEqual(
+            video0["analytics"]["search_terms"],
+            [{"term": "ショート 企画", "views": 30}],
+        )
+        # Analytics行が無い動画はtraffic系も空のまま（欠落を0と断定しない）。
+        video1 = snapshot["videos"][1]
+        self.assertIsNone(video1["analytics"])
+        self.assertIn("topic_metadata", video0)
+
     def test_format_traits_are_scoped_and_exclude_topic_text(self) -> None:
         workdir = self.root / "run"
         workdir.mkdir()

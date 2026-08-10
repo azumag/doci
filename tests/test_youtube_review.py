@@ -76,6 +76,57 @@ class ThemeAssessmentTest(unittest.TestCase):
 
         self.assertEqual(result.privacy, "unlisted")
 
+    def test_misleading_content_gap_wording_is_not_auto_published(self) -> None:
+        """issue #164: コンテンツギャップを「検索されていないテーマ」と誤解する
+        表現は、他の項目が揃っていても自動公開しない。"""
+        script = _assessment_script(
+            topic="検索されていないテーマから次のショートを作る",
+            viewer_action=(
+                "YouTube Studioのコンテンツギャップで検索語を1つ選び、"
+                "次のショートで不足を埋める"
+            ),
+        )
+        script["title"] = "検索されていない答えから作るショート企画"
+
+        result = youtube_review.assess(script)
+
+        self.assertFalse(result.eligible_for_public)
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertTrue(
+            any(
+                "誤解する表現" in reason
+                for reason in result.reasons
+            )
+        )
+
+    def test_correct_content_gap_wording_can_be_public(self) -> None:
+        """issue #164: 需要と供給不足が伝わる正しい表現なら誤解表現ガードは
+        発動しない（他の条件が揃えばpublic判定を妨げない）。"""
+        script = _assessment_script(
+            topic="検索されているのに足りない答えから次のショートを作る",
+            youtube_creator_problem=(
+                "検索されているのに十分な結果がない領域をショート企画で埋めたい課題"
+            ),
+            viewer_action=(
+                "YouTube Studioのコンテンツギャップで検索語を1つ選び、"
+                "次のショートで不足を埋める"
+            ),
+            theme_fit_reason=(
+                "コンテンツギャップから検索流入を狙うショート企画が主題の中心だから"
+            ),
+        )
+        script["title"] = "検索されているのに足りない答えから作るショート"
+        script["description"] = "コンテンツギャップから検索流入を狙う企画の立て方"
+        script["narration"] = (
+            "検索されているのに結果が足りない領域をコンテンツギャップで選び、"
+            "次のショートで不足を埋める手順を説明します。"
+        )
+
+        result = youtube_review.assess(script)
+
+        self.assertTrue(result.eligible_for_public)
+        self.assertEqual(result.privacy, "public")
+
     def test_no_research_is_safe_unlisted_fallback(self) -> None:
         result = youtube_review.assess(
             {"title": "幸福の正体", "description": "睡眠データの話"}

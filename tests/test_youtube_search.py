@@ -243,6 +243,108 @@ class YouTubeSearchTest(unittest.TestCase):
             )
         self.assertEqual(results[0]["engaged_views"], 0)
 
+    def test_video_traffic_sources_maps_source_type_views(self) -> None:
+        """issue #164: トラフィックソース種別ごとのviewsをvideo_idで返す。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "insightTrafficSourceType"},
+                {"name": "views"},
+            ],
+            "rows": [
+                ["abc123", "YT_SEARCH", 42],
+                ["abc123", "SHORTS", 10],
+                ["def456", "YT_SEARCH", 7],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video = youtube.video_traffic_sources(
+                ["abc123", "def456"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(
+            by_video,
+            {
+                "abc123": {"YT_SEARCH": 42, "SHORTS": 10},
+                "def456": {"YT_SEARCH": 7},
+            },
+        )
+        self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video,insightTrafficSourceType")
+        self.assertEqual(reports.query.call_args.kwargs["metrics"], "views")
+
+    def test_video_traffic_sources_drops_zero_and_empty_rows(self) -> None:
+        """issue #164: views0や空の種別は欠落を0と断定せず結果から除く。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "insightTrafficSourceType"},
+                {"name": "views"},
+            ],
+            "rows": [
+                ["abc123", "YT_SEARCH", 0],
+                ["abc123", "", 5],
+                ["", "YT_SEARCH", 9],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video = youtube.video_traffic_sources(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+        self.assertEqual(by_video, {})
+
+    def test_video_search_terms_maps_terms_and_views(self) -> None:
+        """issue #164: 具体的な検索語句をviews付きで返す。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "trafficSource"},
+                {"name": "views"},
+            ],
+            "rows": [
+                ["abc123", "ショート 企画", 30],
+                ["abc123", "コンテンツギャップ", 12],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video = youtube.video_search_terms(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(
+            by_video,
+            {
+                "abc123": [
+                    {"term": "ショート 企画", "views": 30},
+                    {"term": "コンテンツギャップ", "views": 12},
+                ]
+            },
+        )
+        self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video,trafficSource")
+
 
 if __name__ == "__main__":
     unittest.main()

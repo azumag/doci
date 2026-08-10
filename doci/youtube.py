@@ -390,6 +390,115 @@ def video_analytics(
     return results
 
 
+def video_traffic_sources(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict[str, dict[str, int]]:
+    """動画別トラフィックソース種別のviewsを読み取る（issue #164）。
+
+    `insightTrafficSourceType` ディメンションで、`YT_SEARCH`（YouTube検索）等の
+    種別ごとの views を返す。取得できない動画・種別は含めない（取得可能な
+    readbackであり、欠落を0として推測しない）。Shorts等でAPIがデータを返さない
+    場合は空のまま（fail-closed）。
+    """
+    from googleapiclient.discovery import build
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return {}
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    by_video: dict[str, dict[str, int]] = {}
+    for offset in range(0, len(ids), 200):
+        data = (
+            service.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics="views",
+                dimensions="video,insightTrafficSourceType",
+                filters=f"video=={','.join(ids[offset : offset + 200])}",
+                sort="-views",
+                maxResults=200,
+            )
+            .execute()
+        )
+        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        for values in data.get("rows", []):
+            row = dict(zip(headers, values))
+            video_id = str(row.get("video", ""))
+            source_type = str(row.get("insightTrafficSourceType", "") or "")
+            views = int(row.get("views", 0) or 0)
+            if not video_id or not source_type or views <= 0:
+                continue
+            by_video.setdefault(video_id, {})[source_type] = views
+    return by_video
+
+
+def video_search_terms(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict[str, list[dict]]:
+    """動画別の具体的な検索語句とviewsを読み取る（issue #164）。
+
+    `trafficSource` ディメンションで、YouTube検索から流入した検索語句を返す。
+    APIがShorts等でデータを返さない場合や、トラフィックソースがYT_SEARCH以外の
+    場合は空リスト（欠落を0や「なし」と断定しない）。取得できる範囲だけ記録する。
+    """
+    from googleapiclient.discovery import build
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return {}
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    by_video: dict[str, list[dict]] = {}
+    for offset in range(0, len(ids), 200):
+        data = (
+            service.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics="views",
+                dimensions="video,trafficSource",
+                filters=f"video=={','.join(ids[offset : offset + 200])}",
+                sort="-views",
+                maxResults=200,
+            )
+            .execute()
+        )
+        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        for values in data.get("rows", []):
+            row = dict(zip(headers, values))
+            video_id = str(row.get("video", ""))
+            term = str(row.get("trafficSource", "") or "")
+            views = int(row.get("views", 0) or 0)
+            if not video_id or not term or views <= 0:
+                continue
+            by_video.setdefault(video_id, []).append({"term": term, "views": views})
+    return by_video
+
+
 def _video_id(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()

@@ -409,7 +409,79 @@ def _cycle_title(spec: ChannelSpec, now: datetime, fp: str) -> str:
     return f"[feedback] {spec.id} 実績レポート {now.date().isoformat()} ({fp[:8]})"
 
 
-def _cycle_body(spec: ChannelSpec, sections: list[dict], fp: str, now: datetime) -> str:
+def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
+    """検索発見（Discovery）と視聴後評価（Satisfaction）を分離して表示する。
+
+    issue #164: コンテンツギャップ企画の検証は「狙った検索需要から見つけられたか」
+    （検索流入）と「見つけた視聴者が視聴を続けたか」（維持率）を別々に扱う。
+    Analytics APIが返さない指標は0や「なし」と断定せず、取得不可と明記する。
+    """
+    if not isinstance(snapshot, dict):
+        return "- Discovery / Satisfaction: snapshot未取得のため評価しません"
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not corner_videos:
+        return "- Discovery / Satisfaction: このcornerの動画がsnapshotにありません"
+    discovery_lines: list[str] = []
+    satisfaction_lines: list[str] = []
+    for row in corner_videos:
+        video_id = str(row.get("video_id") or "")
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        traffic = analytics.get("traffic_sources")
+        traffic = traffic if isinstance(traffic, dict) else {}
+        terms = analytics.get("search_terms")
+        terms = terms if isinstance(terms, list) else []
+        total_views = int(analytics.get("views", 0) or 0)
+        search_views = int(traffic.get("YT_SEARCH", 0) or 0)
+        if total_views > 0 and search_views > 0:
+            share = search_views * 100.0 / total_views
+            discovery_lines.append(
+                f"- `{video_id}`: YouTube検索からの視聴 {search_views} 回"
+                f"（全体の {share:.1f}%）"
+            )
+            if terms:
+                top_terms = ", ".join(
+                    f"「{t.get('term')}」({int(t.get('views', 0) or 0)}回)"
+                    for t in sorted(
+                        terms,
+                        key=lambda item: int(item.get("views", 0) or 0),
+                        reverse=True,
+                    )[:3]
+                )
+                discovery_lines.append(f"  - 検索語句: {top_terms}")
+        else:
+            discovery_lines.append(
+                f"- `{video_id}`: YouTube検索からの流入を取得できませんでした"
+                "（Analytics APIが返さない場合は推測で補いません）"
+            )
+        avg_percent = analytics.get("average_view_percentage")
+        if avg_percent is not None:
+            satisfaction_lines.append(
+                f"- `{video_id}`: 平均視聴維持率 {float(avg_percent):.1f}%"
+            )
+        else:
+            satisfaction_lines.append(
+                f"- `{video_id}`: 維持率を取得できませんでした（推測で補いません）"
+            )
+    return (
+        "### 検索発見（Discovery）\n\n"
+        + "\n".join(discovery_lines)
+        + "\n\n### 視聴後評価（Satisfaction）\n\n"
+        + "\n".join(satisfaction_lines)
+    )
+
+
+def _cycle_body(
+    spec: ChannelSpec,
+    sections: list[dict],
+    fp: str,
+    now: datetime,
+    snapshot: dict | None = None,
+) -> str:
     lines: list[str] = [
         feedback_issues.feedback_marker(fp),
         feedback_issues.channel_marker(spec.id),
@@ -437,6 +509,8 @@ def _cycle_body(spec: ChannelSpec, sections: list[dict], fp: str, now: datetime)
             "### 前回提案の効果検証",
             "",
             _evaluation_text(section.get("evaluations") or []),
+            "",
+            _discovery_satisfaction_text(snapshot, section["corner"]),
         ]
     lines += [
         "",
@@ -451,7 +525,12 @@ def _cycle_body(spec: ChannelSpec, sections: list[dict], fp: str, now: datetime)
     return "\n".join(lines) + "\n"
 
 
-def build_cycle_candidate(spec: ChannelSpec, sections: list[dict], now: datetime) -> dict | None:
+def build_cycle_candidate(
+    spec: ChannelSpec,
+    sections: list[dict],
+    now: datetime,
+    snapshot: dict | None = None,
+) -> dict | None:
     has_content = any(
         section.get("proposal") is not None or section.get("evaluations")
         for section in sections
@@ -468,7 +547,7 @@ def build_cycle_candidate(spec: ChannelSpec, sections: list[dict], now: datetime
         "fingerprint": fp,
         "hypothesis_keys": hypothesis_keys,
         "title": _cycle_title(spec, now, fp),
-        "body": _cycle_body(spec, sections, fp, now),
+        "body": _cycle_body(spec, sections, fp, now, snapshot),
     }
 
 
@@ -551,7 +630,7 @@ def _run_channel_body(spec: ChannelSpec, reference: datetime, *, apply: bool) ->
             build_corner_section(spec, corner_key, decision, evaluations, recent_hyp_keys)
         )
 
-    candidate = build_cycle_candidate(spec, sections, reference)
+    candidate = build_cycle_candidate(spec, sections, reference, snapshot)
     if candidate is None:
         result = {
             "channel": spec.id,

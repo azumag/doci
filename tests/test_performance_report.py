@@ -472,6 +472,64 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIn("v9", candidate["body"])
         self.assertIn("effective", candidate["body"])
 
+    def test_discovery_satisfaction_text_separates_search_from_retention(self) -> None:
+        """issue #164: 検索発見（Discovery）と視聴後評価（Satisfaction）を
+        別セクションで表示し、取得できない指標は推測で補わない。"""
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "gap-1",
+                    "corner": "shorts",
+                    "analytics": {
+                        "views": 100,
+                        "average_view_percentage": 60.0,
+                        "traffic_sources": {"YT_SEARCH": 40},
+                        "search_terms": [
+                            {"term": "コンテンツギャップ", "views": 25},
+                            {"term": "ネタ切れ", "views": 15},
+                        ],
+                    },
+                },
+                {
+                    "video_id": "gap-2",
+                    "corner": "shorts",
+                    "analytics": {
+                        "views": 10,
+                        "traffic_sources": {},
+                        "search_terms": [],
+                    },
+                },
+            ]
+        }
+
+        text = performance_report._discovery_satisfaction_text(snapshot, "shorts")
+
+        self.assertIn("### 検索発見（Discovery）", text)
+        self.assertIn("### 視聴後評価（Satisfaction）", text)
+        self.assertIn("YouTube検索からの視聴 40 回（全体の 40.0%）", text)
+        self.assertIn("「コンテンツギャップ」(25回)", text)
+        self.assertIn("平均視聴維持率 60.0%", text)
+        # 取得できない動画は0や「なし」と断定しない。
+        self.assertIn("取得できませんでした", text)
+        self.assertIn("維持率を取得できませんでした", text)
+
+    def test_discovery_satisfaction_text_without_snapshot_is_fail_closed(self) -> None:
+        text = performance_report._discovery_satisfaction_text(None, "shorts")
+        self.assertIn("snapshot未取得", text)
+
+    def test_discovery_satisfaction_text_ignores_other_corner(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "analytics": {"views": 5},
+                }
+            ]
+        }
+        text = performance_report._discovery_satisfaction_text(snapshot, "shorts")
+        self.assertIn("このcornerの動画がsnapshotにありません", text)
+
 
 class RunChannelTest(unittest.TestCase):
     def setUp(self) -> None:

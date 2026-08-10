@@ -135,6 +135,9 @@ def sync(
         "source": "youtube_analytics_api_v2",
     }
     analytics_rows: list[dict] = []
+    traffic_status: dict = {"available": False, "source": "youtube_analytics_api_v2"}
+    traffic_by_id: dict[str, dict[str, int]] = {}
+    search_by_id: dict[str, list[dict]] = {}
     if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
         start = (current.date() - timedelta(days=lookback_days)).isoformat()
         end = current.date().isoformat()
@@ -153,6 +156,30 @@ def sync(
                     "end_date": end,
                 }
             )
+            # issue #164: トラフィックソースと検索語句はAnalytics APIが
+            # 返せる範囲だけ取得する。取得できない動画・種別は0や「なし」と
+            # 推測せず、空のまま（fail-closed）。
+            try:
+                traffic_by_id = youtube.video_traffic_sources(
+                    video_ids,
+                    start_date=start,
+                    end_date=end,
+                    token_file=spec.publish.youtube.token,
+                    client_secret_file=spec.publish.youtube.client_secret,
+                )
+                search_by_id = youtube.video_search_terms(
+                    video_ids,
+                    start_date=start,
+                    end_date=end,
+                    token_file=spec.publish.youtube.token,
+                    client_secret_file=spec.publish.youtube.client_secret,
+                )
+                traffic_status.update({"available": True})
+            except Exception as exc:
+                traffic_status["reason"] = (
+                    "トラフィックソースreadback失敗。retention指標のみ保存: "
+                    f"{str(exc)[:400]}"
+                )
         except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
             analytics_status["reason"] = (
                 "Analytics readback失敗。Data API snapshotのみ保存: "
@@ -173,12 +200,20 @@ def sync(
         video_id = str(detail.get("video_id") or "")
         recorded = history_rows.get(video_id, {})
         topic = str(recorded.get("topic") or history._row_topic(recorded))
+        analytics = analytics_by_id.get(video_id)
+        if isinstance(analytics, dict):
+            analytics = {
+                **analytics,
+                "traffic_sources": traffic_by_id.get(video_id, {}),
+                "search_terms": search_by_id.get(video_id, []),
+            }
         videos.append(
             {
                 "video_id": video_id,
                 "title": str(recorded.get("title") or detail.get("title") or ""),
                 "corner": str(recorded.get("corner") or ""),
                 "topic": topic,
+                "topic_metadata": history._row_topic_metadata(recorded),
                 "format_traits": _format_traits(spec, recorded),
                 "history_ts": str(recorded.get("ts") or ""),
                 "published_at": str(detail.get("published_at") or ""),
@@ -189,7 +224,7 @@ def sync(
                     "comments": int(detail.get("comments", 0) or 0),
                     "duration": str(detail.get("duration") or ""),
                 },
-                "analytics": analytics_by_id.get(video_id),
+                "analytics": analytics,
             }
         )
     videos.sort(key=lambda row: (row["history_ts"], row["video_id"]))
@@ -199,6 +234,7 @@ def sync(
         "collected_at": current.isoformat(),
         "source": "youtube_data_api_v3",
         "analytics": analytics_status,
+        "traffic_sources": traffic_status,
         "videos": videos,
     }
     path = _snapshot_path(spec)
