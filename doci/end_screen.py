@@ -92,6 +92,14 @@ def _manifest_path(spec: ChannelSpec, experiment_id: str) -> Path:
     return directory / "manifest.json"
 
 
+def _validate_root_readable(path: Path) -> None:
+    """読み取り時もrootが実ディレクトリであることを検証する（symlink拒否）。"""
+    if path.is_symlink():
+        raise EndScreenError(f"end screen test root must not be a symlink: {path}")
+    if not path.is_dir():
+        raise EndScreenError(f"end screen test root is not a directory: {path}")
+
+
 def _now_iso(now: datetime | None) -> str:
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -172,7 +180,10 @@ def _validate_manifest_plan(data: dict, path: Path) -> None:
     link_id = str(setup.get("link_video_id") or "")
     if not _LINK_VIDEO_ID_RE.fullmatch(link_id):
         raise EndScreenError("end screen requires a valid link_video_id")
-    if link_id == str(data.get("video_id") or ""):
+    video_id = str(data.get("video_id") or "")
+    if not _VIDEO_ID_RE.fullmatch(video_id):
+        raise EndScreenError(f"invalid video_id: {video_id!r}")
+    if link_id == video_id:
         raise EndScreenError("end screen link_video_id must differ from the video itself")
     if setup.get("single_slot_only") is not True:
         raise EndScreenError("end screen must be a single video slot")
@@ -211,13 +222,24 @@ def _validate_manifest_result(data: dict, path: Path) -> None:
     if outcome == "stopped_changed_setup":
         if status != "invalidated":
             raise EndScreenError("stopped_changed_setup requires invalidated status")
-    elif status != "completed":
-        raise EndScreenError("non-stopped outcomes require completed status")
-    if result.get("setup_unchanged_confirmed") is not True:
-        raise EndScreenError("setup_unchanged_confirmed must be true")
+        if result.get("setup_unchanged_confirmed") is not False:
+            raise EndScreenError(
+                "stopped_changed_setup requires setup_unchanged_confirmed=false"
+            )
+    else:
+        if status != "completed":
+            raise EndScreenError("non-stopped outcomes require completed status")
+        if result.get("setup_unchanged_confirmed") is not True:
+            raise EndScreenError("setup_unchanged_confirmed must be true")
     recorded_at = str(result.get("recorded_at") or "")
     if not recorded_at:
         raise EndScreenError("recorded_at is required")
+    started_at = str(data.get("started_at") or "")
+    if not started_at:
+        raise EndScreenError("started_at is required")
+    completed_at = str(data.get("completed_at") or "")
+    if not completed_at:
+        raise EndScreenError("completed_at is required")
     click_rate = result.get("click_rate")
     if outcome in ("insufficient_views", "stopped_changed_setup"):
         if click_rate is not None:
@@ -227,9 +249,15 @@ def _validate_manifest_result(data: dict, path: Path) -> None:
             raise EndScreenError("click_rate must be a finite number for this outcome")
         if not (0.0 <= float(click_rate) <= 100.0):
             raise EndScreenError("click_rate must be between 0 and 100")
+        if outcome == "clicked" and float(click_rate) == 0.0:
+            raise EndScreenError("clicked outcome requires a positive click_rate")
+        if outcome == "not_clicked" and float(click_rate) > 0.0:
+            raise EndScreenError("not_clicked outcome requires a zero click_rate")
 
 
 def _load_manifest(path: Path, *, expected_channel: str | None = None) -> dict:
+    if path.is_symlink():
+        raise EndScreenError(f"end screen manifest must not be a symlink: {path}")
     if not path.is_file():
         raise EndScreenError(f"end screen manifest not found: {path}")
     try:
@@ -537,6 +565,7 @@ def complete_experiment(
 
 
 def show_experiment(spec: ChannelSpec, experiment_id: str) -> dict:
+    _validate_root_readable(_root(spec))
     return _load_manifest(
         _manifest_path(spec, experiment_id),
         expected_channel=spec.id,

@@ -477,6 +477,147 @@ class EndScreenTest(unittest.TestCase):
         with self.assertRaisesRegex(end_screen.EndScreenError, "recorded_at"):
             end_screen.show_experiment(self.spec, "esc-0000000000000001")
 
+    def test_stopped_changed_setup_round_trip_and_followup_plan(self) -> None:
+        """stopped_changed_setup は invalidated + 確認フラグFalse + 率Noneで
+        有効な終端状態。showで再読込でき、別動画のplanも継続できる。"""
+        self._plan()
+        end_screen.start_experiment(
+            self.spec,
+            "esc-0000000000000001",
+            studio_setup_confirmed=True,
+        )
+        manifest = end_screen.complete_experiment(
+            self.spec,
+            "esc-0000000000000001",
+            outcome="stopped_changed_setup",
+            notes="構成を変更した",
+        )
+        self.assertEqual(manifest["status"], "invalidated")
+        self.assertIsNone(manifest["result"]["click_rate"])
+
+        shown = end_screen.show_experiment(self.spec, "esc-0000000000000001")
+        self.assertEqual(shown["status"], "invalidated")
+        self.assertIsNone(shown["result"]["click_rate"])
+
+        # 別動画のplanが継続できる
+        self._write_history(video_id="NewVidId0001")
+        plan = end_screen.plan_experiment(
+            self.spec,
+            video_id="NewVidId0001",
+            link_video_id=self.link_video_id,
+            content_direct_confirmed=True,
+            experiment_id="esc-0000000000000003",
+        )
+        self.assertEqual(plan["status"], "planned")
+
+    def test_manifest_result_rejects_rate_contradiction_and_missing_timestamps(self) -> None:
+        """手動生成した clicked+0% / not_clicked+正値 / completed_at欠落を拒否する。"""
+        cases = (
+            (
+                "esc-0000000000000010",
+                lambda d: d["result"].update(click_rate=0.0),
+                "positive click_rate",
+            ),
+            (
+                "esc-0000000000000011",
+                lambda d: d["result"].update(outcome="not_clicked", click_rate=3.0),
+                "zero click_rate",
+            ),
+            (
+                "esc-0000000000000012",
+                lambda d: d.update(completed_at=""),
+                "completed_at is required",
+            ),
+        )
+        for index, (experiment_id, mutate, message) in enumerate(cases):
+            video_id = f"AbCdEf{index + 10:05d}"
+            with self.subTest(message=message):
+                self._write_history(video_id=video_id)
+                end_screen.plan_experiment(
+                    self.spec,
+                    video_id=video_id,
+                    link_video_id=self.link_video_id,
+                    content_direct_confirmed=True,
+                    experiment_id=experiment_id,
+                )
+                end_screen.start_experiment(
+                    self.spec,
+                    experiment_id,
+                    studio_setup_confirmed=True,
+                )
+                end_screen.complete_experiment(
+                    self.spec,
+                    experiment_id,
+                    outcome="clicked",
+                    click_rate=3.5,
+                    setup_unchanged_confirmed=True,
+                )
+                path = self._manifest_file(experiment_id)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                mutate(data)
+                data["plan_sha256"] = end_screen._plan_checksum(data)
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(end_screen.EndScreenError, message):
+                    end_screen.show_experiment(self.spec, experiment_id)
+                shutil.rmtree(
+                    self.spec.output_dir / "end_screen_tests" / experiment_id
+                )
+
+    def test_manifest_rejects_invalid_video_id(self) -> None:
+        """対象video_idがYouTube ID形式でないmanifestを、チェックサム再計算後も
+        拒否する。"""
+        for index, bad in enumerate(("", "not valid", "短い")):
+            experiment_id = f"esc-{index + 20:016d}"
+            video_id = f"AbCdEf{index + 20:05d}"
+            with self.subTest(bad=bad):
+                self._write_history(video_id=video_id)
+                end_screen.plan_experiment(
+                    self.spec,
+                    video_id=video_id,
+                    link_video_id=self.link_video_id,
+                    content_direct_confirmed=True,
+                    experiment_id=experiment_id,
+                )
+                path = self._manifest_file(experiment_id)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data["video_id"] = bad
+                data["plan_sha256"] = end_screen._plan_checksum(data)
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(end_screen.EndScreenError, "invalid video_id"):
+                    end_screen.show_experiment(self.spec, experiment_id)
+                shutil.rmtree(
+                    self.spec.output_dir / "end_screen_tests" / experiment_id
+                )
+
+    def test_show_rejects_root_and_manifest_symlinks(self) -> None:
+        """showでもroot symlink・manifest file symlinkを拒否する。"""
+        self._plan()
+        root = self.spec.output_dir / "end_screen_tests"
+        outside = Path(self.tmp.name) / "outside-root"
+        outside.mkdir()
+        root.rename(outside)
+        root.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(end_screen.EndScreenError, "root must not be a symlink"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+        root.unlink()
+        outside.rename(root)
+
+        # manifest file symlink
+        manifest_path = root / "esc-0000000000000001" / "manifest.json"
+        real = manifest_path.read_bytes()
+        manifest_path.unlink()
+        fake = Path(self.tmp.name) / "fake-manifest.json"
+        fake.write_bytes(real)
+        manifest_path.symlink_to(fake)
+        with self.assertRaisesRegex(end_screen.EndScreenError, "manifest must not be a symlink"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
 
 if __name__ == "__main__":
     unittest.main()
