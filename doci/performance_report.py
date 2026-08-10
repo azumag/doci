@@ -647,6 +647,80 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
     return "\n".join(lines)
 
 
+def _share_text(snapshot: dict | None, corner: str) -> str:
+    """共有率（shares/views）と1%超動画の構造を表示する（issue #144）。
+
+    再生数偏重の評価を避け、共有数÷再生数が1%を超える動画の構造
+    （format_traits）を次の企画の材料として並べる。viewsが0の動画は共有率を
+    算出せず、取得できない指標は0や「なし」と断定しない（fail-closed）。
+    """
+    if not isinstance(snapshot, dict):
+        return "- 共有率: snapshot未取得のため評価しません"
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not corner_videos:
+        return "- 共有率: このcornerの動画がsnapshotにありません"
+    lines: list[str] = []
+    over_one_percent: list[str] = []
+    for row in corner_videos:
+        video_id = str(row.get("video_id") or "")
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        shares = analytics.get("shares")
+        views = analytics.get("views")
+        if shares is None and views is None:
+            lines.append(
+                f"- `{video_id}`: 共有数・再生数を取得できませんでした"
+                "（推測で補いません）"
+            )
+            continue
+        if views is None or not int(views):
+            lines.append(
+                f"- `{video_id}`: 再生数が取得できないため共有率を算出しません"
+            )
+            continue
+        share_count = int(shares or 0)
+        rate = share_count * 100.0 / int(views)
+        lines.append(f"- `{video_id}`: 共有率 {rate:.2f}%（共有 {share_count} / 再生 {int(views)}）")
+        if rate > 1.0:
+            traits = row.get("format_traits") or []
+            trait_text = ", ".join(str(t) for t in traits) if traits else "（構造未記録）"
+            over_one_percent.append(f"- `{video_id}`: {trait_text}")
+    if over_one_percent:
+        lines.append("")
+        lines.append("共有率1%超の動画の構造（次の企画の材料）:")
+        lines.extend(over_one_percent)
+    lines.append(
+        "- 共有率は視聴者の能動的な評価の一つの手がかりであり、"
+        "再生数だけの評価を避けるための補助指標です。"
+    )
+    return "\n".join(lines)
+
+
+def _is_share_over_one_percent(row: dict) -> bool:
+    """共有率（shares/views）が1%を超えるかを判定する（issue #144）。
+
+    共有率は視聴者の能動的な評価の一つの手がかり。viewsが0または取得不可は
+    False（共有率を算出しない）。"""
+    analytics = row.get("analytics")
+    analytics = analytics if isinstance(analytics, dict) else {}
+    shares = analytics.get("shares")
+    views = analytics.get("views")
+    if shares is None or views is None:
+        return False
+    try:
+        views_int = int(views)
+        shares_int = int(shares)
+    except (TypeError, ValueError):
+        return False
+    if views_int <= 0:
+        return False
+    return shares_int * 100.0 / views_int > 1.0
+
+
 def _script_for_video(row: dict) -> dict:
     """snapshotの動画行からscript.jsonを読み込む（無ければ空dict）。"""
     workdir = row.get("workdir")
@@ -701,6 +775,10 @@ def _cycle_body(
             "### 維持率カーブの山/谷とシーン照合（issue #149）",
             "",
             _retention_curve_text(snapshot, section["corner"]),
+            "",
+            "### 共有率と共有される動画の構造（issue #144）",
+            "",
+            _share_text(snapshot, section["corner"]),
         ]
     lines += [
         "",
@@ -733,6 +811,7 @@ def build_cycle_candidate(
     # （Claude review指摘）。
     has_gap_discovery = False
     has_retention_content = False
+    has_share_content = False
     if isinstance(snapshot, dict):
         section_corners = {section["corner"] for section in sections}
         has_gap_discovery = any(
@@ -762,7 +841,18 @@ def build_cycle_candidate(
                 if performance.retention_moments(curve):
                     has_retention_content = True
                     break
-    has_content = has_section_content or has_gap_discovery or has_retention_content
+        # issue #144: 共有率1%超の動画がmatching cornerにあれば報告候補とする。
+        has_share_content = any(
+            str(row.get("corner") or "") in section_corners
+            and _is_share_over_one_percent(row)
+            for row in snapshot.get("videos", [])
+        )
+    has_content = (
+        has_section_content
+        or has_gap_discovery
+        or has_retention_content
+        or has_share_content
+    )
     if not has_content:
         return None
     fp = fingerprint(spec.id, sections)

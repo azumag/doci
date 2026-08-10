@@ -525,6 +525,57 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
 
         self.assertIsNone(candidate)
 
+    def test_build_cycle_candidate_includes_share_over_one_percent(self) -> None:
+        """issue #144: 形式仮説・gap動画・維持率が無くても、corner一致の動画で
+        共有率が1%を超えていれば報告候補を生成する。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "shorts", decision, [], set()
+        )
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "s1",
+                    "corner": "shorts",
+                    "format_traits": ["hook:question"],
+                    "analytics": {"views": 500, "shares": 8},
+                }
+            ]
+        }
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertIn("共有率と共有される動画の構造", candidate["body"])
+
+    def test_build_cycle_candidate_ignores_low_share_rate(self) -> None:
+        """issue #144: 共有率1%以下だけでは候補を作らない（無内容issue防止）。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "shorts", decision, [], set()
+        )
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "s2",
+                    "corner": "shorts",
+                    "analytics": {"views": 1000, "shares": 3},
+                }
+            ]
+        }
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+        self.assertIsNone(candidate)
+
     def test_build_cycle_candidate_without_snapshot_keeps_legacy_behavior(self) -> None:
         """issue #164: snapshot未指定の呼び出しは従来どおりsection内容のみで
         判定する（非gapの通常ケースでNoneを維持）。"""
@@ -1045,6 +1096,76 @@ class RunAllTest(unittest.TestCase):
         statuses = {row["channel"]: row["status"] for row in summary["channels"]}
         self.assertEqual(statuses["broken"], "error")
         self.assertEqual(statuses["alpha"], "skipped")  # performance_feedback未設定
+
+
+class ShareRateTest(unittest.TestCase):
+    """issue #144: 共有率（shares/views）と1%超動画の構造表示。"""
+
+    def test_share_text_lists_rate_and_over_one_percent_structure(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "s1",
+                    "corner": "shorts",
+                    "format_traits": ["hook:question", "duration:0_to_59s"],
+                    "analytics": {"views": 500, "shares": 8},
+                },
+                {
+                    "video_id": "s2",
+                    "corner": "shorts",
+                    "format_traits": ["hook:statement"],
+                    "analytics": {"views": 1000, "shares": 3},
+                },
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("共有率 1.60%（共有 8 / 再生 500）", text)
+        self.assertIn("共有率 0.30%（共有 3 / 再生 1000）", text)
+        self.assertIn("共有率1%超の動画の構造", text)
+        self.assertIn("`s1`: hook:question, duration:0_to_59s", text)
+        # 1%以下の動画は構造リストに載せない。
+        self.assertNotIn("`s2`: hook:statement", text)
+        self.assertIn("再生数だけの評価を避けるための補助指標", text)
+
+    def test_share_text_is_fail_closed_when_missing(self) -> None:
+        snapshot = {
+            "videos": [
+                {"video_id": "v1", "corner": "shorts", "analytics": {}}
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("取得できませんでした", text)
+        self.assertIn("推測で補いません", text)
+
+    def test_share_text_skips_zero_views(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "shorts",
+                    "analytics": {"views": 0, "shares": 5},
+                }
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("再生数が取得できないため共有率を算出しません", text)
+
+    def test_share_text_without_snapshot_is_fail_closed(self) -> None:
+        text = performance_report._share_text(None, "shorts")
+        self.assertIn("snapshot未取得", text)
+
+    def test_share_text_ignores_other_corner(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "analytics": {"views": 100, "shares": 2},
+                }
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("このcornerの動画がsnapshotにありません", text)
 
 
 class RetentionCurveAnalysisTest(unittest.TestCase):

@@ -329,6 +329,12 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
   再視聴・巻き戻し・スキップ・離脱の確認は運用者が動画内容と照合して行う。
   API全体の失敗は取得失敗と明記し、Shorts等でカーブが返らない場合と区別する
   （推測で補わない）。
+- **共有率と共有される動画の構造**（issue #144）:
+  Analytics APIの`shares`（共有数）と`views`（再生数）から共有率を算出し、
+  共有率が1%を超える動画の構造（`format_traits`）を次の企画の材料として
+  レポートに載せる。再生数だけの評価を避けるための補助指標であり、共有率1%超の
+  動画がsnapshotにあれば形式仮説が無くてもレポート候補として扱う。再生数が
+  取得できない動画は共有率を算出せず、取得できない指標は0や「なし」と断定しない。
 
 状態は`output/<channel>/performance_experiments.jsonl`に`proposed → applied →
 evaluated → reported`（または`expired`）として追記される。全cornerが「新仮説なし

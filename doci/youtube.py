@@ -346,9 +346,13 @@ def video_analytics(
     # （Shorts corner限定の指標であり、他cornerと同列に扱うと長尺動画の
     # 乖離ゼロを誤ってシグナルとして拾いかねないため、消費する場合は
     # corner別の扱いを別途設計する）。
+    # shares(issue #144): 共有数は「再生数偏重の評価」を避け、共有率
+    # （shares/views）で視聴者の能動的な評価を見るための材料として収集する。
+    # Shorts cornerでは共有が再生に比べて極端に少ないため、snapshotへの
+    # 保存のみ行い、performance.pyの比較ロジック（trait仮説）では消費しない。
     metrics = (
         "views,engagedViews,estimatedMinutesWatched,averageViewDuration,"
-        "averageViewPercentage,likes,comments"
+        "averageViewPercentage,likes,comments,shares"
     )
     results: list[dict] = []
     for offset in range(0, len(ids), 200):
@@ -385,6 +389,7 @@ def video_analytics(
                     ),
                     "likes": int(row.get("likes", 0) or 0),
                     "comments": int(row.get("comments", 0) or 0),
+                    "shares": int(row.get("shares", 0) or 0),
                 }
             )
     return results
