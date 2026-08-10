@@ -495,9 +495,24 @@ def video_search_terms(
     )
 
     def _http_reason(exc: HttpError) -> str:
-        """HttpErrorの公開reasonを安全に取り出す（private `_get_reason()`は使わない）。"""
-        reason = getattr(getattr(exc, "resp", None), "reason", None)
-        return " ".join(str(reason or "").split()).casefold()
+        """Google APIエラーのsemantic reasonを抽出する。
+
+        `resp.reason` は通常「Bad Request」等のHTTP reason phraseであり分類に
+        使えないため、semantic reasonは `error_details[].reason` → 公開属性
+        `exc.reason` の順で取り、どちらも無ければ空文字を返す。
+        """
+        try:
+            details = exc.error_details
+        except Exception:
+            details = None
+        if isinstance(details, list):
+            for entry in details:
+                if isinstance(entry, dict) and entry.get("reason"):
+                    return " ".join(str(entry["reason"]).split()).casefold()
+        public_reason = getattr(exc, "reason", None)
+        if public_reason:
+            return " ".join(str(public_reason).split()).casefold()
+        return ""
 
     ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
     if not ids:

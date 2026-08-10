@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from googleapiclient.errors import HttpError
 from types import SimpleNamespace
@@ -8,6 +9,34 @@ from pathlib import Path
 from unittest import mock
 
 from doci import youtube
+
+
+class _FakeResp:
+    """httplib2 Responseと同様にdict-likeアクセスを持つ最小スタブ。"""
+
+    def __init__(self, status: int, reason: str) -> None:
+        self.status = status
+        self.reason = reason
+
+    def get(self, key: str, default=None):
+        return {"content-type": "application/json"}.get(key, default)
+
+
+def _google_http_error(status: int, reason: str) -> HttpError:
+    """Google APIの実際のJSONエラー形状からHttpErrorを生成する。"""
+    body = json.dumps(
+        {
+            "error": {
+                "code": status,
+                "message": reason,
+                "errors": [{"reason": reason, "message": reason}],
+            }
+        }
+    ).encode("utf-8")
+    return HttpError(
+        _FakeResp(status, "Bad Request" if status == 400 else "Not Found"),
+        body,
+    )
 
 
 class _Request:
@@ -406,10 +435,7 @@ class YouTubeSearchTest(unittest.TestCase):
             ],
             "rows": [["コンテンツギャップ", 12]],
         }
-        http_error = HttpError(
-            SimpleNamespace(status=400, reason="privacy"),
-            b"privacy threshold",
-        )
+        http_error = _google_http_error(400, "privacy")
         reports.query.return_value.execute.side_effect = [http_error, ok_page]
         service = mock.Mock()
         service.reports.return_value = reports
@@ -433,10 +459,7 @@ class YouTubeSearchTest(unittest.TestCase):
         """issue #164: 認証・権限・クォータ等の全体障害（HTTP 403等）は
         動画固有エラーと区別して即時中断し、残りを照会し続けない。"""
         reports = mock.Mock()
-        http_error = HttpError(
-            SimpleNamespace(status=403, reason="quota exceeded"),
-            b"quota exceeded",
-        )
+        http_error = _google_http_error(403, "quotaExceeded")
         reports.query.return_value.execute.side_effect = http_error
         service = mock.Mock()
         service.reports.return_value = reports
@@ -458,10 +481,7 @@ class YouTubeSearchTest(unittest.TestCase):
         """issue #164 (Sol review指摘): invalidFilters等のリクエスト構造不備
         （HTTP 400）は動画固有エラーとせず、全体障害として1件目で中断する。"""
         reports = mock.Mock()
-        http_error = HttpError(
-            SimpleNamespace(status=400, reason="invalidFilters"),
-            b"invalidFilters",
-        )
+        http_error = _google_http_error(400, "invalidFilters")
         reports.query.return_value.execute.side_effect = http_error
         service = mock.Mock()
         service.reports.return_value = reports
@@ -481,10 +501,7 @@ class YouTubeSearchTest(unittest.TestCase):
         """issue #164: 全動画が動画固有エラー（HTTP 400 privacy等）で失敗した
         場合は、部分取得成功とせず例外を再送出する。"""
         reports = mock.Mock()
-        http_error = HttpError(
-            SimpleNamespace(status=400, reason="privacy"),
-            b"privacy threshold",
-        )
+        http_error = _google_http_error(400, "privacy")
         reports.query.return_value.execute.side_effect = http_error
         service = mock.Mock()
         service.reports.return_value = reports
