@@ -226,9 +226,8 @@ class YouTubeSearchTest(unittest.TestCase):
                 {"name": "averageViewPercentage"},
                 {"name": "likes"},
                 {"name": "comments"},
-                {"name": "endScreenClickRate"},
             ],
-            "rows": [["abc123", 80, 65, 120.5, 90.0, 72.4, 5, 2, 3.5]],
+            "rows": [["abc123", 80, 65, 120.5, 90.0, 72.4, 5, 2]],
         }
         service = mock.Mock()
         service.reports.return_value = reports
@@ -245,13 +244,11 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(results[0]["average_view_percentage"], 72.4)
         self.assertEqual(results[0]["views"], 80)
         self.assertEqual(results[0]["engaged_views"], 65)
-        self.assertEqual(results[0]["end_screen_click_rate"], 3.5)
         self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video")
         self.assertEqual(reports.query.call_args.kwargs["filters"], "video==abc123")
         self.assertEqual(reports.query.call_args.kwargs["sort"], "-views")
         self.assertEqual(reports.query.call_args.kwargs["maxResults"], 200)
         self.assertIn("engagedViews", reports.query.call_args.kwargs["metrics"])
-        self.assertIn("endScreenClickRate", reports.query.call_args.kwargs["metrics"])
 
     def test_video_analytics_defaults_engaged_views_to_zero_when_absent(self) -> None:
         """`engagedViews`列がレスポンスに含まれない場合でもKeyErrorにならず

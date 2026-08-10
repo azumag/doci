@@ -348,7 +348,7 @@ def video_analytics(
     # corner別の扱いを別途設計する）。
     metrics = (
         "views,engagedViews,estimatedMinutesWatched,averageViewDuration,"
-        "averageViewPercentage,likes,comments,endScreenClickRate"
+        "averageViewPercentage,likes,comments"
     )
     results: list[dict] = []
     for offset in range(0, len(ids), 200):
@@ -385,13 +385,6 @@ def video_analytics(
                     ),
                     "likes": int(row.get("likes", 0) or 0),
                     "comments": int(row.get("comments", 0) or 0),
-                    # issue #165: 終了画面要素のクリック率。Shorts等でAPIが
-                    # 返さない場合は0と断定せずNoneのまま（fail-closed）。
-                    "end_screen_click_rate": (
-                        float(row.get("endScreenClickRate"))
-                        if row.get("endScreenClickRate") is not None
-                        else None
-                    ),
                 }
             )
     return results

@@ -325,6 +325,14 @@ evaluated → reported`（または`expired`）として追記される。全cor
 かつ未報告の検証結果なし、かつ`gap_query`付きのコンテンツギャップ動画も無い」なら
 issue作成自体をスキップする（無内容issueの防止）。
 
+起動間隔は`StartInterval=86400`（毎日）でlaunchdジョブを登録し、Python側の
+`PERFORMANCE_REPORT_MIN_INTERVAL_HOURS`（既定72時間）ゲートで実質「3日に1回程度」
+に保つ。`StartInterval`を3日(259200秒)に直接設定しない理由は、スリープ/再起動で
+launchdのタイマーがリセットされ、間隔が長いほど実行そのものが遅延・脱落しやすい
+ため。毎日起動＋ソフトゲートの方が確実に間隔を守れる。issueのレート制御・
+重複防止・週次上限は`doci.feedback_issues`（チャンネル単位で週
+`FEEDBACK_ISSUES_MAX_PER_WEEK`件、既定3件）がそのまま担う。
+
 ### YouTube Studioのタイトル・サムネイルA/Bテスト（issue #151）
 
 通常動画のネイティブA/BテストはYouTube Studio上で人が開始する。dociはStudioを
@@ -392,14 +400,6 @@ python -m doci.end_screen complete \
 `not_clicked`・`insufficient_views`ではクリック率の勝者判定をせず、テスト中に終了
 画面の構成を変更した場合は`--outcome stopped_changed_setup`で`invalidated`にする。
 クリック率は0〜100の範囲のみ受け付ける。結果は`next_idea_memo.md`へ書き出す。
-
-起動間隔は`StartInterval=86400`（毎日）でlaunchdジョブを登録し、Python側の
-`PERFORMANCE_REPORT_MIN_INTERVAL_HOURS`（既定72時間）ゲートで実質「3日に1回程度」
-に保つ。`StartInterval`を3日(259200秒)に直接設定しない理由は、スリープ/再起動で
-launchdのタイマーがリセットされ、間隔が長いほど実行そのものが遅延・脱落しやすい
-ため。毎日起動＋ソフトゲートの方が確実に間隔を守れる。issueのレート制御・
-重複防止・週次上限は`doci.feedback_issues`（チャンネル単位で週
-`FEEDBACK_ISSUES_MAX_PER_WEEK`件、既定3件）がそのまま担う。
 
 ### YouTube攻略Ch の公開判定
 

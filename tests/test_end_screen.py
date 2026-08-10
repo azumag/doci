@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import math
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from doci import end_screen
 
@@ -157,6 +160,7 @@ class EndScreenTest(unittest.TestCase):
                 self.spec,
                 "esc-0000000000000001",
                 outcome="clicked",
+                click_rate=3.5,
                 setup_unchanged_confirmed=True,
             )
         end_screen.start_experiment(
@@ -245,6 +249,233 @@ class EndScreenTest(unittest.TestCase):
         manifest = end_screen.show_experiment(self.spec, "esc-0000000000000001")
         self.assertEqual(manifest["experiment_id"], "esc-0000000000000001")
         self.assertEqual(manifest["video_id"], self.video_id)
+
+    def test_plan_rejects_checksum_mismatch_on_start(self) -> None:
+        """計画後のmanifest改変（リンク先変更・制約フラグ偽）をstartで拒否する。"""
+        self._plan()
+        path = self._manifest_file("esc-0000000000000001")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["end_screen_setup"]["link_video_id"] = "AnotherId9999"
+        data["plan_sha256"] = "f" * 64
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "checksum mismatch"):
+            end_screen.start_experiment(
+                self.spec,
+                "esc-0000000000000001",
+                studio_setup_confirmed=True,
+            )
+
+    def test_plan_rejects_weakened_constraints_even_with_recomputed_checksum(self) -> None:
+        """制約フラグを偽へ変更しチェックサムを再計算しても、startで拒否する。"""
+        self._plan()
+        path = self._manifest_file("esc-0000000000000001")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["end_screen_setup"]["single_slot_only"] = False
+        data["end_screen_setup"]["subscription_button_prohibited"] = False
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "single video slot"):
+            end_screen.start_experiment(
+                self.spec,
+                "esc-0000000000000001",
+                studio_setup_confirmed=True,
+            )
+
+    def test_manifest_rejects_self_link_and_id_mismatch(self) -> None:
+        """自己リンク・ID/ディレクトリ不一致・非object JSONを拒否する。"""
+        self._plan()
+        path = self._manifest_file("esc-0000000000000001")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["end_screen_setup"]["link_video_id"] = self.video_id
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "must differ"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
+        # ID/ディレクトリ不一致
+        data2 = json.loads(self._manifest_file("esc-0000000000000001").read_text(encoding="utf-8"))
+        data2["experiment_id"] = "esc-9999999999999999"
+        data2["plan_sha256"] = end_screen._plan_checksum(data2)
+        self._manifest_file("esc-0000000000000001").write_text(
+            json.dumps(data2, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "mismatch"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
+        # 非object JSON
+        self._manifest_file("esc-0000000000000001").write_text("[1,2,3]\n", encoding="utf-8")
+        with self.assertRaisesRegex(end_screen.EndScreenError, "invalid manifest"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
+    def test_corrupt_active_manifest_blocks_second_plan(self) -> None:
+        """壊れた既存manifest（不正JSON・不正setup・欠落）があると、
+        同一動画の2件目planを拒否する（fail-closed・active一意性）。"""
+        self._plan("esc-0000000000000001")
+        path = self._manifest_file("esc-0000000000000001")
+        path.write_text("{broken json\n", encoding="utf-8")
+        with self.assertRaises(end_screen.EndScreenError):
+            self._plan("esc-0000000000000002")
+        self.assertFalse(self._manifest_file("esc-0000000000000002").exists())
+
+        # 不正setup
+        shutil.rmtree(
+            self.spec.output_dir / "end_screen_tests" / "esc-0000000000000001"
+        )
+        self._plan("esc-0000000000000001")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["end_screen_setup"]["element"] = "playlist"
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(end_screen.EndScreenError):
+            self._plan("esc-0000000000000002")
+
+        # manifest欠落
+        shutil.rmtree(
+            self.spec.output_dir / "end_screen_tests" / "esc-0000000000000001"
+        )
+        self._plan("esc-0000000000000001")
+        path.unlink()
+        with self.assertRaisesRegex(end_screen.EndScreenError, "manifest missing"):
+            self._plan("esc-0000000000000002")
+
+    def test_symlink_manifest_directory_blocks_plan(self) -> None:
+        """実験ディレクトリがsymlinkなら拒否する。"""
+        self._plan("esc-0000000000000001")
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        target = self.spec.output_dir / "end_screen_tests" / "esc-0000000000000002"
+        target.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(end_screen.EndScreenError, "symlink"):
+            self._plan("esc-0000000000000002")
+
+    def test_root_symlink_blocks_plan(self) -> None:
+        """記録先ルート自体がsymlinkなら外部書込み前に拒否する。"""
+        self._plan("esc-0000000000000001")
+        root = self.spec.output_dir / "end_screen_tests"
+        outside = Path(self.tmp.name) / "outside-root"
+        outside.mkdir()
+        root.rename(outside)
+        root.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(end_screen.EndScreenError, "root must not be a symlink"):
+            self._plan("esc-0000000000000003")
+
+    def test_complete_requires_click_rate_for_clicked(self) -> None:
+        """clicked outcomeはクリック率必須。省略を拒否する。"""
+        self._plan()
+        end_screen.start_experiment(
+            self.spec,
+            "esc-0000000000000001",
+            studio_setup_confirmed=True,
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "click_rate is required"):
+            end_screen.complete_experiment(
+                self.spec,
+                "esc-0000000000000001",
+                outcome="clicked",
+                setup_unchanged_confirmed=True,
+            )
+
+    def test_complete_rejects_outcome_rate_contradiction_and_nonfinite(self) -> None:
+        """clickedで0%・not_clickedで正値・NaN/Infinityを拒否する。"""
+        for index, (outcome, click_rate) in enumerate(
+            (
+            ("clicked", 0.0),
+            ("not_clicked", 3.0),
+            ("clicked", math.nan),
+            ("clicked", math.inf),
+            ("clicked", "3.5"),
+            )
+        ):
+            experiment_id = f"esc-{index + 2:016d}"
+            video_id = f"AbCdEf{index:05d}"
+            with self.subTest(outcome=outcome, click_rate=click_rate):
+                self._write_history(video_id=video_id)
+                end_screen.plan_experiment(
+                    self.spec,
+                    video_id=video_id,
+                    link_video_id=self.link_video_id,
+                    content_direct_confirmed=True,
+                    experiment_id=experiment_id,
+                )
+                end_screen.start_experiment(
+                    self.spec,
+                    experiment_id,
+                    studio_setup_confirmed=True,
+                )
+                with self.assertRaises(end_screen.EndScreenError):
+                    end_screen.complete_experiment(
+                        self.spec,
+                        experiment_id,
+                        outcome=outcome,
+                        click_rate=click_rate,
+                        setup_unchanged_confirmed=True,
+                    )
+
+    def test_manifest_result_validates_status_outcome_and_flags(self) -> None:
+        """completed/invalidated manifestのstatus-outcome整合・確認フラグ・
+        日時・率を検証する。"""
+        self._plan()
+        end_screen.start_experiment(
+            self.spec,
+            "esc-0000000000000001",
+            studio_setup_confirmed=True,
+        )
+        end_screen.complete_experiment(
+            self.spec,
+            "esc-0000000000000001",
+            outcome="clicked",
+            click_rate=3.5,
+            setup_unchanged_confirmed=True,
+        )
+        path = self._manifest_file("esc-0000000000000001")
+
+        # status/outcome不一致
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["status"] = "invalidated"
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "require"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
+        # 確認フラグ欠落
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["status"] = "completed"
+        data["result"]["setup_unchanged_confirmed"] = False
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "setup_unchanged_confirmed"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
+        # 日時欠落
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["result"]["setup_unchanged_confirmed"] = True
+        data["result"]["recorded_at"] = ""
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "recorded_at"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
 
 
 if __name__ == "__main__":

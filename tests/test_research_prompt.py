@@ -1668,6 +1668,47 @@ class ResearchPromptTest(unittest.TestCase):
         ):
             self.assertIn(rule, prompt)
 
+    def test_youtube_growth_end_screen_rule_reaches_research_prompt(self) -> None:
+        """issue #165: corner_video.md の終了画面1枠ルールがリサーチプロンプトの
+        チャンネルガイダンスとして反映される。"""
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["video"]
+        raw = json.dumps(
+            {
+                "topic": "終了画面で次の一本へつなぐ",
+                "viewer_action": "YouTube Studioで終了画面要素のクリック率を確認する",
+                "theme_fit": "clear",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/6388789",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+            mock.patch.object(research.llm, "run_claude", return_value=raw) as run_mock,
+        ):
+            research.web_research(
+                corner,
+                [],
+                spec,
+                backend_override="claude",
+                require_youtube_examples=False,
+            )
+
+        prompt = run_mock.call_args.args[0]
+        for rule in (
+            "登録ボタン・再生リスト",
+            "1枠だけ設定",
+            "終了画面要素の",
+            "クリック率を使い",
+            "万能な合格ラインとして捏造しません",
+        ):
+            self.assertIn(rule, prompt)
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
             mock.patch.object(config, "RESEARCH_BACKEND", "opencode-go"),

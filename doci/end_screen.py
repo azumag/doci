@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -66,12 +67,28 @@ def _root(spec: ChannelSpec) -> Path:
     return spec.output_dir / "end_screen_tests"
 
 
+def _ensure_root_dir(path: Path) -> Path:
+    """記録先ルートを実ディレクトリとして検証する（symlinkは拒否）。"""
+    if path.is_symlink():
+        raise EndScreenError(f"end screen test root must not be a symlink: {path}")
+    if path.exists() and not path.is_dir():
+        raise EndScreenError(f"end screen test root is not a directory: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise EndScreenError(f"end screen test root must not be a symlink: {path}")
+    return path
+
+
 def _manifest_path(spec: ChannelSpec, experiment_id: str) -> Path:
     if not _EXPERIMENT_ID_RE.fullmatch(experiment_id):
         raise EndScreenError(f"invalid experiment id: {experiment_id!r}")
     directory = _root(spec) / experiment_id
     if directory.is_symlink():
         raise EndScreenError(f"end screen test directory must not be a symlink: {directory}")
+    if directory.name != experiment_id:
+        raise EndScreenError(
+            f"end screen test directory name mismatch: {directory.name!r}"
+        )
     return directory / "manifest.json"
 
 
@@ -85,8 +102,10 @@ def _now_iso(now: datetime | None) -> str:
 @contextmanager
 def _operation_lock(spec: ChannelSpec) -> Iterator[None]:
     """1チャンネルの終了画面記録を直列化する。"""
-    path = _root(spec) / ".end_screen.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    root = _ensure_root_dir(_root(spec))
+    path = root / ".end_screen.lock"
+    if path.is_symlink():
+        raise EndScreenError(f"end screen lock must not be a symlink: {path}")
     with path.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
@@ -127,6 +146,14 @@ def _plan_checksum(manifest: dict) -> str:
 def _validate_manifest_plan(data: dict, path: Path) -> None:
     if not isinstance(data, dict):
         raise EndScreenError(f"invalid manifest: {path}")
+    if not path.name == "manifest.json":
+        raise EndScreenError(f"manifest file name mismatch: {path.name!r}")
+    experiment_id = str(data.get("experiment_id") or "")
+    directory = path.parent.name
+    if experiment_id != directory:
+        raise EndScreenError(
+            f"experiment_id/directory mismatch: {experiment_id!r} != {directory!r}"
+        )
     missing = [key for key in _PLAN_FIELDS if key not in data]
     if missing:
         raise EndScreenError(
@@ -145,8 +172,31 @@ def _validate_manifest_plan(data: dict, path: Path) -> None:
     link_id = str(setup.get("link_video_id") or "")
     if not _LINK_VIDEO_ID_RE.fullmatch(link_id):
         raise EndScreenError("end screen requires a valid link_video_id")
+    if link_id == str(data.get("video_id") or ""):
+        raise EndScreenError("end screen link_video_id must differ from the video itself")
+    if setup.get("single_slot_only") is not True:
+        raise EndScreenError("end screen must be a single video slot")
+    if setup.get("subscription_button_prohibited") is not True:
+        raise EndScreenError("end screen must prohibit the subscription button")
+    if setup.get("playlist_element_prohibited") is not True:
+        raise EndScreenError("end screen must prohibit playlist elements")
+    if setup.get("content_direct_confirmed") is not True:
+        raise EndScreenError(
+            "end screen setup is missing the content-direct confirmation"
+        )
     if data.get("decision_metric") != "youtube_studio.end_screen_click_rate":
         raise EndScreenError("decision_metric must be end_screen_click_rate")
+    expected = _plan_checksum(data)
+    actual = str(data.get("plan_sha256") or "")
+    if not hmac.compare_digest(actual, expected):
+        raise EndScreenError("end screen plan checksum mismatch")
+    source = data.get("source")
+    if not isinstance(source, dict):
+        raise EndScreenError("source must be an object")
+    if str(source.get("tier") or "") != "longform":
+        raise EndScreenError("source tier must be longform")
+    if str(source.get("youtube_privacy") or "") not in {"public", "unlisted"}:
+        raise EndScreenError("source youtube_privacy must be public or unlisted")
 
 
 def _validate_manifest_result(data: dict, path: Path) -> None:
@@ -154,8 +204,29 @@ def _validate_manifest_result(data: dict, path: Path) -> None:
     result = data.get("result")
     if not isinstance(result, dict):
         raise EndScreenError("result must be an object")
-    if str(result.get("outcome") or "") not in VALID_OUTCOMES:
-        raise EndScreenError(f"invalid outcome: {result.get('outcome')!r}")
+    outcome = str(result.get("outcome") or "")
+    if outcome not in VALID_OUTCOMES:
+        raise EndScreenError(f"invalid outcome: {outcome!r}")
+    status = str(data.get("status") or "")
+    if outcome == "stopped_changed_setup":
+        if status != "invalidated":
+            raise EndScreenError("stopped_changed_setup requires invalidated status")
+    elif status != "completed":
+        raise EndScreenError("non-stopped outcomes require completed status")
+    if result.get("setup_unchanged_confirmed") is not True:
+        raise EndScreenError("setup_unchanged_confirmed must be true")
+    recorded_at = str(result.get("recorded_at") or "")
+    if not recorded_at:
+        raise EndScreenError("recorded_at is required")
+    click_rate = result.get("click_rate")
+    if outcome in ("insufficient_views", "stopped_changed_setup"):
+        if click_rate is not None:
+            raise EndScreenError(f"click_rate must be null for outcome {outcome!r}")
+    else:
+        if not isinstance(click_rate, (int, float)) or isinstance(click_rate, bool):
+            raise EndScreenError("click_rate must be a finite number for this outcome")
+        if not (0.0 <= float(click_rate) <= 100.0):
+            raise EndScreenError("click_rate must be between 0 and 100")
 
 
 def _load_manifest(path: Path, *, expected_channel: str | None = None) -> dict:
@@ -165,6 +236,8 @@ def _load_manifest(path: Path, *, expected_channel: str | None = None) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise EndScreenError(f"cannot read manifest: {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise EndScreenError(f"invalid manifest: {path}")
     if expected_channel is not None and str(data.get("channel") or "") != expected_channel:
         raise EndScreenError(
             f"channel mismatch: expected {expected_channel}, got {data.get('channel')!r}"
@@ -181,12 +254,16 @@ def _all_manifests(spec: ChannelSpec) -> list[dict]:
         return []
     manifests: list[dict] = []
     for child in sorted(root.iterdir()):
+        if child.is_symlink():
+            raise EndScreenError(
+                f"end screen test directory must not be a symlink: {child}"
+            )
+        if not _EXPERIMENT_ID_RE.fullmatch(child.name):
+            continue
         path = child / "manifest.json"
-        if path.is_file() and not child.is_symlink():
-            try:
-                manifests.append(_load_manifest(path, expected_channel=spec.id))
-            except EndScreenError:
-                continue
+        if not path.is_file():
+            raise EndScreenError(f"end screen manifest missing: {path}")
+        manifests.append(_load_manifest(path, expected_channel=spec.id))
     return manifests
 
 
@@ -342,6 +419,7 @@ def plan_experiment(
                     "single_slot_only": True,
                     "subscription_button_prohibited": True,
                     "playlist_element_prohibited": True,
+                    "content_direct_confirmed": True,
                 },
                 "source": {
                     "title": str(recorded.get("title") or ""),
@@ -420,13 +498,20 @@ def complete_experiment(
         raise EndScreenError(
             "confirm that the end screen setup was not manually changed during the test"
         )
-    if click_rate is not None:
-        if not (0.0 <= click_rate <= 100.0):
-            raise EndScreenError("click_rate must be between 0 and 100")
-        if outcome in ("insufficient_views", "stopped_changed_setup"):
+    if outcome in ("insufficient_views", "stopped_changed_setup"):
+        if click_rate is not None:
             raise EndScreenError(
                 f"click_rate must not be recorded for outcome {outcome!r}"
             )
+    else:
+        if not isinstance(click_rate, (int, float)) or isinstance(click_rate, bool):
+            raise EndScreenError("click_rate is required for this outcome")
+        if not (0.0 <= float(click_rate) <= 100.0):
+            raise EndScreenError("click_rate must be between 0 and 100")
+        if outcome == "clicked" and float(click_rate) == 0.0:
+            raise EndScreenError("clicked outcome requires a positive click_rate")
+        if outcome == "not_clicked" and float(click_rate) > 0.0:
+            raise EndScreenError("not_clicked outcome requires a zero click_rate")
     with _operation_lock(spec):
         path = _manifest_path(spec, experiment_id)
         manifest = _load_manifest(path, expected_channel=spec.id)
