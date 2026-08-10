@@ -60,6 +60,8 @@ def _snapshot_signature(snapshot: dict) -> str:
         "traffic_sources": snapshot.get("traffic_sources", {}),
         "search_terms": snapshot.get("search_terms", {}),
         "retention_curve": snapshot.get("retention_curve", {}),
+        # issue #144: 共有率(30日)readbackのavailable/reason変化も署名へ含める。
+        "share_30d": snapshot.get("share_30d", {}),
         "videos": snapshot.get("videos", []),
     }
     return hashlib.sha256(
@@ -331,10 +333,15 @@ def sync(
         "available": False,
         "source": "youtube_analytics_api_v2",
     }
+    share_30d_status: dict = {
+        "available": False,
+        "source": "youtube_analytics_api_v2",
+    }
     traffic_by_id: dict[str, dict[str, int]] = {}
     search_by_id: dict[str, list[dict]] = {}
     retention_by_id: dict[str, list[dict]] = {}
     retention_failures: dict[str, str] = {}
+    share_30d_by_id: dict[str, dict] = {}
     if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
         start = (current.date() - timedelta(days=lookback_days)).isoformat()
         end = current.date().isoformat()
@@ -353,6 +360,63 @@ def sync(
                     "end_date": end,
                 }
             )
+        except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
+            analytics_status["reason"] = (
+                "90日Analytics readback失敗（Data API snapshotは保存）: "
+                f"{str(exc)[:400]}"
+            )
+        try:
+            # issue #144: 共有率は「過去30日間」の shares/views で
+            # 評価する。既存の90日集計（analytics_rows）とは別に、
+            # 共有率専用の30日集計を取得して分離保存する。Analytics APIの
+            # 日付は太平洋時間基準のため、完了日（基準日-1日）から遡って
+            # 29日差の30暦日を対象にする（UTC日付をそのまま使うと
+            # 日付変更直後にずれる）。対象はshorts動画のみ。
+            # 90日Analyticsの失敗と独立に実行し、片方の障害が他方の実データを
+            # 失わせない（Sol review指摘）。
+            from zoneinfo import ZoneInfo
+
+            pt_now = current.astimezone(ZoneInfo("America/Los_Angeles"))
+            share_end = (
+                pt_now.date() - timedelta(days=1)
+            ).isoformat()
+            share_start = (
+                datetime.fromisoformat(share_end).date()
+                - timedelta(days=29)
+            ).isoformat()
+            share_ids = [
+                video_id
+                for video_id, row in history_rows.items()
+                if str(row.get("corner") or "") == "shorts"
+            ]
+            share_rows = youtube.video_share_metrics(
+                share_ids,
+                start_date=share_start,
+                end_date=share_end,
+                token_file=spec.publish.youtube.token,
+                client_secret_file=spec.publish.youtube.client_secret,
+            )
+            share_30d_status.update(
+                {
+                    "available": True,
+                    "start_date": share_start,
+                    "end_date": share_end,
+                }
+            )
+            for row in share_rows:
+                video_id = str(row.get("video_id") or "")
+                if not video_id:
+                    continue
+                share_30d_by_id[video_id] = {
+                    "shares": row.get("shares"),
+                    "views": row.get("views"),
+                }
+        except Exception as exc:
+            share_30d_status["reason"] = (
+                "共有率(30日)readback失敗（Data API snapshotは保存）: "
+                f"{str(exc)[:400]}"
+            )
+        if analytics_status.get("available"):
             # issue #164: トラフィックソースと検索語句はAnalytics APIが
             # 返せる範囲だけ取得する。取得できない動画・種別は0や「なし」と
             # 推測せず、空のまま（fail-closed）。両者は別々のtry/statusで
@@ -439,11 +503,6 @@ def sync(
                     "維持率カーブreadback失敗。平均指標のみ保存: "
                     f"{str(exc)[:400]}"
                 )
-        except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
-            analytics_status["reason"] = (
-                "Analytics readback失敗。Data API snapshotのみ保存: "
-                f"{str(exc)[:400]}"
-            )
     else:
         analytics_status["reason"] = (
             "YouTube Analytics APIをOAuthクライアントのGoogle Cloud projectで"
@@ -467,6 +526,7 @@ def sync(
                 "search_terms": search_by_id.get(video_id, []),
                 "retention_curve": retention_by_id.get(video_id, []),
             }
+        share_30d = share_30d_by_id.get(video_id)
         workdir = _safe_workdir(spec, str(recorded.get("workdir") or ""))
         videos.append(
             {
@@ -489,6 +549,8 @@ def sync(
                 "analytics": analytics,
             }
         )
+        if share_30d is not None:
+            videos[-1]["share_30d"] = share_30d
     videos.sort(key=lambda row: (row["history_ts"], row["video_id"]))
     snapshot = {
         "schema_version": SCHEMA_VERSION,
@@ -499,6 +561,7 @@ def sync(
         "traffic_sources": traffic_status,
         "search_terms": search_status,
         "retention_curve": retention_status,
+        "share_30d": share_30d_status,
         "videos": videos,
     }
     path = _snapshot_path(spec)

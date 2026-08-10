@@ -525,6 +525,110 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
 
         self.assertIsNone(candidate)
 
+    def test_build_cycle_candidate_includes_share_over_one_percent(self) -> None:
+        """issue #144: 形式仮説・gap動画・維持率が無くても、shorts cornerの
+        動画で共有率が1%を超え、構造（format_traits）が記録されていれば
+        報告候補を生成する。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "shorts", decision, [], set()
+        )
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "s1",
+                    "corner": "shorts",
+                    "format_traits": ["tier:short", "scenes:1_to_4"],
+                    "share_30d": {"views": 500, "shares": 8},
+                }
+            ]
+        }
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertIn("共有率と共有される動画の構造", candidate["body"])
+
+    def test_build_cycle_candidate_ignores_low_share_rate(self) -> None:
+        """issue #144: 共有率1%以下だけでは候補を作らない（無内容issue防止）。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "shorts", decision, [], set()
+        )
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "s2",
+                    "corner": "shorts",
+                    "format_traits": ["tier:short"],
+                    "share_30d": {"views": 1000, "shares": 3},
+                }
+            ]
+        }
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+        self.assertIsNone(candidate)
+
+    def test_build_cycle_candidate_ignores_share_without_traits(self) -> None:
+        """issue #144 (Sol review指摘): 1%超でも構造（format_traits）が
+        未記録なら次の企画の材料にならないため候補にしない。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "shorts", decision, [], set()
+        )
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "s1",
+                    "corner": "shorts",
+                    "share_30d": {"views": 500, "shares": 8},
+                }
+            ]
+        }
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+        self.assertIsNone(candidate)
+
+    def test_build_cycle_candidate_ignores_non_shorts_share(self) -> None:
+        """issue #144 (Sol review指摘): video/analytics cornerの共有率1%超だけでは
+        shorts専用施策の候補を作らない。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "video", decision, [], set()
+        )
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "format_traits": ["tier:short"],
+                    "share_30d": {"views": 100, "shares": 8},
+                }
+            ]
+        }
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+        self.assertIsNone(candidate)
+
     def test_build_cycle_candidate_without_snapshot_keeps_legacy_behavior(self) -> None:
         """issue #164: snapshot未指定の呼び出しは従来どおりsection内容のみで
         判定する（非gapの通常ケースでNoneを維持）。"""
@@ -1045,6 +1149,219 @@ class RunAllTest(unittest.TestCase):
         statuses = {row["channel"]: row["status"] for row in summary["channels"]}
         self.assertEqual(statuses["broken"], "error")
         self.assertEqual(statuses["alpha"], "skipped")  # performance_feedback未設定
+
+
+class ShareRateTest(unittest.TestCase):
+    """issue #144: 共有率（shares/views）と1%超動画の構造表示。"""
+
+    def test_share_text_lists_rate_and_over_one_percent_structure(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "s1",
+                    "corner": "shorts",
+                    "format_traits": ["tier:short", "duration:under_60s", "scenes:1_to_4"],
+                    "share_30d": {"views": 500, "shares": 8},
+                },
+                {
+                    "video_id": "s2",
+                    "corner": "shorts",
+                    "format_traits": ["tier:short"],
+                    "share_30d": {"views": 1000, "shares": 3},
+                },
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("共有率 1.600%（共有 8 / 再生 500）", text)
+        self.assertIn("共有率1%超の動画の構造", text)
+        self.assertIn("`s1`", text)
+        self.assertIn("構造: tier:short, duration:under_60s, scenes:1_to_4", text)
+        # 1%以下の動画は件数要約に留める。
+        self.assertIn("他 1 本は共有率1%以下", text)
+        self.assertIn("再生数だけの評価を避けるための補助指標", text)
+
+    def test_share_text_prefers_trait_videos_in_limit(self) -> None:
+        """issue #144 (Sol review指摘): 表示上限内では構造付き（format_traits
+        あり）動画を最優先し、候補化の根拠となった動画を必ず本文へ出す。"""
+        videos = []
+        for index in range(21):
+            videos.append(
+                {
+                    "video_id": f"no-trait-{index}",
+                    "corner": "shorts",
+                    "share_30d": {"views": 100, "shares": 5},
+                }
+            )
+        # 末尾に構造付き1本（候補化の根拠）。
+        videos.append(
+            {
+                "video_id": "with-trait",
+                "corner": "shorts",
+                "format_traits": ["tier:short", "scenes:1_to_4"],
+                "share_30d": {"views": 100, "shares": 5},
+            }
+        )
+        text = performance_report._share_text({"videos": videos}, "shorts")
+        self.assertIn("`with-trait`", text)
+        self.assertIn("構造: tier:short, scenes:1_to_4", text)
+
+    def test_share_text_summarizes_no_trait_videos(self) -> None:
+        """issue #144 (Sol review指摘): 構造未記録の1%超動画だけの場合は
+        個別ID・構造見出しを出さず、件数要約に留める。"""
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "no-trait",
+                    "corner": "shorts",
+                    "share_30d": {"views": 100, "shares": 5},
+                }
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("構造未記録の共有率1%超: 1 本", text)
+        self.assertNotIn("`no-trait`", text)
+        self.assertNotIn("共有率1%超の動画の構造", text)
+
+    def test_share_text_shows_up_to_five_below_one_percent(self) -> None:
+        """issue #144 (Sol review指摘): 1%超の動画が無い場合、1%以下の動画を
+        最大5本まで参考表示する（1本なら個別表示、6本なら5本＋要約）。"""
+        one = {
+            "videos": [
+                {
+                    "video_id": "low-1",
+                    "corner": "shorts",
+                    "share_30d": {"views": 1000, "shares": 3},
+                }
+            ]
+        }
+        text_one = performance_report._share_text(one, "shorts")
+        self.assertIn("`low-1`", text_one)
+        self.assertIn("共有率 0.300%", text_one)
+
+        six_videos = {
+            "videos": [
+                {
+                    "video_id": f"low-{index}",
+                    "corner": "shorts",
+                    "share_30d": {"views": 1000, "shares": 3},
+                }
+                for index in range(6)
+            ]
+        }
+        text_six = performance_report._share_text(six_videos, "shorts")
+        for index in range(5):
+            self.assertIn(f"`low-{index}`", text_six)
+        self.assertNotIn("`low-5`", text_six)
+        self.assertIn("他 1 本は共有率1%以下", text_six)
+
+    def test_share_text_does_not_list_below_when_no_trait_over_exists(self) -> None:
+        """issue #144 (Sol review指摘): 構造未記録の1%超動画が存在する場合は
+        1%以下動画の参考表示を出さず、件数要約に留める。"""
+        videos = [
+            {
+                "video_id": "no-trait-over",
+                "corner": "shorts",
+                "share_30d": {"views": 100, "shares": 5},
+            }
+        ]
+        videos.extend(
+            {
+                "video_id": f"low-{index}",
+                "corner": "shorts",
+                "share_30d": {"views": 1000, "shares": 3},
+            }
+            for index in range(6)
+        )
+        text = performance_report._share_text({"videos": videos}, "shorts")
+        self.assertIn("構造未記録の共有率1%超: 1 本", text)
+        self.assertNotIn("`low-0`", text)
+        self.assertIn("他 6 本は共有率1%以下", text)
+
+    def test_share_text_is_fail_closed_when_missing(self) -> None:
+        snapshot = {
+            "videos": [
+                {"video_id": "v1", "corner": "shorts"}
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("算出できませんでした", text)
+        self.assertIn("推測で補いません", text)
+
+    def test_share_text_skips_zero_views(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "shorts",
+                    "share_30d": {"views": 0, "shares": 5},
+                }
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("算出できませんでした", text)
+
+    def test_share_text_without_snapshot_is_fail_closed(self) -> None:
+        text = performance_report._share_text(None, "shorts")
+        self.assertIn("snapshot未取得", text)
+
+    def test_share_text_ignores_non_shorts_corner(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "share_30d": {"views": 100, "shares": 2},
+                }
+            ]
+        }
+        # video cornerの共有率は対象外（shortsのみ）。
+        text = performance_report._share_text(snapshot, "video")
+        self.assertIn("shorts のみ対象", text)
+
+    def test_share_metrics_rejects_invalid_values(self) -> None:
+        self.assertIsNone(performance_report._share_metrics({}))
+        self.assertIsNone(
+            performance_report._share_metrics(
+                {"share_30d": {"views": 100, "shares": None}}
+            )
+        )
+        self.assertIsNone(
+            performance_report._share_metrics(
+                {"share_30d": {"views": "unknown", "shares": 1}}
+            )
+        )
+        self.assertIsNone(
+            performance_report._share_metrics(
+                {"share_30d": {"views": 100, "shares": -1}}
+            )
+        )
+        self.assertIsNone(
+            performance_report._share_metrics(
+                {"share_30d": {"views": True, "shares": 1}}
+            )
+        )
+        self.assertIsNone(
+            performance_report._share_metrics(
+                {"share_30d": {"views": 100.9, "shares": 2.9}}
+            )
+        )
+        self.assertEqual(
+            performance_report._share_metrics(
+                {"share_30d": {"views": 100, "shares": 2}}
+            ),
+            (2, 100),
+        )
+
+    def test_share_one_percent_boundary(self) -> None:
+        # 1%ちょうど（shares*100 == views）は超えない。
+        exactly = {"share_30d": {"views": 200, "shares": 2}}
+        self.assertFalse(performance_report._is_share_over_one_percent(exactly))
+        # 直上（shares*100 > views）は超える。
+        just_over = {"share_30d": {"views": 200, "shares": 3}}
+        self.assertTrue(performance_report._is_share_over_one_percent(just_over))
+        # 直下（shares*100 < views）は超えない。
+        just_under = {"share_30d": {"views": 200, "shares": 1}}
+        self.assertFalse(performance_report._is_share_over_one_percent(just_under))
 
 
 class RetentionCurveAnalysisTest(unittest.TestCase):

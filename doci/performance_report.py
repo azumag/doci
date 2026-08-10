@@ -647,6 +647,138 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
     return "\n".join(lines)
 
 
+_SHARE_DISPLAY_LIMIT = 20
+
+
+def _share_metrics(row: dict) -> tuple[int, int] | None:
+    """共有率計算用に shares/views を厳格に正規化する（issue #144）。
+
+    `share_30d`（過去30日集計）から取り、欠落・不正・負数・views<=0 は
+    None を返す（共有率を算出しない。fail-closed）。表示と候補判定の両方で
+    この関数を使うことで、欠損時の挙動を一致させる。
+    """
+    share_30d = row.get("share_30d")
+    if not isinstance(share_30d, dict):
+        return None
+    shares = share_30d.get("shares")
+    views = share_30d.get("views")
+    if shares is None or views is None:
+        return None
+    if isinstance(shares, bool) or isinstance(views, bool):
+        return None
+    try:
+        shares_float = float(shares)
+        views_float = float(views)
+    except (TypeError, ValueError):
+        return None
+    # 小数は整数値であることを確認（100.9 を100へ切り捨てない）。
+    if not shares_float.is_integer() or not views_float.is_integer():
+        return None
+    shares_int = int(shares_float)
+    views_int = int(views_float)
+    if shares_int < 0 or views_int <= 0:
+        return None
+    return shares_int, views_int
+
+
+def _share_text(snapshot: dict | None, corner: str) -> str:
+    """共有率（shares/views）と1%超動画の構造を表示する（issue #144）。
+
+    issue #144 の対象は shorts のみ。`share_30d`（過去30日集計）を使って
+    共有率を算出し、1%超の動画の構造（format_traits）を優先表示する。
+    構造付きの1%超動画が1本もない場合は、1%以下の動画を最大5本まで参考表示する
+    （構造未記録の1%超動画がある場合は件数要約のみ）。表示上限
+    （`_SHARE_DISPLAY_LIMIT`）を超えない。再生数偏重の評価を避けるための補助指標。
+    """
+    if corner != "shorts":
+        return "- 共有率: この節は shorts のみ対象です"
+    if not isinstance(snapshot, dict):
+        return "- 共有率: snapshot未取得のため評価しません"
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not corner_videos:
+        return "- 共有率: このcornerの動画がsnapshotにありません"
+    missing_count = 0
+    below_or_missing: list[str] = []
+    scored: list[tuple[float, str]] = []
+    no_trait_over_one_percent = 0
+    for row in corner_videos:
+        video_id = str(row.get("video_id") or "")
+        metrics = _share_metrics(row)
+        if metrics is None:
+            missing_count += 1
+            continue
+        shares_int, views_int = metrics
+        rate = shares_int * 100.0 / views_int
+        line = f"- `{video_id}`: 共有率 {rate:.3f}%（共有 {shares_int} / 再生 {views_int}）"
+        if shares_int * 100 > views_int:
+            traits = row.get("format_traits") or []
+            if traits:
+                trait_text = ", ".join(str(t) for t in traits)
+                scored.append(
+                    (
+                        -rate,
+                        f"{line} / 構造: {trait_text}",
+                    )
+                )
+            else:
+                no_trait_over_one_percent += 1
+        else:
+            below_or_missing.append(line)
+    lines: list[str] = []
+    shown = 0
+    # 構造付き（format_traitsあり）を共有率降順で並べる。構造未記録の
+    # 1%超動画は個別表示せず件数要約（Sol review指摘）。
+    for _neg_rate, line in sorted(scored, key=lambda item: item[0]):
+        if shown >= _SHARE_DISPLAY_LIMIT:
+            lines.append(
+                f"- 他にも共有率1%超の動画があります（先頭{_SHARE_DISPLAY_LIMIT}件のみ表示）"
+            )
+            break
+        lines.append(line)
+        shown += 1
+    if no_trait_over_one_percent:
+        lines.append(
+            f"- 構造未記録の共有率1%超: {no_trait_over_one_percent} 本"
+        )
+    if not scored and not no_trait_over_one_percent and below_or_missing:
+        for line in below_or_missing[:5]:
+            lines.append(line)
+        remaining = len(below_or_missing) - 5
+        if remaining > 0:
+            lines.append(f"- 他 {remaining} 本は共有率1%以下")
+    elif below_or_missing:
+        lines.append(f"- 他 {len(below_or_missing)} 本は共有率1%以下（一覧省略）")
+    if missing_count:
+        lines.append(
+            f"- {missing_count} 本は共有率を算出できませんでした"
+            "（30日データが無いか不正。推測で補いません）"
+        )
+    if scored:
+        lines.insert(0, "共有率1%超の動画の構造（次の企画の材料）:")
+    lines.append(
+        "- 共有率は視聴者の能動的な評価の一つの手がかりであり、"
+        "再生数だけの評価を避けるための補助指標です。"
+    )
+    return "\n".join(lines)
+
+
+def _is_share_over_one_percent(row: dict) -> bool:
+    """共有率（shares/views）が1%を超えるかを判定する（issue #144）。
+
+    共有率は視聴者の能動的な評価の一つの手がかり。`share_30d` の欠落・不正・
+    views<=0 は False（共有率を算出しない）。1%ちょうどは超えない
+    （整数比較 `shares*100 > views`）。"""
+    metrics = _share_metrics(row)
+    if metrics is None:
+        return False
+    shares_int, views_int = metrics
+    return shares_int * 100 > views_int
+
+
 def _script_for_video(row: dict) -> dict:
     """snapshotの動画行からscript.jsonを読み込む（無ければ空dict）。"""
     workdir = row.get("workdir")
@@ -702,6 +834,13 @@ def _cycle_body(
             "",
             _retention_curve_text(snapshot, section["corner"]),
         ]
+        if section["corner"] == "shorts":
+            lines += [
+                "",
+                "### 共有率と共有される動画の構造（issue #144）",
+                "",
+                _share_text(snapshot, section["corner"]),
+            ]
     lines += [
         "",
         "## ガードレール",
@@ -733,6 +872,7 @@ def build_cycle_candidate(
     # （Claude review指摘）。
     has_gap_discovery = False
     has_retention_content = False
+    has_share_content = False
     if isinstance(snapshot, dict):
         section_corners = {section["corner"] for section in sections}
         has_gap_discovery = any(
@@ -762,7 +902,22 @@ def build_cycle_candidate(
                 if performance.retention_moments(curve):
                     has_retention_content = True
                     break
-    has_content = has_section_content or has_gap_discovery or has_retention_content
+        # issue #144: 共有率1%超の動画がmatching cornerにあれば報告候補とする。
+        # 対象はshorts cornerのみ。1%超でも構造（format_traits）が未記録なら
+        # 次の企画の材料にならないため候補にしない（Sol review指摘）。
+        has_share_content = any(
+            str(row.get("corner") or "") == "shorts"
+            and str(row.get("corner") or "") in section_corners
+            and _is_share_over_one_percent(row)
+            and bool(row.get("format_traits"))
+            for row in snapshot.get("videos", [])
+        )
+    has_content = (
+        has_section_content
+        or has_gap_discovery
+        or has_retention_content
+        or has_share_content
+    )
     if not has_content:
         return None
     fp = fingerprint(spec.id, sections)

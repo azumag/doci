@@ -273,6 +273,131 @@ class YouTubeSearchTest(unittest.TestCase):
             )
         self.assertEqual(results[0]["engaged_views"], 0)
 
+    def test_video_share_metrics_queries_only_views_and_shares(self) -> None:
+        """issue #144: 共有率用に views/shares だけを取得し、shares欠落は
+        None（0にしない）。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "views"},
+                {"name": "shares"},
+            ],
+            "rows": [["abc123", 500, 8]],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_share_metrics(
+                ["abc123"],
+                start_date="2026-06-25",
+                end_date="2026-07-24",
+            )
+        self.assertEqual(results[0]["video_id"], "abc123")
+        self.assertEqual(results[0]["views"], 500)
+        self.assertEqual(results[0]["shares"], 8)
+        self.assertEqual(
+            reports.query.call_args.kwargs["metrics"], "views,shares"
+        )
+        self.assertEqual(
+            reports.query.call_args.kwargs["startDate"], "2026-06-25"
+        )
+        self.assertEqual(
+            reports.query.call_args.kwargs["endDate"], "2026-07-24"
+        )
+
+    def test_video_share_metrics_keeps_missing_shares_as_none(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [{"name": "video"}, {"name": "views"}],
+            "rows": [["abc123", 500]],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_share_metrics(
+                ["abc123"],
+                start_date="2026-06-25",
+                end_date="2026-07-24",
+            )
+        self.assertIsNone(results[0]["shares"])
+
+    def test_video_share_metrics_batches_beyond_200_ids(self) -> None:
+        """issue #144 (Sol review指摘): 201件では2リクエストへ分割され、
+        両方の結果が結合される。第2バッチの対象IDも実IDであることを検証する。"""
+        ids = [f"id-{index:03d}" for index in range(201)]
+        reports = mock.Mock()
+
+        def _query(**kwargs):
+            filters = str(kwargs["filters"])
+            requested = [
+                part
+                for part in filters.replace("video==", "").split(",")
+                if part
+            ]
+            rows = [
+                [video_id, 100, 1]
+                for video_id in requested
+            ]
+            return mock.Mock(
+                execute=lambda: {
+                    "columnHeaders": [
+                        {"name": "video"},
+                        {"name": "views"},
+                        {"name": "shares"},
+                    ],
+                    "rows": rows,
+                }
+            )
+
+        reports.query.side_effect = _query
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_share_metrics(
+                ids,
+                start_date="2026-06-25",
+                end_date="2026-07-24",
+            )
+        self.assertEqual(len(results), 201)
+        self.assertEqual(reports.query.call_count, 2)
+        # 第2バッチの照会対象は末尾の id-200 だけ。
+        self.assertEqual(
+            reports.query.call_args_list[1].kwargs["filters"],
+            "video==id-200",
+        )
+        # 結果ID集合は入力と一致する。
+        self.assertEqual(
+            {row["video_id"] for row in results},
+            set(ids),
+        )
+
+    def test_video_share_metrics_empty_input_returns_without_api(self) -> None:
+        """issue #144 (Sol review指摘): 空IDでは認証・API buildを行わない。"""
+        with (
+            mock.patch.object(
+                youtube, "_load_credentials", side_effect=AssertionError
+            ),
+            mock.patch(
+                "googleapiclient.discovery.build", side_effect=AssertionError
+            ),
+        ):
+            results = youtube.video_share_metrics(
+                [],
+                start_date="2026-06-25",
+                end_date="2026-07-24",
+            )
+        self.assertEqual(results, [])
+
     def test_video_traffic_sources_maps_source_type_views(self) -> None:
         """issue #164: トラフィックソース種別ごとのviewsをvideo_idで返す。"""
         reports = mock.Mock()

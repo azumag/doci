@@ -346,6 +346,10 @@ def video_analytics(
     # （Shorts corner限定の指標であり、他cornerと同列に扱うと長尺動画の
     # 乖離ゼロを誤ってシグナルとして拾いかねないため、消費する場合は
     # corner別の扱いを別途設計する）。
+    # shares(issue #144)は共有率専用の video_share_metrics で取得する。
+    # この90日クエリへ shares を混ぜると、shares の提供が他メトリクスより
+    # 遅れた場合にレポート全体の利用可能最終日が古くなるため混ぜない
+    # （Sol review指摘）。
     metrics = (
         "views,engagedViews,estimatedMinutesWatched,averageViewDuration,"
         "averageViewPercentage,likes,comments"
@@ -385,6 +389,66 @@ def video_analytics(
                     ),
                     "likes": int(row.get("likes", 0) or 0),
                     "comments": int(row.get("comments", 0) or 0),
+                }
+            )
+    return results
+
+
+def video_share_metrics(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> list[dict]:
+    """共有率用に views/shares だけを読み取る（issue #144）。
+
+    30日集計の共有率はshorts専用のため、全corner・全メトリクスを再取得せず、
+    対象動画に絞って `views,shares` のみを取得する。APIは要求した全メトリクスが
+    揃う日までしか返さないため、無関係なメトリクスを含めると期間が短くなるのを
+    避ける。欠落列は0でなくNoneで保持する（fail-closed）。
+    """
+    from googleapiclient.discovery import build
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return []
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    results: list[dict] = []
+    for offset in range(0, len(ids), 200):
+        data = (
+            service.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics="views,shares",
+                dimensions="video",
+                filters=f"video=={','.join(ids[offset : offset + 200])}",
+                sort="-views",
+                maxResults=200,
+            )
+            .execute()
+        )
+        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        for values in data.get("rows", []):
+            row = dict(zip(headers, values))
+            results.append(
+                {
+                    "video_id": str(row.get("video", "")),
+                    "views": int(row.get("views", 0) or 0),
+                    "shares": (
+                        int(row["shares"])
+                        if row.get("shares") is not None
+                        else None
+                    ),
                 }
             )
     return results

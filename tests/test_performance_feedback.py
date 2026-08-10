@@ -1013,6 +1013,333 @@ class PerformanceFeedbackTest(unittest.TestCase):
         )
         self.assertNotIn("retention", " ".join(traits))
 
+    def test_sync_records_share_30d_separately(self) -> None:
+        """issue #144 (Sol review指摘): 共有率は90日集計とは別に、過去30日
+        集計を `share_30d` として保存する。30暦日（開始-終了が29日差）を
+        太平洋時間基準で計算し、shorts動画だけを専用APIで取得する。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-06-28T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_90d = [
+            {
+                "video_id": "id-0",
+                "views": 5000,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_analytics",
+                return_value=analytics_90d,
+            ) as analytics_mock,
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                return_value=[
+                    {"video_id": "id-0", "views": 500, "shares": 8}
+                ],
+            ) as share_metrics_mock,
+            patch.object(performance.youtube, "video_traffic_sources", return_value={}),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=({}, {}),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(snapshot["share_30d"]["available"])
+        self.assertEqual(
+            snapshot["share_30d"]["start_date"], "2026-06-25"
+        )
+        self.assertEqual(
+            snapshot["share_30d"]["end_date"], "2026-07-24"
+        )
+        start = datetime.fromisoformat(
+            snapshot["share_30d"]["start_date"]
+        ).date()
+        end = datetime.fromisoformat(
+            snapshot["share_30d"]["end_date"]
+        ).date()
+        self.assertEqual((end - start).days, 29)
+        self.assertEqual(
+            snapshot["videos"][0]["share_30d"],
+            {"shares": 8, "views": 500},
+        )
+        # 90日集計のanalyticsにはsharesを混ぜない（共有率はshare_30dのみ）。
+        self.assertNotIn("shares", snapshot["videos"][0]["analytics"])
+        # video_analytics は90日分の1回だけ（共有率は専用関数）。
+        analytics_mock.assert_called_once()
+        # 専用関数はshorts IDだけ・views,sharesのみで呼ばれる。
+        self.assertEqual(share_metrics_mock.call_args.args[0], ["id-0"])
+        self.assertEqual(
+            share_metrics_mock.call_args.kwargs["start_date"], "2026-06-25"
+        )
+        self.assertEqual(
+            share_metrics_mock.call_args.kwargs["end_date"], "2026-07-24"
+        )
+
+    def test_sync_share_30d_excludes_non_shorts_videos(self) -> None:
+        """issue #144 (Sol review指摘): 共有率の30日集計はshorts動画だけを
+        照会し、video/analytics動画を渡さない。"""
+        self._history(count=2)  # index 0=shorts, index 1=video
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(2)
+        ]
+        analytics_90d = [
+            {
+                "video_id": f"id-{index}",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+                "shares": 1,
+            }
+            for index in range(2)
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_90d),
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                return_value=[],
+            ) as share_metrics_mock,
+            patch.object(performance.youtube, "video_traffic_sources", return_value={}),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=({}, {}),
+            ),
+        ):
+            performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+        # shorts（id-0）だけが照会対象。
+        self.assertEqual(share_metrics_mock.call_args.args[0], ["id-0"])
+
+    def test_sync_share_metrics_failure_keeps_other_data(self) -> None:
+        """issue #144 (Sol review指摘): `video_share_metrics` だけが例外を
+        出しても90日analytics・traffic・search・retentionは保持され、
+        `share_30d.available=False` とreasonが保存される。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_90d = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        retention_rows = [
+            {
+                "elapsed_ratio": 0.0,
+                "watch_ratio": 0.90,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_90d),
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                side_effect=RuntimeError("share metrics broken"),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=(
+                    {"id-0": [{"term": "ショート 企画", "views": 30}]},
+                    {},
+                ),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=(
+                    {"id-0": retention_rows},
+                    {},
+                ),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(snapshot["share_30d"]["available"])
+        self.assertIn("共有率(30日)readback失敗", snapshot["share_30d"]["reason"])
+        # 90日analyticsは保持される。
+        self.assertEqual(snapshot["videos"][0]["analytics"]["views"], 100)
+        self.assertNotIn("share_30d", snapshot["videos"][0])
+        # traffic/search/retentionも保持される。
+        self.assertTrue(snapshot["traffic_sources"]["available"])
+        self.assertTrue(snapshot["search_terms"]["available"])
+        self.assertTrue(snapshot["retention_curve"]["available"])
+        video = snapshot["videos"][0]
+        self.assertEqual(
+            video["analytics"]["traffic_sources"], {"YT_SEARCH": 40}
+        )
+        # 検索語句はgap_query付き動画だけ照会されるため、この動画では空。
+        self.assertEqual(video["analytics"]["search_terms"], [])
+        self.assertEqual(video["analytics"]["retention_curve"], retention_rows)
+
+    def test_sync_share_metrics_runs_even_when_90d_analytics_fails(self) -> None:
+        """issue #144 (Sol review指摘): 90日Analyticsが失敗しても共有率
+        専用クエリは独立に実行され、`share_30d` が保存される。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_analytics",
+                side_effect=RuntimeError("90d analytics broken"),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                return_value=[
+                    {"video_id": "id-0", "views": 500, "shares": 8}
+                ],
+            ) as share_metrics_mock,
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(snapshot["analytics"]["available"])
+        share_metrics_mock.assert_called_once()
+        self.assertTrue(snapshot["share_30d"]["available"])
+        self.assertEqual(
+            snapshot["videos"][0]["share_30d"],
+            {"shares": 8, "views": 500},
+        )
+
+    def test_sync_failure_reasons_do_not_claim_other_status_saved(self) -> None:
+        """issue #144 (Sol review指摘): 各statusの理由文は自身の取得結果だけを
+        説明し、他方の保存状態（90日指標のみ・Data APIのみ等）を断定しない。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_analytics",
+                side_effect=RuntimeError("90d broken"),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                side_effect=RuntimeError("share broken"),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+        analytics_reason = snapshot["analytics"]["reason"]
+        share_reason = snapshot["share_30d"]["reason"]
+        # 90日失敗の理由は90日自身の失敗を説明し、共有率保存を断定しない。
+        self.assertIn("90日Analytics readback失敗", analytics_reason)
+        self.assertNotIn("共有率", analytics_reason)
+        # 共有率失敗の理由は共有率自身の失敗を説明し、90日指標の保存を断定しない。
+        self.assertIn("共有率(30日)readback失敗", share_reason)
+        self.assertNotIn("90日指標のみ保存", share_reason)
+
     def test_analytics_relative_signal_creates_traceable_guarded_guidance(self) -> None:
         videos = []
         for index in range(8):
