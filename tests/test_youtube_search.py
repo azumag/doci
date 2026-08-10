@@ -573,7 +573,7 @@ class YouTubeSearchTest(unittest.TestCase):
 
     def test_video_retention_curves_issues_one_query_per_video(self) -> None:
         """issue #149: 複数IDではID数分の単一動画クエリになり、filterに
-        カンマが入らない。1動画のHTTP 400は他動画の成功を妨げない。"""
+        カンマが入らない。動画固有reasonのHTTP 400は他動画の成功を妨げない。"""
         reports = mock.Mock()
         http_error = _google_http_error(400, "privacy")
         ok_page = {
@@ -602,6 +602,36 @@ class YouTubeSearchTest(unittest.TestCase):
         for call in reports.query.call_args_list:
             self.assertNotIn(",", call.kwargs["filters"])
             self.assertEqual(call.kwargs["dimensions"], "elapsedVideoTimeRatio")
+
+    def test_video_retention_curves_invalid_filters_is_global_error(self) -> None:
+        """issue #149 (Sol review指摘): invalidFilters等のリクエスト構造不備
+        （HTTP 400）は動画固有とせず、全体障害として1件目で即時raiseする。"""
+        reports = mock.Mock()
+        http_error = _google_http_error(400, "invalidFilters")
+        reports.query.return_value.execute.side_effect = http_error
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaises(HttpError):
+                youtube.video_retention_curves(
+                    ["a", "b"],
+                    start_date="2026-07-01",
+                    end_date="2026-07-26",
+                )
+        self.assertEqual(reports.query.call_count, 1)
+
+    def test_video_retention_curves_empty_input_returns_tuple(self) -> None:
+        """issue #149: 空入力でも通常時と同じタプルを返す。"""
+        curves, failed = youtube.video_retention_curves(
+            [],
+            start_date="2026-07-01",
+            end_date="2026-07-26",
+        )
+        self.assertEqual(curves, {})
+        self.assertEqual(failed, {})
 
     def test_video_retention_curves_drops_out_of_range_and_empty_rows(self) -> None:
         """issue #149: 経過比率が0〜1の範囲外・欠落行は除外する（fail-closed）。"""

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import statistics
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -179,6 +180,7 @@ def retention_moments(
     spike、低い点を dip とする。端点やデータが少なすぎる場合は検出しない
     （山=成功・谷=失敗と断定しないために、形状だけから結論を出さない）。
     `audienceWatchRatio` は比率（0.9=90%）であり、閾値も比率で指定する。
+    ちょうど閾値（0.08）も検出する（浮動小数誤差を考慮して `>=` 相当で判定）。
     返り値は `{elapsed_ratio, watch_ratio, kind}` のリスト。
     """
     if not curve or len(curve) < 5:
@@ -190,7 +192,7 @@ def retention_moments(
         nxt = curve[index + 1]["watch_ratio"]
         if abs(prev - curr) < min_delta and abs(nxt - curr) < min_delta:
             continue
-        if curr > prev + threshold and curr > nxt + threshold:
+        if curr >= prev + threshold and curr >= nxt + threshold:
             moments.append(
                 {
                     "elapsed_ratio": curve[index]["elapsed_ratio"],
@@ -198,7 +200,7 @@ def retention_moments(
                     "kind": "spike",
                 }
             )
-        elif curr < prev - threshold and curr < nxt - threshold:
+        elif curr <= prev - threshold and curr <= nxt - threshold:
             moments.append(
                 {
                     "elapsed_ratio": curve[index]["elapsed_ratio"],
@@ -254,31 +256,33 @@ def retention_moment_scenes(
 
 
 def _iso8601_duration_seconds(duration_iso: str | None) -> float | None:
-    """ISO 8601動画長（PT1M30S 等）を秒へ変換する。変換不能は None。"""
+    """ISO 8601動画長（PT1M30S 等）を秒へ変換する。
+
+    Data APIが取り得る `PTnHnMnS` / `PTnMnS` / `PTnS` / `PTnM` のみ受け付ける。
+    末尾単位欠落・単位順序不正・重複単位・日数付きは None（fail-closed）。
+    """
     if not duration_iso:
         return None
     text = str(duration_iso).strip()
     if not text.startswith("PT"):
         return None
+    match = re.fullmatch(
+        r"PT(?:(?P<h>\d+(?:\.\d+)?)H)?(?:(?P<m>\d+(?:\.\d+)?)M)?"
+        r"(?:(?P<s>\d+(?:\.\d+)?)S)?",
+        text,
+    )
+    if match is None:
+        return None
+    parts = match.groupdict()
+    if not any(parts.values()):
+        return None
     total = 0.0
-    number = ""
-    for char in text[2:]:
-        if char.isdigit() or char == ".":
-            number += char
-        elif char in ("H", "M", "S"):
-            try:
-                value = float(number or "0")
-            except ValueError:
-                return None
-            if char == "H":
-                total += value * 3600
-            elif char == "M":
-                total += value * 60
-            else:
-                total += value
-            number = ""
-        else:
-            return None
+    if parts["h"]:
+        total += float(parts["h"]) * 3600
+    if parts["m"]:
+        total += float(parts["m"]) * 60
+    if parts["s"]:
+        total += float(parts["s"])
     return total if total > 0 else None
 
 
@@ -384,9 +388,18 @@ def sync(
             try:
                 # issue #149: 維持率カーブはShorts等でAPIが返さない場合が
                 # あるため、取得できる範囲だけ保存する（fail-closed）。
+                # 照会対象は、対象期間にAnalytics実績がある動画（analytics_rows）
+                # かつ Data API が現存する動画（details）へ絞る。古い無実績
+                # 動画を毎回照会してAPI呼び出し数を無制限に増やさない
+                # （Sol review指摘8）。
                 sync_ids = {str(detail.get("video_id") or "") for detail in details}
+                analytics_ids = {
+                    str(row.get("video_id") or "") for row in analytics_rows
+                }
                 retention_ids = [
-                    video_id for video_id in video_ids if video_id in sync_ids
+                    video_id
+                    for video_id in video_ids
+                    if video_id in sync_ids and video_id in analytics_ids
                 ]
                 if retention_ids:
                     retention_by_id, retention_failures = youtube.video_retention_curves(

@@ -569,6 +569,7 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
         return "- 維持率カーブ: このcornerの動画がsnapshotにありません"
     failed = retention_status.get("failed_video_ids") or []
     lines: list[str] = []
+    reported_moments = 0
     for row in corner_videos:
         video_id = str(row.get("video_id") or "")
         if video_id in failed:
@@ -603,6 +604,12 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
             continue
         lines.append(f"- `{video_id}`: 維持率カーブの山/谷")
         for moment in annotated:
+            if reported_moments >= 10:
+                lines.append(
+                    "  - 他にも山/谷がありますが、レポートは先頭10件まで表示します"
+                )
+                break
+            reported_moments += 1
             kind = "山（spike）" if moment["kind"] == "spike" else "谷（dip）"
             second = moment.get("elapsed_seconds")
             scene = moment.get("scene_caption")
