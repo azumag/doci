@@ -465,6 +465,20 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
         )
     discovery_lines: list[str] = []
     satisfaction_lines: list[str] = []
+
+    def format_terms(terms: list[dict]) -> str:
+        if not terms:
+            return ""
+        top_terms = ", ".join(
+            f"「{t.get('term')}」({int(t.get('views', 0) or 0)}回)"
+            for t in sorted(
+                terms,
+                key=lambda item: int(item.get("views", 0) or 0),
+                reverse=True,
+            )[:3]
+        )
+        return f"  - 検索語句: {top_terms}"
+
     for row, gap_query in gap_videos:
         video_id = str(row.get("video_id") or "")
         analytics = row.get("analytics")
@@ -475,9 +489,9 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
         terms = terms if isinstance(terms, list) else []
         total_views = int(analytics.get("views", 0) or 0)
         search_views = int(traffic.get("YT_SEARCH", 0) or 0)
-        if total_views > 0 and search_views > 0:
-            share = search_views * 100.0 / total_views
-            gap_status = _gap_match_status(gap_query, terms)
+        gap_line = ""
+        gap_status = _gap_match_status(gap_query, terms)
+        if gap_query:
             gap_line = {
                 "matched": f"（狙った検索語「{gap_query}」と完全一致）",
                 "not_confirmed": (
@@ -486,20 +500,26 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
                 ),
                 "not_evaluated": "（gap_queryとの一致判定は材料不足で保留）",
             }[gap_status]
+        if total_views > 0 and search_views > 0:
+            share = search_views * 100.0 / total_views
             discovery_lines.append(
                 f"- `{video_id}`: YouTube検索からの視聴 {search_views} 回"
                 f"（全体の {share:.1f}%）{gap_line}"
             )
-            if terms:
-                top_terms = ", ".join(
-                    f"「{t.get('term')}」({int(t.get('views', 0) or 0)}回)"
-                    for t in sorted(
-                        terms,
-                        key=lambda item: int(item.get("views", 0) or 0),
-                        reverse=True,
-                    )[:3]
-                )
-                discovery_lines.append(f"  - 検索語句: {top_terms}")
+            term_line = format_terms(terms)
+            if term_line:
+                discovery_lines.append(term_line)
+        elif terms:
+            # traffic sourceのバッチ取得が失敗しても、検索語句（動画個別取得）
+            # が成功していれば実データを表示する。流入回数は不明として
+            # 0や「なし」と断定しない（Claude review指摘）。
+            discovery_lines.append(
+                f"- `{video_id}`: YouTube検索からの流入回数は取得できませんでした"
+                f"（traffic source取得不可）。検索語句は取得済み{gap_line}"
+            )
+            term_line = format_terms(terms)
+            if term_line:
+                discovery_lines.append(term_line)
         else:
             discovery_lines.append(
                 f"- `{video_id}`: YouTube検索からの流入を取得できませんでした"

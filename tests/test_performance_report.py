@@ -758,6 +758,34 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIn("狙った検索語「ネタ切れ 解消」と完全一致", text)
         self.assertIn("取得できた上位語句に「猫 かわいい」の完全一致なし", text)
 
+    def test_discovery_text_shows_search_terms_when_traffic_unavailable(self) -> None:
+        """issue #164 (Claude review指摘): video_traffic_sources のバッチ取得が
+        失敗（traffic_sources が空）しても、video_search_terms が成功していれば
+        検索語句とgap一致判定を表示する。流入回数を0や「なし」と断定しない。"""
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "gap-a",
+                    "corner": "shorts",
+                    "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+                    "analytics": {
+                        "views": 100,
+                        "average_view_percentage": 60.0,
+                        "traffic_sources": {},
+                        "search_terms": [{"term": "ネタ切れ 解消", "views": 25}],
+                    },
+                }
+            ]
+        }
+
+        text = performance_report._discovery_satisfaction_text(snapshot, "shorts")
+
+        self.assertIn("流入回数は取得できませんでした", text)
+        self.assertIn("検索語句は取得済み", text)
+        self.assertIn("「ネタ切れ 解消」(25回)", text)
+        self.assertIn("狙った検索語「ネタ切れ 解消」と完全一致", text)
+        self.assertNotIn("流入を取得できませんでした", text)
+
 
 class RunChannelTest(unittest.TestCase):
     def setUp(self) -> None:
