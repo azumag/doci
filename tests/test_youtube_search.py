@@ -528,6 +528,78 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(by_video, {})
         self.assertEqual(failed, {})
 
+    def test_video_retention_curves_maps_and_sorts_points(self) -> None:
+        """issue #149: 維持率カーブを elapsedVideoTimeRatio で取得し、
+        経過比率順にソートして返す。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "elapsedVideoTimeRatio"},
+                {"name": "audienceWatchRatio"},
+            ],
+            "rows": [
+                ["abc123", "0.9", 30.0],
+                ["abc123", "0.1", 95.0],
+                ["abc123", "0.5", 60.0],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            curves = youtube.video_retention_curves(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(
+            curves["abc123"],
+            [
+                {"elapsed_ratio": 0.1, "watch_ratio": 95.0},
+                {"elapsed_ratio": 0.5, "watch_ratio": 60.0},
+                {"elapsed_ratio": 0.9, "watch_ratio": 30.0},
+            ],
+        )
+        self.assertEqual(
+            reports.query.call_args.kwargs["dimensions"],
+            "video,elapsedVideoTimeRatio",
+        )
+        self.assertIn("audienceWatchRatio", reports.query.call_args.kwargs["metrics"])
+
+    def test_video_retention_curves_drops_out_of_range_and_empty_rows(self) -> None:
+        """issue #149: 経過比率が0〜1の範囲外・欠落行は除外する（fail-closed）。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "elapsedVideoTimeRatio"},
+                {"name": "audienceWatchRatio"},
+            ],
+            "rows": [
+                ["abc123", "1.5", 50.0],
+                ["abc123", "", 50.0],
+                ["", "0.2", 50.0],
+                ["abc123", "0.2", "bad"],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            curves = youtube.video_retention_curves(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(curves, {})
+
 
 if __name__ == "__main__":
     unittest.main()

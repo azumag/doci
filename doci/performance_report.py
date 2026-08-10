@@ -542,6 +542,89 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
     )
 
 
+def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
+    """維持率カーブの山/谷とシーン照合を表示する（issue #149）。
+
+    山=成功・谷=失敗と断定せず、「何秒付近・どのシーン」を事実として並べ、
+    理由の確認は運用者が動画内容と照合して行う、と明記する。
+    """
+    if not isinstance(snapshot, dict):
+        return "- 維持率カーブ: snapshot未取得のため評価しません"
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not corner_videos:
+        return "- 維持率カーブ: このcornerの動画がsnapshotにありません"
+    lines: list[str] = []
+    for row in corner_videos:
+        video_id = str(row.get("video_id") or "")
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        curve = analytics.get("retention_curve")
+        curve = curve if isinstance(curve, list) else []
+        if not curve:
+            lines.append(
+                f"- `{video_id}`: 維持率カーブを取得できませんでした"
+                "（Shorts等ではAPIが返さない場合があります。推測で補いません）"
+            )
+            continue
+        moments = performance.retention_moments(curve)
+        script = _script_for_video(row)
+        total_seconds = float(
+            analytics.get("average_view_duration") or 0
+        )
+        annotated = performance.retention_moment_scenes(
+            moments, script, total_seconds
+        )
+        if not annotated:
+            lines.append(
+                f"- `{video_id}`: 維持率カーブに明瞭な山/谷を検出しませんでした"
+                "（形状だけで成功・失敗は断定しません）"
+            )
+            continue
+        lines.append(f"- `{video_id}`: 維持率カーブの山/谷")
+        for moment in annotated:
+            kind = "山（spike）" if moment["kind"] == "spike" else "谷（dip）"
+            second = moment.get("elapsed_seconds")
+            scene = moment.get("scene_caption")
+            if second is not None and scene:
+                lines.append(
+                    f"  - {kind}: 約{second}秒付近（シーン: {scene}）。"
+                    "該当箇所の内容と照合して理由を確認してください"
+                )
+            elif second is not None:
+                lines.append(
+                    f"  - {kind}: 約{second}秒付近。"
+                    "該当箇所の内容と照合して理由を確認してください"
+                )
+            else:
+                lines.append(
+                    f"  - {kind}: 位置不明。"
+                    "該当箇所の内容と照合して理由を確認してください"
+                )
+    lines.append(
+        "- 山/谷は再視聴・巻き戻し・スキップ・離脱のいずれかが起きた場所の手がかり"
+        "であり、それだけで成功・失敗を判定しません。"
+    )
+    return "\n".join(lines)
+
+
+def _script_for_video(row: dict) -> dict:
+    """snapshotの動画行からscript.jsonを読み込む（無ければ空dict）。"""
+    workdir = row.get("workdir")
+    if not workdir:
+        return {}
+    try:
+        data = json.loads(
+            (Path(str(workdir)) / "script.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _cycle_body(
     spec: ChannelSpec,
     sections: list[dict],
@@ -578,6 +661,10 @@ def _cycle_body(
             _evaluation_text(section.get("evaluations") or []),
             "",
             _discovery_satisfaction_text(snapshot, section["corner"]),
+            "",
+            "### 維持率カーブの山/谷とシーン照合（issue #149）",
+            "",
+            _retention_curve_text(snapshot, section["corner"]),
         ]
     lines += [
         "",

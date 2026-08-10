@@ -981,5 +981,117 @@ class RunAllTest(unittest.TestCase):
         self.assertEqual(statuses["alpha"], "skipped")  # performance_feedback未設定
 
 
+class RetentionCurveAnalysisTest(unittest.TestCase):
+    """issue #149: 維持率カーブの山/谷検出・シーン照合・レポート表示。"""
+
+    def test_retention_moments_detects_spike_and_dip(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 90.0},
+            {"elapsed_ratio": 0.2, "watch_ratio": 85.0},
+            {"elapsed_ratio": 0.4, "watch_ratio": 40.0},  # dip
+            {"elapsed_ratio": 0.6, "watch_ratio": 80.0},
+            {"elapsed_ratio": 0.8, "watch_ratio": 90.0},  # spike
+            {"elapsed_ratio": 1.0, "watch_ratio": 50.0},
+        ]
+        moments = performance.retention_moments(curve)
+        kinds = {m["kind"] for m in moments}
+        self.assertIn("dip", kinds)
+        self.assertIn("spike", kinds)
+
+    def test_retention_moments_ignores_flat_and_short_curves(self) -> None:
+        flat = [
+            {"elapsed_ratio": i / 10, "watch_ratio": 70.0} for i in range(11)
+        ]
+        self.assertEqual(performance.retention_moments(flat), [])
+        self.assertEqual(performance.retention_moments(flat[:4]), [])
+        self.assertEqual(performance.retention_moments([]), [])
+
+    def test_retention_moment_scenes_annotates_with_caption(self) -> None:
+        moments = [
+            {
+                "elapsed_ratio": 0.4,
+                "watch_ratio": 40.0,
+                "kind": "dip",
+            }
+        ]
+        script = {
+            "narration": "あ" * 20 + "い" * 30 + "う" * 50,
+            "scenes": [
+                {"caption": "導入"},
+                {"caption": "展開"},
+                {"caption": "結び"},
+            ],
+        }
+        annotated = performance.retention_moment_scenes(moments, script, 100.0)
+        self.assertEqual(annotated[0]["scene_index"], 1)
+        self.assertEqual(annotated[0]["scene_caption"], "展開")
+        self.assertAlmostEqual(annotated[0]["elapsed_seconds"], 40.0, delta=1.0)
+
+    def test_retention_moment_scenes_returns_moments_without_script(self) -> None:
+        moments = [
+            {"elapsed_ratio": 0.5, "watch_ratio": 50.0, "kind": "dip"}
+        ]
+        annotated = performance.retention_moment_scenes(moments, {}, 100.0)
+        self.assertEqual(annotated[0]["scene_index"], None)
+        self.assertEqual(annotated[0]["scene_caption"], "")
+
+    def test_retention_curve_text_reports_moments_without_judging(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "workdir": str(Path(self._workdir())),
+                    "analytics": {
+                        "average_view_duration": 100.0,
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 90.0},
+                            {"elapsed_ratio": 0.2, "watch_ratio": 85.0},
+                            {"elapsed_ratio": 0.4, "watch_ratio": 40.0},
+                            {"elapsed_ratio": 0.6, "watch_ratio": 70.0},
+                            {"elapsed_ratio": 0.8, "watch_ratio": 60.0},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 30.0},
+                        ],
+                    },
+                }
+            ]
+        }
+        text = performance_report._retention_curve_text(snapshot, "video")
+        self.assertIn("谷（dip）", text)
+        self.assertIn("成功・失敗を判定しません", text)
+        self.assertIn("該当箇所の内容と照合", text)
+
+    def test_retention_curve_text_fail_closed_when_no_curve(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "analytics": {"retention_curve": []},
+                }
+            ]
+        }
+        text = performance_report._retention_curve_text(snapshot, "video")
+        self.assertIn("取得できませんでした", text)
+        self.assertIn("推測で補いません", text)
+
+    def _workdir(self) -> str:
+        import tempfile
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "script.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "narration": "あ" * 20 + "い" * 30,
+                    "scenes": [{"caption": "導入"}, {"caption": "展開"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return tmp.name
+
+
 if __name__ == "__main__":
     unittest.main()

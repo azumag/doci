@@ -390,6 +390,71 @@ def video_analytics(
     return results
 
 
+def video_retention_curves(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict[str, list[dict]]:
+    """動画別の視聴者維持率カーブを読み取る（issue #149）。
+
+    `audienceWatchRatio`（各時点の視聴維持率%）を `elapsedVideoTimeRatio`
+    （経過時間比率 0〜1）ディメンションで取得する。Shorts等でAPIがデータを
+    返さない場合は空のまま（欠落を0や「なし」と断定しない fail-closed）。
+    """
+    from googleapiclient.discovery import build
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return {}
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    by_video: dict[str, list[dict]] = {}
+    for offset in range(0, len(ids), 200):
+        data = (
+            service.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics="audienceWatchRatio",
+                dimensions="video,elapsedVideoTimeRatio",
+                filters=f"video=={','.join(ids[offset : offset + 200])}",
+                sort="-views",
+                maxResults=200,
+            )
+            .execute()
+        )
+        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        for values in data.get("rows", []):
+            row = dict(zip(headers, values))
+            video_id = str(row.get("video", ""))
+            ratio = row.get("elapsedVideoTimeRatio")
+            watch_ratio = row.get("audienceWatchRatio")
+            if not video_id or ratio is None or watch_ratio is None:
+                continue
+            try:
+                ratio_value = float(ratio)
+                watch_value = float(watch_ratio)
+            except (TypeError, ValueError):
+                continue
+            if not (0.0 <= ratio_value <= 1.0):
+                continue
+            by_video.setdefault(video_id, []).append(
+                {"elapsed_ratio": ratio_value, "watch_ratio": watch_value}
+            )
+    for points in by_video.values():
+        points.sort(key=lambda item: item["elapsed_ratio"])
+    return by_video
+
+
 def video_traffic_sources(
     video_ids: list[str],
     *,

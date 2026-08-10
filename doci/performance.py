@@ -57,6 +57,7 @@ def _snapshot_signature(snapshot: dict) -> str:
         # statusだけの変化でも新しいsnapshot行を追記できるようにする。
         "traffic_sources": snapshot.get("traffic_sources", {}),
         "search_terms": snapshot.get("search_terms", {}),
+        "retention_curve": snapshot.get("retention_curve", {}),
         "videos": snapshot.get("videos", []),
     }
     return hashlib.sha256(
@@ -119,6 +120,123 @@ def _format_traits(spec: ChannelSpec, recorded: dict) -> list[str]:
     return traits
 
 
+def _scene_time_windows(script: dict, total_seconds: float) -> list[dict]:
+    """scenesの時間窓をnarration文字数比で按分する（compose.pyと同じ方式）。
+
+    各sceneに対し start/end 秒を返す。文字数が取得できない場合は均等割。
+    これは合成時の実境界（文末スナップ）とは異なる近似であり、照合の目安。
+    """
+    scenes = script.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        return []
+    narration = str(script.get("narration") or "")
+    weights = [max(len(str(s.get("caption") or "")) + 1, 1) for s in scenes]
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return []
+    if total_seconds <= 0:
+        total_seconds = 1.0
+    windows: list[dict] = []
+    cursor = 0.0
+    for index, weight in enumerate(weights):
+        span = total_seconds * weight / total_weight
+        start = cursor
+        end = cursor + span
+        windows.append(
+            {
+                "index": index,
+                "caption": str(scenes[index].get("caption") or ""),
+                "start": round(start, 3),
+                "end": round(end, 3),
+            }
+        )
+        cursor = end
+    return windows
+
+
+def retention_moments(
+    curve: list[dict],
+    *,
+    threshold: float = 8.0,
+    min_delta: float = 2.0,
+) -> list[dict]:
+    """維持率カーブからスパイク（山）とディップ（谷）を検出する（issue #149）。
+
+    各点のwatch_ratioを前後の点と比較し、前後より`threshold`以上高い点を
+    spike、低い点を dip とする。端点やデータが少なすぎる場合は検出しない
+    （山=成功・谷=失敗と断定しないために、形状だけから結論を出さない）。
+    返り値は `{elapsed_ratio, watch_ratio, kind}` のリスト。
+    """
+    if not curve or len(curve) < 5:
+        return []
+    moments: list[dict] = []
+    for index in range(1, len(curve) - 1):
+        prev = curve[index - 1]["watch_ratio"]
+        curr = curve[index]["watch_ratio"]
+        nxt = curve[index + 1]["watch_ratio"]
+        if abs(prev - curr) < min_delta and abs(nxt - curr) < min_delta:
+            continue
+        if curr > prev + threshold and curr > nxt + threshold:
+            moments.append(
+                {
+                    "elapsed_ratio": curve[index]["elapsed_ratio"],
+                    "watch_ratio": curr,
+                    "kind": "spike",
+                }
+            )
+        elif curr < prev - threshold and curr < nxt - threshold:
+            moments.append(
+                {
+                    "elapsed_ratio": curve[index]["elapsed_ratio"],
+                    "watch_ratio": curr,
+                    "kind": "dip",
+                }
+            )
+    return moments
+
+
+def retention_moment_scenes(
+    moments: list[dict],
+    script: dict,
+    total_seconds: float,
+) -> list[dict]:
+    """検出した山/谷を、台本のscenesと照合して「何秒付近・どのシーン」を返す。
+
+    該当sceneが特定できない場合は `scene_index=None` のまま（推測しない）。
+    """
+    windows = _scene_time_windows(script, total_seconds)
+    if not windows:
+        return [
+            {
+                **moment,
+                "elapsed_seconds": round(moment["elapsed_ratio"] * total_seconds, 1),
+                "scene_index": None,
+                "scene_caption": "",
+            }
+            for moment in moments
+        ]
+    annotated: list[dict] = []
+    for moment in moments:
+        second = moment["elapsed_ratio"] * total_seconds
+        scene = next(
+            (
+                win
+                for win in windows
+                if win["start"] <= second <= win["end"]
+            ),
+            None,
+        )
+        annotated.append(
+            {
+                **moment,
+                "elapsed_seconds": round(second, 1),
+                "scene_index": scene["index"] if scene else None,
+                "scene_caption": scene["caption"] if scene else "",
+            }
+        )
+    return annotated
+
+
 def sync(
     spec: ChannelSpec,
     *,
@@ -141,8 +259,13 @@ def sync(
     analytics_rows: list[dict] = []
     traffic_status: dict = {"available": False, "source": "youtube_analytics_api_v2"}
     search_status: dict = {"available": False, "source": "youtube_analytics_api_v2"}
+    retention_status: dict = {
+        "available": False,
+        "source": "youtube_analytics_api_v2",
+    }
     traffic_by_id: dict[str, dict[str, int]] = {}
     search_by_id: dict[str, list[dict]] = {}
+    retention_by_id: dict[str, list[dict]] = {}
     if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
         start = (current.date() - timedelta(days=lookback_days)).isoformat()
         end = current.date().isoformat()
@@ -212,6 +335,22 @@ def sync(
                     "検索語句readback失敗。traffic sourceは保存: "
                     f"{str(exc)[:400]}"
                 )
+            try:
+                # issue #149: 維持率カーブはShorts等でAPIが返さない場合が
+                # あるため、取得できる範囲だけ保存する（fail-closed）。
+                retention_by_id = youtube.video_retention_curves(
+                    video_ids,
+                    start_date=start,
+                    end_date=end,
+                    token_file=spec.publish.youtube.token,
+                    client_secret_file=spec.publish.youtube.client_secret,
+                )
+                retention_status.update({"available": True})
+            except Exception as exc:
+                retention_status["reason"] = (
+                    "維持率カーブreadback失敗。平均指標のみ保存: "
+                    f"{str(exc)[:400]}"
+                )
         except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
             analytics_status["reason"] = (
                 "Analytics readback失敗。Data API snapshotのみ保存: "
@@ -238,6 +377,7 @@ def sync(
                 **analytics,
                 "traffic_sources": traffic_by_id.get(video_id, {}),
                 "search_terms": search_by_id.get(video_id, []),
+                "retention_curve": retention_by_id.get(video_id, []),
             }
         videos.append(
             {
@@ -268,6 +408,7 @@ def sync(
         "analytics": analytics_status,
         "traffic_sources": traffic_status,
         "search_terms": search_status,
+        "retention_curve": retention_status,
         "videos": videos,
     }
     path = _snapshot_path(spec)

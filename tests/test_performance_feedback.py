@@ -321,6 +321,90 @@ class PerformanceFeedbackTest(unittest.TestCase):
         # id-0 / id-1 だけが照会される。
         self.assertEqual(search_mock.call_args.args[0], ["id-0", "id-1"])
 
+    def test_sync_records_retention_curves(self) -> None:
+        """issue #149: Analyticsが返す維持率カーブをsnapshotの各videoの
+        analyticsへ保存する。取得できない動画は空のまま。"""
+        self._history(count=1)
+        rows = [
+            {
+                "ts": "2026-07-01T00:00:00+00:00",
+                "channel": self.spec.id,
+                "corner": "video",
+                "title": "Title 0",
+                "topic": "Topic 0",
+                "video_id": "id-0",
+                "status": "published",
+            }
+        ]
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value={
+                    "id-0": [
+                        {"elapsed_ratio": 0.0, "watch_ratio": 90.0},
+                        {"elapsed_ratio": 0.5, "watch_ratio": 40.0},
+                        {"elapsed_ratio": 1.0, "watch_ratio": 30.0},
+                    ]
+                },
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(snapshot["retention_curve"]["available"])
+        self.assertEqual(
+            snapshot["videos"][0]["analytics"]["retention_curve"],
+            [
+                {"elapsed_ratio": 0.0, "watch_ratio": 90.0},
+                {"elapsed_ratio": 0.5, "watch_ratio": 40.0},
+                {"elapsed_ratio": 1.0, "watch_ratio": 30.0},
+            ],
+        )
+
     def test_traffic_status_change_writes_new_snapshot_row(self) -> None:
         """issue #164 (Sol review指摘4): traffic_sources のavailable/reasonが
         変化した場合、snapshot署名に含まれ新しい行が追記される。"""
