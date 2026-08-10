@@ -60,6 +60,8 @@ def _snapshot_signature(snapshot: dict) -> str:
         "traffic_sources": snapshot.get("traffic_sources", {}),
         "search_terms": snapshot.get("search_terms", {}),
         "retention_curve": snapshot.get("retention_curve", {}),
+        # issue #144: 共有率(30日)readbackのavailable/reason変化も署名へ含める。
+        "share_30d": snapshot.get("share_30d", {}),
         "videos": snapshot.get("videos", []),
     }
     return hashlib.sha256(
@@ -331,10 +333,15 @@ def sync(
         "available": False,
         "source": "youtube_analytics_api_v2",
     }
+    share_30d_status: dict = {
+        "available": False,
+        "source": "youtube_analytics_api_v2",
+    }
     traffic_by_id: dict[str, dict[str, int]] = {}
     search_by_id: dict[str, list[dict]] = {}
     retention_by_id: dict[str, list[dict]] = {}
     retention_failures: dict[str, str] = {}
+    share_30d_by_id: dict[str, dict] = {}
     if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
         start = (current.date() - timedelta(days=lookback_days)).isoformat()
         end = current.date().isoformat()
@@ -353,6 +360,39 @@ def sync(
                     "end_date": end,
                 }
             )
+            try:
+                # issue #144: 共有率は「過去30日間」の shares/views で
+                # 評価する。既存の90日集計（analytics_rows）とは別に、
+                # 共有率専用の30日集計を取得して分離保存する。取得できない
+                # 動画は0と推測せず空のまま（fail-closed）。
+                share_start = (current.date() - timedelta(days=30)).isoformat()
+                share_rows = youtube.video_analytics(
+                    video_ids,
+                    start_date=share_start,
+                    end_date=end,
+                    token_file=spec.publish.youtube.token,
+                    client_secret_file=spec.publish.youtube.client_secret,
+                )
+                share_30d_status.update(
+                    {
+                        "available": True,
+                        "start_date": share_start,
+                        "end_date": end,
+                    }
+                )
+                for row in share_rows:
+                    video_id = str(row.get("video_id") or "")
+                    if not video_id:
+                        continue
+                    share_30d_by_id[video_id] = {
+                        "shares": row.get("shares"),
+                        "views": row.get("views"),
+                    }
+            except Exception as exc:
+                share_30d_status["reason"] = (
+                    "共有率(30日)readback失敗。90日指標のみ保存: "
+                    f"{str(exc)[:400]}"
+                )
             # issue #164: トラフィックソースと検索語句はAnalytics APIが
             # 返せる範囲だけ取得する。取得できない動画・種別は0や「なし」と
             # 推測せず、空のまま（fail-closed）。両者は別々のtry/statusで
@@ -467,6 +507,7 @@ def sync(
                 "search_terms": search_by_id.get(video_id, []),
                 "retention_curve": retention_by_id.get(video_id, []),
             }
+        share_30d = share_30d_by_id.get(video_id)
         workdir = _safe_workdir(spec, str(recorded.get("workdir") or ""))
         videos.append(
             {
@@ -489,6 +530,8 @@ def sync(
                 "analytics": analytics,
             }
         )
+        if share_30d is not None:
+            videos[-1]["share_30d"] = share_30d
     videos.sort(key=lambda row: (row["history_ts"], row["video_id"]))
     snapshot = {
         "schema_version": SCHEMA_VERSION,
@@ -499,6 +542,7 @@ def sync(
         "traffic_sources": traffic_status,
         "search_terms": search_status,
         "retention_curve": retention_status,
+        "share_30d": share_30d_status,
         "videos": videos,
     }
     path = _snapshot_path(spec)

@@ -389,7 +389,11 @@ def video_analytics(
                     ),
                     "likes": int(row.get("likes", 0) or 0),
                     "comments": int(row.get("comments", 0) or 0),
-                    "shares": int(row.get("shares", 0) or 0),
+                    "shares": (
+                        int(row["shares"])
+                        if row.get("shares") is not None
+                        else None
+                    ),
                 }
             )
     return results
