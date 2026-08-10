@@ -364,6 +364,35 @@ YouTube公式仕様どおり、判定指標はクリック率ではなく総再�
 コピー済みサムネイルのSHA-256を`start`時に再検証し、計画後に案が変わっていれば
 Studioでの開始記録を拒否する。
 
+### YouTube終了画面1枠の検証（issue #165）
+
+通常動画の終了画面を「登録・動画・再生リストを同時に並べるだけ」にせず、次の1本に
+内容が直結するvideo要素を1枠だけ設定する運用を、ローカルのマニフェストで固定して
+記録する（YouTube書込みなし）。Studioのエンゲージメント → 終了画面要素のクリック率で
+検証する。記録先は`output/<channel>/end_screen_tests/<experiment-id>/`。
+
+```bash
+# 次の1本へ直結する終了画面video要素を1枠だけ計画
+python -m doci.end_screen plan \
+  --channel youtube-growth --video-id <video-id> --link-video-id <next-video-id> \
+  --confirm-content-direct
+
+# Studioで1枠だけ設定した後、runningへ進める
+python -m doci.end_screen start \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --confirm-studio-setup
+
+# 終了画面要素のクリック率を記録
+python -m doci.end_screen complete \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --outcome clicked --click-rate 3.5 --confirm-setup-unchanged \
+  --notes "次の一本の冒頭が視聴された"
+```
+
+`not_clicked`・`insufficient_views`ではクリック率の勝者判定をせず、テスト中に終了
+画面の構成を変更した場合は`--outcome stopped_changed_setup`で`invalidated`にする。
+クリック率は0〜100の範囲のみ受け付ける。結果は`next_idea_memo.md`へ書き出す。
+
 起動間隔は`StartInterval=86400`（毎日）でlaunchdジョブを登録し、Python側の
 `PERFORMANCE_REPORT_MIN_INTERVAL_HOURS`（既定72時間）ゲートで実質「3日に1回程度」
 に保つ。`StartInterval`を3日(259200秒)に直接設定しない理由は、スリープ/再起動で
@@ -441,6 +470,7 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/performance.py` 実績readbackと形式仮説の生成（自動適用はしない）
 - `doci/performance_report.py` 3日毎の実績レポートissueサイクル（issue #92、`run_daily`とは独立）
 - `doci/youtube_ab_test.py` YouTube Studioの通常動画A/Bテスト計画・結果記録（YouTube書込みなし）
+- `doci/end_screen.py` YouTube終了画面1枠の計画・クリック率検証記録（YouTube書込みなし）
 - `doci/feedback_issues.py` issueの重複防止・週次レート制御・GitHub I/O基盤
 - `doci/tactic_issues.py` 動画が紹介するYouTube運用施策(viewer_action)の検知・issue化（issue #90）
 - `channels/<id>/` チャンネル定義・ペルソナ・声・BGM
