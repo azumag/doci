@@ -308,18 +308,58 @@ class YouTubeSearchTest(unittest.TestCase):
             )
         self.assertEqual(by_video, {})
 
+    def test_video_traffic_sources_paginates_beyond_200_rows(self) -> None:
+        """issue #164 (Sol review指摘5): 200行を超えるsourceが複数ページに
+        分かれても、startIndexページングで全行を結合する。"""
+        first_page = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "insightTrafficSourceType"},
+                {"name": "views"},
+            ],
+            "rows": [
+                ["abc123", f"TYPE_{index}", index + 1] for index in range(200)
+            ],
+        }
+        second_page = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "insightTrafficSourceType"},
+                {"name": "views"},
+            ],
+            "rows": [["abc123", "EXTRA", 999]],
+        }
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [first_page, second_page]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video = youtube.video_traffic_sources(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(len(by_video["abc123"]), 201)
+        self.assertEqual(by_video["abc123"]["EXTRA"], 999)
+        calls = reports.query.call_args_list
+        self.assertEqual(calls[0].kwargs["startIndex"], 1)
+        self.assertEqual(calls[1].kwargs["startIndex"], 201)
+
     def test_video_search_terms_maps_terms_and_views(self) -> None:
         """issue #164: 具体的な検索語句をviews付きで返す。"""
         reports = mock.Mock()
         reports.query.return_value.execute.return_value = {
             "columnHeaders": [
-                {"name": "video"},
-                {"name": "trafficSource"},
+                {"name": "insightTrafficSourceDetail"},
                 {"name": "views"},
             ],
             "rows": [
-                ["abc123", "ショート 企画", 30],
-                ["abc123", "コンテンツギャップ", 12],
+                ["ショート 企画", 30],
+                ["コンテンツギャップ", 12],
             ],
         }
         service = mock.Mock()
@@ -343,7 +383,15 @@ class YouTubeSearchTest(unittest.TestCase):
                 ]
             },
         )
-        self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video,trafficSource")
+        self.assertEqual(
+            reports.query.call_args.kwargs["dimensions"],
+            "insightTrafficSourceDetail",
+        )
+        self.assertEqual(
+            reports.query.call_args.kwargs["filters"],
+            "video==abc123;insightTrafficSourceType==YT_SEARCH",
+        )
+        self.assertEqual(reports.query.call_args.kwargs["maxResults"], 25)
 
 
 if __name__ == "__main__":

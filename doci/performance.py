@@ -53,6 +53,9 @@ def _decision_path(spec: ChannelSpec) -> Path:
 def _snapshot_signature(snapshot: dict) -> str:
     stable = {
         "analytics": snapshot.get("analytics", {}),
+        # issue #164: トラフィックreadbackのavailable/reason変化も署名へ含め、
+        # statusだけの変化でも新しいsnapshot行を追記できるようにする。
+        "traffic_sources": snapshot.get("traffic_sources", {}),
         "videos": snapshot.get("videos", []),
     }
     return hashlib.sha256(

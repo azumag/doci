@@ -419,29 +419,41 @@ def video_traffic_sources(
     service = build("youtubeAnalytics", "v2", credentials=creds)
     by_video: dict[str, dict[str, int]] = {}
     for offset in range(0, len(ids), 200):
-        data = (
-            service.reports()
-            .query(
-                ids="channel==MINE",
-                startDate=start_date,
-                endDate=end_date,
-                metrics="views",
-                dimensions="video,insightTrafficSourceType",
-                filters=f"video=={','.join(ids[offset : offset + 200])}",
-                sort="-views",
-                maxResults=200,
+        # startIndexページング: 200動画×複数sourceで200行を超えると
+        # 下位行が暗黙に切り捨てられるため、APIが返せる全行を読む
+        # （Sol review指摘5）。
+        start_index = 1
+        while True:
+            data = (
+                service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="views",
+                    dimensions="video,insightTrafficSourceType",
+                    filters=f"video=={','.join(ids[offset : offset + 200])}",
+                    sort="-views",
+                    maxResults=200,
+                    startIndex=start_index,
+                )
+                .execute()
             )
-            .execute()
-        )
-        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
-        for values in data.get("rows", []):
-            row = dict(zip(headers, values))
-            video_id = str(row.get("video", ""))
-            source_type = str(row.get("insightTrafficSourceType", "") or "")
-            views = int(row.get("views", 0) or 0)
-            if not video_id or not source_type or views <= 0:
-                continue
-            by_video.setdefault(video_id, {})[source_type] = views
+            headers = [
+                header.get("name", "") for header in data.get("columnHeaders", [])
+            ]
+            rows = data.get("rows", [])
+            for values in rows:
+                row = dict(zip(headers, values))
+                video_id = str(row.get("video", ""))
+                source_type = str(row.get("insightTrafficSourceType", "") or "")
+                views = int(row.get("views", 0) or 0)
+                if not video_id or not source_type or views <= 0:
+                    continue
+                by_video.setdefault(video_id, {})[source_type] = views
+            if len(rows) < 200:
+                break
+            start_index += len(rows)
     return by_video
 
 
@@ -455,9 +467,10 @@ def video_search_terms(
 ) -> dict[str, list[dict]]:
     """動画別の具体的な検索語句とviewsを読み取る（issue #164）。
 
-    `trafficSource` ディメンションで、YouTube検索から流入した検索語句を返す。
-    APIがShorts等でデータを返さない場合や、トラフィックソースがYT_SEARCH以外の
-    場合は空リスト（欠落を0や「なし」と断定しない）。取得できる範囲だけ記録する。
+    `insightTrafficSourceDetail` ディメンション（公式仕様）で、YouTube検索
+    （`insightTrafficSourceType==YT_SEARCH`）から流入した検索語句を動画単位で
+    返す。`maxResults` は公式上限の25。APIがShorts等でデータを返さない場合は
+    空リスト（欠落を0や「なし」と断定しない）。取得できる範囲だけ記録する。
     """
     from googleapiclient.discovery import build
 
@@ -472,7 +485,7 @@ def video_search_terms(
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
     by_video: dict[str, list[dict]] = {}
-    for offset in range(0, len(ids), 200):
+    for video_id in ids:
         data = (
             service.reports()
             .query(
@@ -480,20 +493,19 @@ def video_search_terms(
                 startDate=start_date,
                 endDate=end_date,
                 metrics="views",
-                dimensions="video,trafficSource",
-                filters=f"video=={','.join(ids[offset : offset + 200])}",
+                dimensions="insightTrafficSourceDetail",
+                filters=f"video=={video_id};insightTrafficSourceType==YT_SEARCH",
                 sort="-views",
-                maxResults=200,
+                maxResults=25,
             )
             .execute()
         )
         headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
         for values in data.get("rows", []):
             row = dict(zip(headers, values))
-            video_id = str(row.get("video", ""))
-            term = str(row.get("trafficSource", "") or "")
+            term = str(row.get("insightTrafficSourceDetail", "") or "")
             views = int(row.get("views", 0) or 0)
-            if not video_id or not term or views <= 0:
+            if not term or views <= 0:
                 continue
             by_video.setdefault(video_id, []).append({"term": term, "views": views})
     return by_video

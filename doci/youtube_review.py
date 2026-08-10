@@ -67,9 +67,10 @@ _YOUTUBE_OPERATION_MARKERS = (
     "チャンネル登録",
     "関連動画",
     "流入元",
-    "検索",
-    "検索語",
     "検索流入",
+    "検索語句",
+    "コンテンツギャップ",
+    "コンテンツ ギャップ",
     "タイトル",
     "冒頭",
 )
@@ -85,9 +86,8 @@ _PROBLEM_SIGNAL_MARKERS = (
     "インプレッション",
     "流入元",
     "関連動画",
-    "検索",
-    "検索語",
     "検索流入",
+    "検索語句",
     "低い",
     "下が",
     "伸びない",
@@ -175,15 +175,20 @@ def _matched_markers(value: str, markers: tuple[str, ...]) -> set[str]:
     return {marker for marker in markers if marker in folded}
 
 
-def _misleading_content_gap(*values: str) -> bool:
+def _misleading_content_gap(gap_query: str, *values: str) -> bool:
     """コンテンツギャップを「検索されていないテーマ」と誤解する表現を検出する。
 
     issue #164: 公式の説明ではコンテンツギャップは「検索されているのに十分な
     結果がない検索領域」であり、「検索されていないテーマ」ではない。誤解表現が
     タイトル等に含まれる場合は自動公開にしない（推測・断定を公開経路へ通さない）。
+    `gap_query` が非空の企画はコンテンツギャップ企画として扱い、本文に
+    「コンテンツギャップ」という語が無くても誤解表現を検出する。
     """
     joined = " ".join(values).casefold()
-    if not _contains_any(joined, _CONTENT_GAP_MARKERS):
+    gap_context = _contains_any(joined, _CONTENT_GAP_MARKERS) or bool(
+        str(gap_query or "").strip()
+    )
+    if not gap_context:
         return False
     return any(marker in joined for marker in _CONTENT_GAP_MISLEADING_MARKERS)
 
@@ -202,6 +207,7 @@ def assess(script: dict) -> ThemeAssessment:
     angle = _text(research.get("angle"))
     description = _text(script.get("description"))
     narration = _text(script.get("narration"), limit=5000)
+    gap_query = _text(research.get("gap_query"), limit=200)
 
     audience_clear = audience.casefold() == "youtube制作者".casefold()
     problem_markers = _matched_markers(problem, _YOUTUBE_OPERATION_MARKERS)
@@ -247,6 +253,7 @@ def assess(script: dict) -> ThemeAssessment:
             theme_fit_reason,
         )
         and not _misleading_content_gap(
+            gap_query,
             problem,
             viewer_action,
             topic,
@@ -270,7 +277,14 @@ def assess(script: dict) -> ThemeAssessment:
         reasons.append("主題適合の理由がない")
     if not subject_clear:
         if _misleading_content_gap(
-            problem, viewer_action, topic, angle, title, description, narration
+            gap_query,
+            problem,
+            viewer_action,
+            topic,
+            angle,
+            title,
+            description,
+            narration,
         ):
             reasons.append(
                 "コンテンツギャップを「検索されていないテーマ」と誤解する表現がある"

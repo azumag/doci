@@ -429,6 +429,51 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         )
         self.assertIsNone(candidate)
 
+    def test_build_cycle_candidate_includes_gap_discovery_without_proposal(self) -> None:
+        """issue #164 (Sol review指摘6): 形式仮説が無くても、gap動画の
+        検索発見データがsnapshotにあればレポート候補を生成する。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "shorts", decision, [], set()
+        )
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "gap-1",
+                    "corner": "shorts",
+                    "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+                    "analytics": {
+                        "views": 100,
+                        "traffic_sources": {"YT_SEARCH": 40},
+                        "search_terms": [{"term": "ネタ切れ 解消", "views": 40}],
+                    },
+                }
+            ]
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec, [section], datetime(2026, 7, 26, tzinfo=timezone.utc), snapshot
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("検索発見（Discovery）", candidate["body"])
+
+    def test_build_cycle_candidate_without_snapshot_keeps_legacy_behavior(self) -> None:
+        """issue #164: snapshot未指定の呼び出しは従来どおりsection内容のみで
+        判定する（非gapの通常ケースでNoneを維持）。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "shorts", decision, [], set()
+        )
+
+        candidate = performance_report.build_cycle_candidate(
+            spec, [section], datetime(2026, 7, 26, tzinfo=timezone.utc)
+        )
+
+        self.assertIsNone(candidate)
+
     def test_build_cycle_candidate_aggregates_multiple_corners(self) -> None:
         spec = SimpleNamespace(id="youtube-growth")
         active_section = performance_report.build_corner_section(
@@ -529,6 +574,69 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         }
         text = performance_report._discovery_satisfaction_text(snapshot, "shorts")
         self.assertIn("このcornerの動画がsnapshotにありません", text)
+
+    def test_gap_match_status_distinguishes_matched_unmatched_and_missing(self) -> None:
+        """issue #164 (Sol review指摘3): gap_queryと実検索語句の対応を
+        完全一致・不一致・判定不能に区別する。"""
+        self.assertEqual(
+            performance_report._gap_match_status(
+                "ネタ切れ 解消",
+                [{"term": "ネタ切れ 解消", "views": 5}],
+            ),
+            "matched",
+        )
+        self.assertEqual(
+            performance_report._gap_match_status(
+                "ネタ切れ 解消",
+                [{"term": "猫 かわいい", "views": 5}],
+            ),
+            "unmatched",
+        )
+        self.assertEqual(
+            performance_report._gap_match_status("", [{"term": "猫", "views": 5}]),
+            "not_evaluated",
+        )
+        self.assertEqual(
+            performance_report._gap_match_status("ネタ切れ", []),
+            "not_evaluated",
+        )
+
+    def test_discovery_text_reports_gap_query_match_status(self) -> None:
+        """issue #164: レポート本文にgap_queryとの一致/不一致を明示する。"""
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "gap-a",
+                    "corner": "shorts",
+                    "topic_metadata": {"gap_query": "ネタ切れ 解消"},
+                    "analytics": {
+                        "views": 100,
+                        "average_view_percentage": 60.0,
+                        "traffic_sources": {"YT_SEARCH": 40},
+                        "search_terms": [
+                            {"term": "ネタ切れ 解消", "views": 25},
+                            {"term": "コンテンツギャップ", "views": 15},
+                        ],
+                    },
+                },
+                {
+                    "video_id": "gap-b",
+                    "corner": "shorts",
+                    "topic_metadata": {"gap_query": "猫 かわいい"},
+                    "analytics": {
+                        "views": 80,
+                        "average_view_percentage": 50.0,
+                        "traffic_sources": {"YT_SEARCH": 20},
+                        "search_terms": [{"term": "別の語句", "views": 20}],
+                    },
+                },
+            ]
+        }
+
+        text = performance_report._discovery_satisfaction_text(snapshot, "shorts")
+
+        self.assertIn("狙った検索語「ネタ切れ 解消」と一致", text)
+        self.assertIn("狙った検索語「猫 かわいい」と一致する流入語句なし", text)
 
 
 class RunChannelTest(unittest.TestCase):

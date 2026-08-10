@@ -103,9 +103,9 @@ class ThemeAssessmentTest(unittest.TestCase):
         """issue #164: 需要と供給不足が伝わる正しい表現なら誤解表現ガードは
         発動しない（他の条件が揃えばpublic判定を妨げない）。"""
         script = _assessment_script(
-            topic="検索されているのに足りない答えから次のショートを作る",
+            topic="コンテンツギャップから検索流入を狙うショート企画",
             youtube_creator_problem=(
-                "検索されているのに十分な結果がない領域をショート企画で埋めたい課題"
+                "検索結果が不足している領域をコンテンツギャップで埋めたい課題"
             ),
             viewer_action=(
                 "YouTube Studioのコンテンツギャップで検索語を1つ選び、"
@@ -115,7 +115,7 @@ class ThemeAssessmentTest(unittest.TestCase):
                 "コンテンツギャップから検索流入を狙うショート企画が主題の中心だから"
             ),
         )
-        script["title"] = "検索されているのに足りない答えから作るショート"
+        script["title"] = "コンテンツギャップから検索流入を狙うショート"
         script["description"] = "コンテンツギャップから検索流入を狙う企画の立て方"
         script["narration"] = (
             "検索されているのに結果が足りない領域をコンテンツギャップで選び、"
@@ -126,6 +126,56 @@ class ThemeAssessmentTest(unittest.TestCase):
 
         self.assertTrue(result.eligible_for_public)
         self.assertEqual(result.privacy, "public")
+
+    def test_misleading_title_with_gap_query_but_no_gap_word_is_unlisted(self) -> None:
+        """issue #164: gap_queryが非空でも、本文に「コンテンツギャップ」という
+        語が無ければ誤解表現ガードは発動しない（Sol review指摘2の回帰）。"""
+        script = _assessment_script(
+            topic="検索されていない答えから作るYouTubeショート",
+            youtube_creator_problem=(
+                "検索されているのに十分な結果がない領域をショート企画で埋めたい課題"
+            ),
+            viewer_action=(
+                "YouTube Studioで検索語を1つ選び、次のショートで不足を埋める"
+            ),
+            gap_query="ネタ切れ 解消",
+        )
+        script["title"] = "検索されていない答えから作るショート企画"
+
+        result = youtube_review.assess(script)
+
+        self.assertFalse(result.eligible_for_public)
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertTrue(
+            any(
+                "誤解する表現" in reason
+                for reason in result.reasons
+            )
+        )
+
+    def test_plain_search_topic_without_operation_signal_is_not_public(self) -> None:
+        """issue #164: 裸の「検索」だけでYouTube運用改善と判定しない（Sol
+        review指摘2の回帰）。運用シグナル（検索流入・検索語句・コンテンツ
+        ギャップ等）が無い企画は従来どおりunlisted。"""
+        script = _assessment_script(
+            topic="YouTubeで検索した歴史資料を紹介する",
+            youtube_creator_problem=(
+                "YouTubeで検索した歴史資料を動画で紹介したい課題"
+            ),
+            viewer_action=(
+                "YouTubeで検索して見つけた資料を次の動画で紹介する"
+            ),
+        )
+        script["title"] = "YouTube検索で見つけた歴史資料"
+        script["description"] = "検索で見つけた資料の紹介"
+        script["narration"] = (
+            "YouTubeで検索して見つけた歴史資料を紹介する動画です。"
+        )
+
+        result = youtube_review.assess(script)
+
+        self.assertFalse(result.eligible_for_public)
+        self.assertEqual(result.privacy, "unlisted")
 
     def test_no_research_is_safe_unlisted_fallback(self) -> None:
         result = youtube_review.assess(

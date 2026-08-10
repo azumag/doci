@@ -302,7 +302,7 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
 
 `pipeline.performance_feedback = true`かつ`pipeline.feedback_repository`
 （`owner/repo`）を設定したチャンネルが対象。チャンネル内の全corner分を
-1つのissueにまとめ、corner毎に次の3節を書く:
+1つのissueにまとめ、corner毎に次の節を書く:
 
 - **調査内容**: 今回のreadback分析（指標・cohort・対象本数・上位/下位video_id）
 - **実験内容**: 新しい単一trait仮説（cooldown中や比較標本不足の場合は「新仮説なし」）
@@ -312,6 +312,12 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
   自動適用をしないため、明示的な予約ではなくこの出現検知で代替している。
   提案から`PERFORMANCE_EXPERIMENT_MAX_AGE_DAYS`（既定30日）以内に出現しなければ
   `expired`として打ち切る。
+- **検索発見（Discovery） / 視聴後評価（Satisfaction）**（issue #164）:
+  コンテンツギャップ企画（`topic_metadata.gap_query`が記録された動画）を中心に、
+  YouTube検索からの視聴回数・構成比と、`gap_query`と実検索語句の一致状態を表示する。
+  取得できないトラフィックソース・検索語句・維持率は0や「なし」と断定せず、
+  取得不可と明記する。形式仮説が無くても、gap動画の検索発見データがあれば
+  レポート候補として扱う。
 
 状態は`output/<channel>/performance_experiments.jsonl`に`proposed → applied →
 evaluated → reported`（または`expired`）として追記される。全cornerが「新仮説なし

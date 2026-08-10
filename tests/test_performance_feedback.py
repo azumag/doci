@@ -222,6 +222,76 @@ class PerformanceFeedbackTest(unittest.TestCase):
         self.assertIsNone(video1["analytics"])
         self.assertIn("topic_metadata", video0)
 
+    def test_traffic_status_change_writes_new_snapshot_row(self) -> None:
+        """issue #164 (Sol review指摘4): traffic_sources のavailable/reasonが
+        変化した場合、snapshot署名に含まれ新しい行が追記される。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch.object(performance.youtube, "video_search_terms", return_value={}),
+        ):
+            first = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+        self.assertFalse(first["traffic_sources"]["available"])
+        self.assertIn("boom", first["traffic_sources"]["reason"])
+
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_rows),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 1}},
+            ),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value={"id-0": [{"term": "語句", "views": 1}]},
+            ),
+        ):
+            second = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(second["traffic_sources"]["available"])
+        lines = (self.root / "performance.jsonl").read_text().splitlines()
+        self.assertEqual(len(lines), 2)
+
     def test_format_traits_are_scoped_and_exclude_topic_text(self) -> None:
         workdir = self.root / "run"
         workdir.mkdir()
