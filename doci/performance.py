@@ -360,55 +360,63 @@ def sync(
                     "end_date": end,
                 }
             )
-            try:
-                # issue #144: 共有率は「過去30日間」の shares/views で
-                # 評価する。既存の90日集計（analytics_rows）とは別に、
-                # 共有率専用の30日集計を取得して分離保存する。Analytics APIの
-                # 日付は太平洋時間基準のため、完了日（基準日-1日）から遡って
-                # 29日差の30暦日を対象にする（UTC日付をそのまま使うと
-                # 日付変更直後にずれる）。対象はshorts動画のみ。
-                from zoneinfo import ZoneInfo
+        except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
+            analytics_status["reason"] = (
+                "Analytics readback失敗。Data API snapshotのみ保存: "
+                f"{str(exc)[:400]}"
+            )
+        try:
+            # issue #144: 共有率は「過去30日間」の shares/views で
+            # 評価する。既存の90日集計（analytics_rows）とは別に、
+            # 共有率専用の30日集計を取得して分離保存する。Analytics APIの
+            # 日付は太平洋時間基準のため、完了日（基準日-1日）から遡って
+            # 29日差の30暦日を対象にする（UTC日付をそのまま使うと
+            # 日付変更直後にずれる）。対象はshorts動画のみ。
+            # 90日Analyticsの失敗と独立に実行し、片方の障害が他方の実データを
+            # 失わせない（Sol review指摘）。
+            from zoneinfo import ZoneInfo
 
-                pt_now = current.astimezone(ZoneInfo("America/Los_Angeles"))
-                share_end = (
-                    pt_now.date() - timedelta(days=1)
-                ).isoformat()
-                share_start = (
-                    datetime.fromisoformat(share_end).date()
-                    - timedelta(days=29)
-                ).isoformat()
-                share_ids = [
-                    video_id
-                    for video_id, row in history_rows.items()
-                    if str(row.get("corner") or "") == "shorts"
-                ]
-                share_rows = youtube.video_share_metrics(
-                    share_ids,
-                    start_date=share_start,
-                    end_date=share_end,
-                    token_file=spec.publish.youtube.token,
-                    client_secret_file=spec.publish.youtube.client_secret,
-                )
-                share_30d_status.update(
-                    {
-                        "available": True,
-                        "start_date": share_start,
-                        "end_date": share_end,
-                    }
-                )
-                for row in share_rows:
-                    video_id = str(row.get("video_id") or "")
-                    if not video_id:
-                        continue
-                    share_30d_by_id[video_id] = {
-                        "shares": row.get("shares"),
-                        "views": row.get("views"),
-                    }
-            except Exception as exc:
-                share_30d_status["reason"] = (
-                    "共有率(30日)readback失敗。90日指標のみ保存: "
-                    f"{str(exc)[:400]}"
-                )
+            pt_now = current.astimezone(ZoneInfo("America/Los_Angeles"))
+            share_end = (
+                pt_now.date() - timedelta(days=1)
+            ).isoformat()
+            share_start = (
+                datetime.fromisoformat(share_end).date()
+                - timedelta(days=29)
+            ).isoformat()
+            share_ids = [
+                video_id
+                for video_id, row in history_rows.items()
+                if str(row.get("corner") or "") == "shorts"
+            ]
+            share_rows = youtube.video_share_metrics(
+                share_ids,
+                start_date=share_start,
+                end_date=share_end,
+                token_file=spec.publish.youtube.token,
+                client_secret_file=spec.publish.youtube.client_secret,
+            )
+            share_30d_status.update(
+                {
+                    "available": True,
+                    "start_date": share_start,
+                    "end_date": share_end,
+                }
+            )
+            for row in share_rows:
+                video_id = str(row.get("video_id") or "")
+                if not video_id:
+                    continue
+                share_30d_by_id[video_id] = {
+                    "shares": row.get("shares"),
+                    "views": row.get("views"),
+                }
+        except Exception as exc:
+            share_30d_status["reason"] = (
+                "共有率(30日)readback失敗。90日指標のみ保存: "
+                f"{str(exc)[:400]}"
+            )
+        if analytics_status.get("available"):
             # issue #164: トラフィックソースと検索語句はAnalytics APIが
             # 返せる範囲だけ取得する。取得できない動画・種別は0や「なし」と
             # 推測せず、空のまま（fail-closed）。両者は別々のtry/statusで
@@ -495,11 +503,6 @@ def sync(
                     "維持率カーブreadback失敗。平均指標のみ保存: "
                     f"{str(exc)[:400]}"
                 )
-        except Exception as exc:  # API無効・一時障害でもData API snapshotは残す
-            analytics_status["reason"] = (
-                "Analytics readback失敗。Data API snapshotのみ保存: "
-                f"{str(exc)[:400]}"
-            )
     else:
         analytics_status["reason"] = (
             "YouTube Analytics APIをOAuthクライアントのGoogle Cloud projectで"

@@ -1193,6 +1193,12 @@ class PerformanceFeedbackTest(unittest.TestCase):
                 "comments": 2,
             }
         ]
+        retention_rows = [
+            {
+                "elapsed_ratio": 0.0,
+                "watch_ratio": 0.90,
+            }
+        ]
         with (
             patch.object(performance.youtube, "video_details", return_value=details),
             patch.object(performance.youtube, "_token_has_scopes", return_value=True),
@@ -1202,16 +1208,26 @@ class PerformanceFeedbackTest(unittest.TestCase):
                 "video_share_metrics",
                 side_effect=RuntimeError("share metrics broken"),
             ),
-            patch.object(performance.youtube, "video_traffic_sources", return_value={}),
+            patch.object(
+                performance.youtube,
+                "video_traffic_sources",
+                return_value={"id-0": {"YT_SEARCH": 40}},
+            ),
             patch.object(
                 performance.youtube,
                 "video_search_terms",
-                return_value=({}, {}),
+                return_value=(
+                    {"id-0": [{"term": "ショート 企画", "views": 30}]},
+                    {},
+                ),
             ),
             patch.object(
                 performance.youtube,
                 "video_retention_curves",
-                return_value=({}, {}),
+                return_value=(
+                    {"id-0": retention_rows},
+                    {},
+                ),
             ),
         ):
             snapshot = performance.sync(
@@ -1224,6 +1240,62 @@ class PerformanceFeedbackTest(unittest.TestCase):
         # 90日analyticsは保持される。
         self.assertEqual(snapshot["videos"][0]["analytics"]["views"], 100)
         self.assertNotIn("share_30d", snapshot["videos"][0])
+        # traffic/search/retentionも保持される。
+        self.assertTrue(snapshot["traffic_sources"]["available"])
+        self.assertTrue(snapshot["search_terms"]["available"])
+        self.assertTrue(snapshot["retention_curve"]["available"])
+        video = snapshot["videos"][0]
+        self.assertEqual(
+            video["analytics"]["traffic_sources"], {"YT_SEARCH": 40}
+        )
+        # 検索語句はgap_query付き動画だけ照会されるため、この動画では空。
+        self.assertEqual(video["analytics"]["search_terms"], [])
+        self.assertEqual(video["analytics"]["retention_curve"], retention_rows)
+
+    def test_sync_share_metrics_runs_even_when_90d_analytics_fails(self) -> None:
+        """issue #144 (Sol review指摘): 90日Analyticsが失敗しても共有率
+        専用クエリは独立に実行され、`share_30d` が保存される。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_analytics",
+                side_effect=RuntimeError("90d analytics broken"),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                return_value=[
+                    {"video_id": "id-0", "views": 500, "shares": 8}
+                ],
+            ) as share_metrics_mock,
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(snapshot["analytics"]["available"])
+        share_metrics_mock.assert_called_once()
+        self.assertTrue(snapshot["share_30d"]["available"])
+        self.assertEqual(
+            snapshot["videos"][0]["share_30d"],
+            {"shares": 8, "views": 500},
+        )
 
     def test_analytics_relative_signal_creates_traceable_guarded_guidance(self) -> None:
         videos = []

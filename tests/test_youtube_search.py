@@ -330,16 +330,20 @@ class YouTubeSearchTest(unittest.TestCase):
 
     def test_video_share_metrics_batches_beyond_200_ids(self) -> None:
         """issue #144 (Sol review指摘): 201件では2リクエストへ分割され、
-        両方の結果が結合される。"""
+        両方の結果が結合される。第2バッチの対象IDも実IDであることを検証する。"""
         ids = [f"id-{index:03d}" for index in range(201)]
         reports = mock.Mock()
 
         def _query(**kwargs):
             filters = str(kwargs["filters"])
-            count = filters.count(",") + 1
+            requested = [
+                part
+                for part in filters.replace("video==", "").split(",")
+                if part
+            ]
             rows = [
-                [f"id-{index:03d}", count, 1]
-                for index in range(count)
+                [video_id, 100, 1]
+                for video_id in requested
             ]
             return mock.Mock(
                 execute=lambda: {
@@ -366,6 +370,16 @@ class YouTubeSearchTest(unittest.TestCase):
             )
         self.assertEqual(len(results), 201)
         self.assertEqual(reports.query.call_count, 2)
+        # 第2バッチの照会対象は末尾の id-200 だけ。
+        self.assertEqual(
+            reports.query.call_args_list[1].kwargs["filters"],
+            "video==id-200",
+        )
+        # 結果ID集合は入力と一致する。
+        self.assertEqual(
+            {row["video_id"] for row in results},
+            set(ids),
+        )
 
     def test_video_share_metrics_empty_input_returns_without_api(self) -> None:
         """issue #144 (Sol review指摘): 空IDでは認証・API buildを行わない。"""

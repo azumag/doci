@@ -1222,6 +1222,38 @@ class ShareRateTest(unittest.TestCase):
         self.assertNotIn("`no-trait`", text)
         self.assertNotIn("共有率1%超の動画の構造", text)
 
+    def test_share_text_shows_up_to_five_below_one_percent(self) -> None:
+        """issue #144 (Sol review指摘): 1%超の動画が無い場合、1%以下の動画を
+        最大5本まで参考表示する（1本なら個別表示、6本なら5本＋要約）。"""
+        one = {
+            "videos": [
+                {
+                    "video_id": "low-1",
+                    "corner": "shorts",
+                    "share_30d": {"views": 1000, "shares": 3},
+                }
+            ]
+        }
+        text_one = performance_report._share_text(one, "shorts")
+        self.assertIn("`low-1`", text_one)
+        self.assertIn("共有率 0.300%", text_one)
+
+        six_videos = {
+            "videos": [
+                {
+                    "video_id": f"low-{index}",
+                    "corner": "shorts",
+                    "share_30d": {"views": 1000, "shares": 3},
+                }
+                for index in range(6)
+            ]
+        }
+        text_six = performance_report._share_text(six_videos, "shorts")
+        for index in range(5):
+            self.assertIn(f"`low-{index}`", text_six)
+        self.assertNotIn("`low-5`", text_six)
+        self.assertIn("他 1 本は共有率1%以下", text_six)
+
     def test_share_text_is_fail_closed_when_missing(self) -> None:
         snapshot = {
             "videos": [

@@ -686,8 +686,9 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
 
     issue #144 の対象は shorts のみ。`share_30d`（過去30日集計）を使って
     共有率を算出し、1%超の動画の構造（format_traits）を優先表示する。
-    1%以下・取得不可の動画は件数要約に留め、表示上限（`_SHARE_DISPLAY_LIMIT`）
-    を超えない。再生数偏重の評価を避けるための補助指標。
+    1%超の動画がない場合は、1%以下の動画を最大5本まで参考表示する。
+    表示上限（`_SHARE_DISPLAY_LIMIT`）を超えない。再生数偏重の評価を避けるための
+    補助指標。
     """
     if corner != "shorts":
         return "- 共有率: この節は shorts のみ対象です"
