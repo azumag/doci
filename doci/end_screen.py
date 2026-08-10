@@ -57,6 +57,9 @@ _PLAN_FIELDS = (
     "source",
     "warnings",
 )
+_TIMESTAMP_FIELD_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
 
 
 class EndScreenError(ValueError):
@@ -177,10 +180,16 @@ def _validate_manifest_plan(data: dict, path: Path) -> None:
     element = str(setup.get("element") or "")
     if element != "video":
         raise EndScreenError("end screen element must be a single video element")
-    link_id = str(setup.get("link_video_id") or "")
+    link_id_raw = setup.get("link_video_id")
+    if not isinstance(link_id_raw, str):
+        raise EndScreenError("link_video_id must be a string")
+    link_id = link_id_raw
     if not _LINK_VIDEO_ID_RE.fullmatch(link_id):
         raise EndScreenError("end screen requires a valid link_video_id")
-    video_id = str(data.get("video_id") or "")
+    video_id_raw = data.get("video_id")
+    if not isinstance(video_id_raw, str):
+        raise EndScreenError("video_id must be a string")
+    video_id = video_id_raw
     if not _VIDEO_ID_RE.fullmatch(video_id):
         raise EndScreenError(f"invalid video_id: {video_id!r}")
     if link_id == video_id:
@@ -210,8 +219,41 @@ def _validate_manifest_plan(data: dict, path: Path) -> None:
         raise EndScreenError("source youtube_privacy must be public or unlisted")
 
 
+def _validate_timestamp(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _TIMESTAMP_FIELD_RE.fullmatch(value):
+        raise EndScreenError(f"{label} must be an ISO-8601 timestamp string")
+    return value
+
+
+def _validate_manifest_status(data: dict) -> None:
+    """status別の状態schemaを検証する（planned/running/terminal）。"""
+    status = str(data.get("status") or "")
+    started_at = data.get("started_at")
+    completed_at = data.get("completed_at")
+    result = data.get("result")
+    if status == "planned":
+        if started_at is not None:
+            raise EndScreenError("planned manifest must not have started_at")
+        if completed_at is not None:
+            raise EndScreenError("planned manifest must not have completed_at")
+        if result is not None:
+            raise EndScreenError("planned manifest must not have result")
+    elif status == "running":
+        _validate_timestamp(started_at, "started_at")
+        if completed_at is not None:
+            raise EndScreenError("running manifest must not have completed_at")
+        if result is not None:
+            raise EndScreenError("running manifest must not have result")
+    elif status in ("completed", "invalidated"):
+        _validate_timestamp(started_at, "started_at")
+        _validate_timestamp(completed_at, "completed_at")
+    else:
+        raise EndScreenError(f"invalid status: {status!r}")
+
+
 def _validate_manifest_result(data: dict, path: Path) -> None:
     _validate_manifest_plan(data, path)
+    _validate_manifest_status(data)
     result = data.get("result")
     if not isinstance(result, dict):
         raise EndScreenError("result must be an object")
@@ -231,15 +273,7 @@ def _validate_manifest_result(data: dict, path: Path) -> None:
             raise EndScreenError("non-stopped outcomes require completed status")
         if result.get("setup_unchanged_confirmed") is not True:
             raise EndScreenError("setup_unchanged_confirmed must be true")
-    recorded_at = str(result.get("recorded_at") or "")
-    if not recorded_at:
-        raise EndScreenError("recorded_at is required")
-    started_at = str(data.get("started_at") or "")
-    if not started_at:
-        raise EndScreenError("started_at is required")
-    completed_at = str(data.get("completed_at") or "")
-    if not completed_at:
-        raise EndScreenError("completed_at is required")
+    recorded_at = _validate_timestamp(result.get("recorded_at"), "recorded_at")
     click_rate = result.get("click_rate")
     if outcome in ("insufficient_views", "stopped_changed_setup"):
         if click_rate is not None:
@@ -271,6 +305,7 @@ def _load_manifest(path: Path, *, expected_channel: str | None = None) -> dict:
             f"channel mismatch: expected {expected_channel}, got {data.get('channel')!r}"
         )
     _validate_manifest_plan(data, path)
+    _validate_manifest_status(data)
     if data.get("status") in ("completed", "invalidated"):
         _validate_manifest_result(data, path)
     return data
@@ -559,6 +594,8 @@ def complete_experiment(
                 "setup_unchanged_confirmed": setup_unchanged_confirmed,
             },
         }
+        # 保存前にvalidatorへ通し、実装と検証ロジックの乖離を防ぐ。
+        _validate_manifest_result(manifest, path)
         _write_text_atomic(path.parent / "next_idea_memo.md", _result_memo(manifest))
         _write_manifest(path, manifest)
     return manifest

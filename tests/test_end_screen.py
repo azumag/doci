@@ -526,7 +526,7 @@ class EndScreenTest(unittest.TestCase):
             (
                 "esc-0000000000000012",
                 lambda d: d.update(completed_at=""),
-                "completed_at is required",
+                "ISO-8601",
             ),
         )
         for index, (experiment_id, mutate, message) in enumerate(cases):
@@ -616,6 +616,97 @@ class EndScreenTest(unittest.TestCase):
         fake.write_bytes(real)
         manifest_path.symlink_to(fake)
         with self.assertRaisesRegex(end_screen.EndScreenError, "manifest must not be a symlink"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
+    def test_manifest_rejects_non_string_video_ids(self) -> None:
+        """整数等の非文字列IDを、チェックサム再計算後も拒否する。"""
+        for index, key in enumerate(("video_id", "link_video_id")):
+            experiment_id = f"esc-{index + 30:016d}"
+            video_id = f"AbCdEf{index + 30:05d}"
+            with self.subTest(key=key):
+                self._write_history(video_id=video_id)
+                end_screen.plan_experiment(
+                    self.spec,
+                    video_id=video_id,
+                    link_video_id=self.link_video_id,
+                    content_direct_confirmed=True,
+                    experiment_id=experiment_id,
+                )
+                path = self._manifest_file(experiment_id)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if key == "video_id":
+                    data["video_id"] = 123456
+                else:
+                    data["end_screen_setup"]["link_video_id"] = 123456
+                data["plan_sha256"] = end_screen._plan_checksum(data)
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(end_screen.EndScreenError, "must be a string"):
+                    end_screen.show_experiment(self.spec, experiment_id)
+                shutil.rmtree(
+                    self.spec.output_dir / "end_screen_tests" / experiment_id
+                )
+
+    def test_manifest_status_schema_rejects_invalid_transitions(self) -> None:
+        """planned/runningへのterminal field混入・runningのstarted_at欠落・
+        数値日時を拒否する。"""
+        self._plan()
+        path = self._manifest_file("esc-0000000000000001")
+
+        # plannedへのterminal field混入
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["completed_at"] = self.now.isoformat()
+        data["result"] = {"outcome": "clicked", "click_rate": 3.5}
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "planned manifest must not"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
+        # runningのstarted_at欠落
+        shutil.rmtree(
+            self.spec.output_dir / "end_screen_tests" / "esc-0000000000000001"
+        )
+        self._plan("esc-0000000000000001")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["status"] = "running"
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "started_at"):
+            end_screen.show_experiment(self.spec, "esc-0000000000000001")
+
+        # 数値日時
+        shutil.rmtree(
+            self.spec.output_dir / "end_screen_tests" / "esc-0000000000000001"
+        )
+        self._plan("esc-0000000000000001")
+        end_screen.start_experiment(
+            self.spec,
+            "esc-0000000000000001",
+            studio_setup_confirmed=True,
+        )
+        end_screen.complete_experiment(
+            self.spec,
+            "esc-0000000000000001",
+            outcome="clicked",
+            click_rate=3.5,
+            setup_unchanged_confirmed=True,
+        )
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["started_at"] = 123
+        data["plan_sha256"] = end_screen._plan_checksum(data)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(end_screen.EndScreenError, "ISO-8601"):
             end_screen.show_experiment(self.spec, "esc-0000000000000001")
 
 
