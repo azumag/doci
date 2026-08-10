@@ -222,31 +222,34 @@ def _validate_manifest_plan(data: dict, path: Path) -> None:
 def _validate_timestamp(value: object, label: str) -> str:
     if not isinstance(value, str) or not _TIMESTAMP_FIELD_RE.fullmatch(value):
         raise EndScreenError(f"{label} must be an ISO-8601 timestamp string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EndScreenError(f"{label} is not a valid ISO-8601 timestamp: {value!r}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EndScreenError(f"{label} must include a UTC offset")
     return value
 
 
 def _validate_manifest_status(data: dict) -> None:
     """status別の状態schemaを検証する（planned/running/terminal）。"""
     status = str(data.get("status") or "")
-    started_at = data.get("started_at")
-    completed_at = data.get("completed_at")
-    result = data.get("result")
     if status == "planned":
-        if started_at is not None:
-            raise EndScreenError("planned manifest must not have started_at")
-        if completed_at is not None:
-            raise EndScreenError("planned manifest must not have completed_at")
-        if result is not None:
-            raise EndScreenError("planned manifest must not have result")
+        for field in ("started_at", "completed_at", "result"):
+            if field in data:
+                raise EndScreenError(
+                    f"planned manifest must not have {field}"
+                )
     elif status == "running":
-        _validate_timestamp(started_at, "started_at")
-        if completed_at is not None:
-            raise EndScreenError("running manifest must not have completed_at")
-        if result is not None:
-            raise EndScreenError("running manifest must not have result")
+        _validate_timestamp(data.get("started_at"), "started_at")
+        for field in ("completed_at", "result"):
+            if field in data:
+                raise EndScreenError(
+                    f"running manifest must not have {field}"
+                )
     elif status in ("completed", "invalidated"):
-        _validate_timestamp(started_at, "started_at")
-        _validate_timestamp(completed_at, "completed_at")
+        _validate_timestamp(data.get("started_at"), "started_at")
+        _validate_timestamp(data.get("completed_at"), "completed_at")
     else:
         raise EndScreenError(f"invalid status: {status!r}")
 

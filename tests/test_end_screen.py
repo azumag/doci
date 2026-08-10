@@ -709,6 +709,85 @@ class EndScreenTest(unittest.TestCase):
         with self.assertRaisesRegex(end_screen.EndScreenError, "ISO-8601"):
             end_screen.show_experiment(self.spec, "esc-0000000000000001")
 
+    def test_manifest_status_schema_rejects_explicit_null_fields(self) -> None:
+        """planned/runningへの明示的なnullフィールド混入を拒否する。"""
+        for index, field in enumerate(("started_at", "completed_at", "result")):
+            experiment_id = f"esc-{index + 40:016d}"
+            video_id = f"AbCdEf{index + 40:05d}"
+            with self.subTest(field=field):
+                self._write_history(video_id=video_id)
+                end_screen.plan_experiment(
+                    self.spec,
+                    video_id=video_id,
+                    link_video_id=self.link_video_id,
+                    content_direct_confirmed=True,
+                    experiment_id=experiment_id,
+                )
+                path = self._manifest_file(experiment_id)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data[field] = None
+                data["plan_sha256"] = end_screen._plan_checksum(data)
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    end_screen.EndScreenError,
+                    f"planned manifest must not have {field}",
+                ):
+                    end_screen.show_experiment(self.spec, experiment_id)
+                shutil.rmtree(
+                    self.spec.output_dir / "end_screen_tests" / experiment_id
+                )
+
+    def test_manifest_timestamp_rejects_impossible_datetimes(self) -> None:
+        """正規表現に一致しても実在しない日時（2月30日・月13・時刻25時・
+        不正offset）を拒否する。"""
+        for index, bad in enumerate(
+            (
+            "2026-02-30T00:00:00+00:00",
+            "2026-13-01T00:00:00+00:00",
+            "2026-01-01T25:00:00+00:00",
+            "2026-01-01T00:00:00+99:99",
+            )
+        ):
+            experiment_id = f"esc-{index + 50:016d}"
+            video_id = f"AbCdEf{index + 50:05d}"
+            with self.subTest(bad=bad):
+                self._write_history(video_id=video_id)
+                end_screen.plan_experiment(
+                    self.spec,
+                    video_id=video_id,
+                    link_video_id=self.link_video_id,
+                    content_direct_confirmed=True,
+                    experiment_id=experiment_id,
+                )
+                end_screen.start_experiment(
+                    self.spec,
+                    experiment_id,
+                    studio_setup_confirmed=True,
+                )
+                end_screen.complete_experiment(
+                    self.spec,
+                    experiment_id,
+                    outcome="clicked",
+                    click_rate=3.5,
+                    setup_unchanged_confirmed=True,
+                )
+                path = self._manifest_file(experiment_id)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data["started_at"] = bad
+                data["plan_sha256"] = end_screen._plan_checksum(data)
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(end_screen.EndScreenError):
+                    end_screen.show_experiment(self.spec, experiment_id)
+                shutil.rmtree(
+                    self.spec.output_dir / "end_screen_tests" / experiment_id
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
