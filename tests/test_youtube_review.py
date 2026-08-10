@@ -177,6 +177,48 @@ class ThemeAssessmentTest(unittest.TestCase):
         self.assertFalse(result.eligible_for_public)
         self.assertEqual(result.privacy, "unlisted")
 
+    def test_shorts_without_three_pauses_is_not_public(self) -> None:
+        """issue #150: shorts台本は情報を留める間（休止表現）が3箇所ないと
+        自動公開しない。"""
+        script = _assessment_script()
+        script["narration"] = (
+            "YouTubeショートの視聴者維持率を確認し、冒頭離脱の位置を変えます。"
+            "情報を詰め込みすぎると急落します。"
+        )
+
+        result = youtube_review.assess(script, corner_key="shorts")
+
+        self.assertFalse(result.eligible_for_public)
+        self.assertEqual(result.privacy, "unlisted")
+        self.assertTrue(
+            any("3箇所ありません" in reason for reason in result.reasons)
+        )
+
+    def test_shorts_with_three_pauses_is_public_when_other_fields_ok(self) -> None:
+        """issue #150: shorts台本に休止表現が3箇所あればpauseガードは発動しない。"""
+        script = _assessment_script()
+        script["narration"] = (
+            "YouTubeショートの視聴者維持率を確認します。……"
+            "冒頭離脱が起きる位置を変えます。……"
+            "情報を詰め込みすぎると急落します。……"
+            "次の一本で緩急を試します。"
+        )
+
+        result = youtube_review.assess(script, corner_key="shorts")
+
+        self.assertTrue(result.eligible_for_public)
+        self.assertEqual(result.privacy, "public")
+
+    def test_non_shorts_corner_ignores_pause_gate(self) -> None:
+        """issue #150: video等の他のcornerにはpauseガードを適用しない。"""
+        script = _assessment_script()
+        script["narration"] = "休止表現のない通常の説明文です。"
+
+        result = youtube_review.assess(script, corner_key="video")
+
+        self.assertTrue(result.eligible_for_public)
+        self.assertEqual(result.privacy, "public")
+
     def test_no_research_is_safe_unlisted_fallback(self) -> None:
         result = youtube_review.assess(
             {"title": "幸福の正体", "description": "睡眠データの話"}

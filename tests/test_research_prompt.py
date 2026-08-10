@@ -1709,6 +1709,48 @@ class ResearchPromptTest(unittest.TestCase):
         ):
             self.assertIn(rule, prompt)
 
+    def test_youtube_growth_pause_pacing_rule_reaches_research_prompt(self) -> None:
+        """issue #150: corner_shorts.md の「情報を留める間を3箇所」ルールが
+        リサーチプロンプトのチャンネルガイダンスとして反映される。"""
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["shorts"]
+        raw = json.dumps(
+            {
+                "topic": "ショートの情報密度と緩急設計",
+                "viewer_action": (
+                    "YouTubeアナリティクスの維持率グラフで急落点を確認する"
+                ),
+                "theme_fit": "clear",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/9314355",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+            mock.patch.object(research.llm, "run_claude", return_value=raw) as run_mock,
+        ):
+            research.web_research(
+                corner,
+                [],
+                spec,
+                backend_override="claude",
+                require_youtube_examples=False,
+            )
+
+        prompt = run_mock.call_args.args[0]
+        for rule in (
+            "情報を留める間",
+            "3箇所",
+            "離脱の急落点",
+            "1本の結果だけで効果を断定しません",
+        ):
+            self.assertIn(rule, prompt)
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
             mock.patch.object(config, "RESEARCH_BACKEND", "opencode-go"),

@@ -51,6 +51,8 @@ _CONTENT_GAP_MISLEADING_MARKERS = (
     "検索されていない題材",
     "検索されてない題材",
 )
+_PAUSE_MARKERS = ("……", "…", "——", "――")
+_SHORTS_REQUIRED_PAUSE_COUNT = 3
 _YOUTUBE_OPERATION_MARKERS = (
     "ctr",
     "サムネ",
@@ -193,7 +195,44 @@ def _misleading_content_gap(gap_query: str, *values: str) -> bool:
     return any(marker in joined for marker in _CONTENT_GAP_MISLEADING_MARKERS)
 
 
-def assess(script: dict) -> ThemeAssessment:
+def _pause_count(narration: str) -> int:
+    """narrationに含まれる「情報を留める間」の表現数を数える（issue #150）。"""
+    if not narration:
+        return 0
+    count = 0
+    for marker in _PAUSE_MARKERS:
+        count += narration.count(marker)
+    return count
+
+
+def _subject_reason(
+    gap_query: str,
+    shorts_pause_clear: bool,
+    problem: str,
+    viewer_action: str,
+    topic: str,
+    angle: str,
+    title: str,
+    description: str,
+    narration: str,
+) -> str:
+    if _misleading_content_gap(
+        gap_query,
+        problem,
+        viewer_action,
+        topic,
+        angle,
+        title,
+        description,
+        narration,
+    ):
+        return "コンテンツギャップを「検索されていないテーマ」と誤解する表現がある"
+    if not shorts_pause_clear:
+        return "ショート台本に情報を留める間（休止表現）が3箇所ありません"
+    return "企画・タイトルからYouTube主題を明確に確認できない"
+
+
+def assess(script: dict, corner_key: str | None = None) -> ThemeAssessment:
     """3明示項目と主題適合が全て厳格に確認できる場合だけ自動公開可とする。"""
     research = script.get("_research")
     research = research if isinstance(research, dict) else {}
@@ -208,6 +247,9 @@ def assess(script: dict) -> ThemeAssessment:
     description = _text(script.get("description"))
     narration = _text(script.get("narration"), limit=5000)
     gap_query = _text(research.get("gap_query"), limit=200)
+    shorts_pause_clear = True
+    if corner_key == "shorts":
+        shorts_pause_clear = _pause_count(narration) >= _SHORTS_REQUIRED_PAUSE_COUNT
 
     audience_clear = audience.casefold() == "youtube制作者".casefold()
     problem_markers = _matched_markers(problem, _YOUTUBE_OPERATION_MARKERS)
@@ -241,6 +283,7 @@ def assess(script: dict) -> ThemeAssessment:
     subject_clear = (
         context_clear
         and focus_consistent
+        and shorts_pause_clear
         and not _rejects_youtube_subject(
             audience,
             problem,
@@ -276,8 +319,9 @@ def assess(script: dict) -> ThemeAssessment:
     if not theme_fit_reason:
         reasons.append("主題適合の理由がない")
     if not subject_clear:
-        if _misleading_content_gap(
+        reasons.append(_subject_reason(
             gap_query,
+            shorts_pause_clear,
             problem,
             viewer_action,
             topic,
@@ -285,12 +329,7 @@ def assess(script: dict) -> ThemeAssessment:
             title,
             description,
             narration,
-        ):
-            reasons.append(
-                "コンテンツギャップを「検索されていないテーマ」と誤解する表現がある"
-            )
-        else:
-            reasons.append("企画・タイトルからYouTube主題を明確に確認できない")
+        ))
 
     return ThemeAssessment(
         audience=audience,
@@ -307,9 +346,10 @@ def assess(script: dict) -> ThemeAssessment:
 def choose_privacy(
     spec: ChannelSpec,
     script: dict,
+    corner_key: str | None = None,
 ) -> tuple[str, ThemeAssessment | None]:
     """確認運用が有効なチャンネルだけ、主題適合の自動判定で公開設定を決める。"""
     if not spec.publish.youtube.review.enabled:
         return spec.publish.youtube.privacy, None
-    assessment = assess(script)
+    assessment = assess(script, corner_key=corner_key)
     return assessment.privacy, assessment

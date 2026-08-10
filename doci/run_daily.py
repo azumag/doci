@@ -437,7 +437,9 @@ def _run_once(
     _apply_ambiguous_date_title_check(spec, script)
     from . import youtube_review
 
-    youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)
+    youtube_privacy, theme_assessment = youtube_review.choose_privacy(
+        spec, script, corner_key=corner.key
+    )
     if theme_assessment is not None:
         script["_youtube_theme_review"] = theme_assessment.to_dict()
         if theme_assessment.eligible_for_public:

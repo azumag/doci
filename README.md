@@ -414,6 +414,11 @@ GitHub Issueでの人手承認・ラベル待ち・reconcileの仕組みは廃�
 `enabled`未設定/`false`のチャンネル（`ideology`等）は、この判定を経由せず
 `publish.youtube.privacy`の静的な値（`ideology`は`public`固定）をそのまま使う。
 
+shortsコーナーは、情報密度と緩急を題材にする台本（issue #150）で、narrationに
+情報を留める間（休止表現）が3箇所あることまで自動公開判定に含める。3箇所に満たない
+台本は`unlisted`のままにして、維持率グラフの離脱急落点を後ろへずらす仮説を
+未検証の状態で公開しない。
+
 ### エンゲージメントコメント（issue #86、チャンネル別方式は issue #98）
 
 `pipeline.youtube_auto_engagement_comment = true` のチャンネルは、公開直後の
