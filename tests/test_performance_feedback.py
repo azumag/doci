@@ -1015,7 +1015,8 @@ class PerformanceFeedbackTest(unittest.TestCase):
 
     def test_sync_records_share_30d_separately(self) -> None:
         """issue #144 (Sol review指摘): 共有率は90日集計とは別に、過去30日
-        集計を `share_30d` として保存する。"""
+        集計を `share_30d` として保存する。30暦日（開始-終了が29日差）を
+        太平洋時間基準で計算し、shorts動画だけを専用APIで取得する。"""
         self._history(count=1)
         details = [
             {
@@ -1042,27 +1043,21 @@ class PerformanceFeedbackTest(unittest.TestCase):
                 "shares": 50,
             }
         ]
-        analytics_30d = [
-            {
-                "video_id": "id-0",
-                "views": 500,
-                "engaged_views": 60,
-                "estimated_minutes_watched": 90.0,
-                "average_view_duration": 45.0,
-                "average_view_percentage": 72.4,
-                "likes": 5,
-                "comments": 2,
-                "shares": 8,
-            }
-        ]
         with (
             patch.object(performance.youtube, "video_details", return_value=details),
             patch.object(performance.youtube, "_token_has_scopes", return_value=True),
             patch.object(
                 performance.youtube,
                 "video_analytics",
-                side_effect=[analytics_90d, analytics_30d],
+                return_value=analytics_90d,
             ) as analytics_mock,
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                return_value=[
+                    {"video_id": "id-0", "views": 500, "shares": 8}
+                ],
+            ) as share_metrics_mock,
             patch.object(performance.youtube, "video_traffic_sources", return_value={}),
             patch.object(
                 performance.youtube,
@@ -1082,20 +1077,93 @@ class PerformanceFeedbackTest(unittest.TestCase):
 
         self.assertTrue(snapshot["share_30d"]["available"])
         self.assertEqual(
-            snapshot["share_30d"]["start_date"], "2026-06-26"
+            snapshot["share_30d"]["start_date"], "2026-06-25"
         )
+        self.assertEqual(
+            snapshot["share_30d"]["end_date"], "2026-07-24"
+        )
+        start = datetime.fromisoformat(
+            snapshot["share_30d"]["start_date"]
+        ).date()
+        end = datetime.fromisoformat(
+            snapshot["share_30d"]["end_date"]
+        ).date()
+        self.assertEqual((end - start).days, 29)
         self.assertEqual(
             snapshot["videos"][0]["share_30d"],
             {"shares": 8, "views": 500},
         )
         # 90日集計のanalyticsはそのまま保存される。
         self.assertEqual(snapshot["videos"][0]["analytics"]["shares"], 50)
-        # video_analytics は90日分と30日分の2回呼ばれる。
-        self.assertEqual(analytics_mock.call_count, 2)
+        # video_analytics は90日分の1回だけ（共有率は専用関数）。
+        analytics_mock.assert_called_once()
+        # 専用関数はshorts IDだけ・views,sharesのみで呼ばれる。
+        self.assertEqual(share_metrics_mock.call_args.args[0], ["id-0"])
         self.assertEqual(
-            analytics_mock.call_args_list[1].kwargs["start_date"],
-            "2026-06-26",
+            share_metrics_mock.call_args.kwargs["start_date"], "2026-06-25"
         )
+        self.assertEqual(
+            share_metrics_mock.call_args.kwargs["end_date"], "2026-07-24"
+        )
+
+    def test_sync_share_30d_excludes_non_shorts_videos(self) -> None:
+        """issue #144 (Sol review指摘): 共有率の30日集計はshorts動画だけを
+        照会し、video/analytics動画を渡さない。"""
+        self._history(count=2)  # index 0=shorts, index 1=video
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(2)
+        ]
+        analytics_90d = [
+            {
+                "video_id": f"id-{index}",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+                "shares": 1,
+            }
+            for index in range(2)
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_90d),
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                return_value=[],
+            ) as share_metrics_mock,
+            patch.object(performance.youtube, "video_traffic_sources", return_value={}),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=({}, {}),
+            ),
+        ):
+            performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+        # shorts（id-0）だけが照会対象。
+        self.assertEqual(share_metrics_mock.call_args.args[0], ["id-0"])
 
     def test_analytics_relative_signal_creates_traceable_guarded_guidance(self) -> None:
         videos = []

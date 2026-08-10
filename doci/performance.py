@@ -363,13 +363,29 @@ def sync(
             try:
                 # issue #144: 共有率は「過去30日間」の shares/views で
                 # 評価する。既存の90日集計（analytics_rows）とは別に、
-                # 共有率専用の30日集計を取得して分離保存する。取得できない
-                # 動画は0と推測せず空のまま（fail-closed）。
-                share_start = (current.date() - timedelta(days=30)).isoformat()
-                share_rows = youtube.video_analytics(
-                    video_ids,
+                # 共有率専用の30日集計を取得して分離保存する。Analytics APIの
+                # 日付は太平洋時間基準のため、完了日（基準日-1日）から遡って
+                # 29日差の30暦日を対象にする（UTC日付をそのまま使うと
+                # 日付変更直後にずれる）。対象はshorts動画のみ。
+                from zoneinfo import ZoneInfo
+
+                pt_now = current.astimezone(ZoneInfo("America/Los_Angeles"))
+                share_end = (
+                    pt_now.date() - timedelta(days=1)
+                ).isoformat()
+                share_start = (
+                    datetime.fromisoformat(share_end).date()
+                    - timedelta(days=29)
+                ).isoformat()
+                share_ids = [
+                    video_id
+                    for video_id, row in history_rows.items()
+                    if str(row.get("corner") or "") == "shorts"
+                ]
+                share_rows = youtube.video_share_metrics(
+                    share_ids,
                     start_date=share_start,
-                    end_date=end,
+                    end_date=share_end,
                     token_file=spec.publish.youtube.token,
                     client_secret_file=spec.publish.youtube.client_secret,
                 )
@@ -377,7 +393,7 @@ def sync(
                     {
                         "available": True,
                         "start_date": share_start,
-                        "end_date": end,
+                        "end_date": share_end,
                     }
                 )
                 for row in share_rows:

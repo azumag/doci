@@ -664,11 +664,18 @@ def _share_metrics(row: dict) -> tuple[int, int] | None:
     views = share_30d.get("views")
     if shares is None or views is None:
         return None
+    if isinstance(shares, bool) or isinstance(views, bool):
+        return None
     try:
-        shares_int = int(shares)
-        views_int = int(views)
+        shares_float = float(shares)
+        views_float = float(views)
     except (TypeError, ValueError):
         return None
+    # 小数は整数値であることを確認（100.9 を100へ切り捨てない）。
+    if not shares_float.is_integer() or not views_float.is_integer():
+        return None
+    shares_int = int(shares_float)
+    views_int = int(views_float)
     if shares_int < 0 or views_int <= 0:
         return None
     return shares_int, views_int
@@ -693,9 +700,9 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
     ]
     if not corner_videos:
         return "- 共有率: このcornerの動画がsnapshotにありません"
-    over_one_percent: list[str] = []
     missing_count = 0
     below_or_missing: list[str] = []
+    scored: list[tuple[bool, float, str]] = []
     for row in corner_videos:
         video_id = str(row.get("video_id") or "")
         metrics = _share_metrics(row)
@@ -707,13 +714,31 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
         line = f"- `{video_id}`: 共有率 {rate:.3f}%（共有 {shares_int} / 再生 {views_int}）"
         if shares_int * 100 > views_int:
             traits = row.get("format_traits") or []
-            trait_text = ", ".join(str(t) for t in traits) if traits else "（構造未記録）"
-            over_one_percent.append(f"{line} / 構造: {trait_text}")
+            if traits:
+                trait_text = ", ".join(str(t) for t in traits)
+                scored.append(
+                    (
+                        True,
+                        -rate,
+                        f"{line} / 構造: {trait_text}",
+                    )
+                )
+            else:
+                scored.append(
+                    (
+                        False,
+                        -rate,
+                        f"{line}（構造未記録）",
+                    )
+                )
         else:
             below_or_missing.append(line)
     lines: list[str] = []
     shown = 0
-    for line in over_one_percent:
+    # 構造付き（format_traitsあり）を最優先、次に共有率降順で並べる。
+    for _has_traits, _neg_rate, line in sorted(
+        scored, key=lambda item: (not item[0], item[1])
+    ):
         if shown >= _SHARE_DISPLAY_LIMIT:
             lines.append(
                 f"- 他にも共有率1%超の動画があります（先頭{_SHARE_DISPLAY_LIMIT}件のみ表示）"
@@ -721,7 +746,7 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
             break
         lines.append(line)
         shown += 1
-    if not over_one_percent and below_or_missing:
+    if not scored and below_or_missing:
         for line in below_or_missing[:5]:
             lines.append(line)
         remaining = len(below_or_missing) - 5
@@ -734,7 +759,7 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
             f"- {missing_count} 本は共有率を算出できませんでした"
             "（30日データが無いか不正。推測で補いません）"
         )
-    if over_one_percent:
+    if scored:
         lines.insert(0, "共有率1%超の動画の構造（次の企画の材料）:")
     lines.append(
         "- 共有率は視聴者の能動的な評価の一つの手がかりであり、"

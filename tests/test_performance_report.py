@@ -539,7 +539,7 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
                 {
                     "video_id": "s1",
                     "corner": "shorts",
-                    "format_traits": ["hook:question"],
+                    "format_traits": ["tier:short", "scenes:1_to_4"],
                     "share_30d": {"views": 500, "shares": 8},
                 }
             ]
@@ -565,7 +565,7 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
                 {
                     "video_id": "s2",
                     "corner": "shorts",
-                    "format_traits": ["hook:statement"],
+                    "format_traits": ["tier:short"],
                     "share_30d": {"views": 1000, "shares": 3},
                 }
             ]
@@ -616,7 +616,7 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
                 {
                     "video_id": "v1",
                     "corner": "video",
-                    "format_traits": ["hook:question"],
+                    "format_traits": ["tier:short"],
                     "share_30d": {"views": 100, "shares": 8},
                 }
             ]
@@ -1160,13 +1160,13 @@ class ShareRateTest(unittest.TestCase):
                 {
                     "video_id": "s1",
                     "corner": "shorts",
-                    "format_traits": ["hook:question", "duration:0_to_59s"],
+                    "format_traits": ["tier:short", "duration:0_to_59s", "scenes:1_to_4"],
                     "share_30d": {"views": 500, "shares": 8},
                 },
                 {
                     "video_id": "s2",
                     "corner": "shorts",
-                    "format_traits": ["hook:statement"],
+                    "format_traits": ["tier:short"],
                     "share_30d": {"views": 1000, "shares": 3},
                 },
             ]
@@ -1175,10 +1175,35 @@ class ShareRateTest(unittest.TestCase):
         self.assertIn("共有率 1.600%（共有 8 / 再生 500）", text)
         self.assertIn("共有率1%超の動画の構造", text)
         self.assertIn("`s1`", text)
-        self.assertIn("構造: hook:question, duration:0_to_59s", text)
+        self.assertIn("構造: tier:short, duration:0_to_59s, scenes:1_to_4", text)
         # 1%以下の動画は件数要約に留める。
         self.assertIn("他 1 本は共有率1%以下", text)
         self.assertIn("再生数だけの評価を避けるための補助指標", text)
+
+    def test_share_text_prefers_trait_videos_in_limit(self) -> None:
+        """issue #144 (Sol review指摘): 表示上限内では構造付き（format_traits
+        あり）動画を最優先し、候補化の根拠となった動画を必ず本文へ出す。"""
+        videos = []
+        for index in range(21):
+            videos.append(
+                {
+                    "video_id": f"no-trait-{index}",
+                    "corner": "shorts",
+                    "share_30d": {"views": 100, "shares": 5},
+                }
+            )
+        # 末尾に構造付き1本（候補化の根拠）。
+        videos.append(
+            {
+                "video_id": "with-trait",
+                "corner": "shorts",
+                "format_traits": ["tier:short", "scenes:1_to_4"],
+                "share_30d": {"views": 100, "shares": 5},
+            }
+        )
+        text = performance_report._share_text({"videos": videos}, "shorts")
+        self.assertIn("`with-trait`", text)
+        self.assertIn("構造: tier:short, scenes:1_to_4", text)
 
     def test_share_text_is_fail_closed_when_missing(self) -> None:
         snapshot = {
@@ -1236,6 +1261,16 @@ class ShareRateTest(unittest.TestCase):
         self.assertIsNone(
             performance_report._share_metrics(
                 {"share_30d": {"views": 100, "shares": -1}}
+            )
+        )
+        self.assertIsNone(
+            performance_report._share_metrics(
+                {"share_30d": {"views": True, "shares": 1}}
+            )
+        )
+        self.assertIsNone(
+            performance_report._share_metrics(
+                {"share_30d": {"views": 100.9, "shares": 2.9}}
             )
         )
         self.assertEqual(

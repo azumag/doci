@@ -276,6 +276,61 @@ class YouTubeSearchTest(unittest.TestCase):
             )
         self.assertEqual(results[0]["engaged_views"], 0)
 
+    def test_video_share_metrics_queries_only_views_and_shares(self) -> None:
+        """issue #144: 共有率用に views/shares だけを取得し、shares欠落は
+        None（0にしない）。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "video"},
+                {"name": "views"},
+                {"name": "shares"},
+            ],
+            "rows": [["abc123", 500, 8]],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_share_metrics(
+                ["abc123"],
+                start_date="2026-06-25",
+                end_date="2026-07-24",
+            )
+        self.assertEqual(results[0]["video_id"], "abc123")
+        self.assertEqual(results[0]["views"], 500)
+        self.assertEqual(results[0]["shares"], 8)
+        self.assertEqual(
+            reports.query.call_args.kwargs["metrics"], "views,shares"
+        )
+        self.assertEqual(
+            reports.query.call_args.kwargs["startDate"], "2026-06-25"
+        )
+        self.assertEqual(
+            reports.query.call_args.kwargs["endDate"], "2026-07-24"
+        )
+
+    def test_video_share_metrics_keeps_missing_shares_as_none(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [{"name": "video"}, {"name": "views"}],
+            "rows": [["abc123", 500]],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_share_metrics(
+                ["abc123"],
+                start_date="2026-06-25",
+                end_date="2026-07-24",
+            )
+        self.assertIsNone(results[0]["shares"])
+
     def test_video_traffic_sources_maps_source_type_views(self) -> None:
         """issue #164: トラフィックソース種別ごとのviewsをvideo_idで返す。"""
         reports = mock.Mock()
