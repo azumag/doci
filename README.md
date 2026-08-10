@@ -334,10 +334,13 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
   のAnalytics API `shares`（共有数）÷`views`（再生数）から共有率を算出し、1%を
   超える動画の既存の形式属性（`format_traits`＝tier・尺・scene数・chart有無）を
   次の企画の材料としてレポートに載せる（90日集計の`analytics`とは別に、shorts ID
-  だけを`views,shares`のみで取得して`share_30d`へ分離保存する）。再生数だけの
-  評価を避けるための補助指標であり、共有率1%超かつ構造が記録された動画がsnapshot
-  にあれば形式仮説が無くてもレポート候補として扱う。表示は構造付きを最優先しつつ
-  先頭20件まで、1%以下・取得不可・構造未記録は件数要約に留める。
+  だけを`views,shares`のみで取得して`share_30d`へ分離保存する。従来の90日
+  `analytics`クエリには`shares`を混ぜない）。再生数だけの評価を避けるための
+  補助指標であり、共有率1%超かつ構造が記録された動画がsnapshotにあれば形式仮説が
+  無くてもレポート候補として扱う。表示は構造付きを最優先しつつ先頭20件まで、
+  1%以下・取得不可・構造未記録は件数要約に留める。
+  `share_30d`の`start_date/end_date`はAPIへの要求期間であり、実データが
+  揃っている期間（利用可能最終日）とは必ずしも一致しない。
 
 状態は`output/<channel>/performance_experiments.jsonl`に`proposed → applied →
 evaluated → reported`（または`expired`）として追記される。全cornerが「新仮説なし

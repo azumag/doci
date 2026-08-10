@@ -702,7 +702,8 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
         return "- 共有率: このcornerの動画がsnapshotにありません"
     missing_count = 0
     below_or_missing: list[str] = []
-    scored: list[tuple[bool, float, str]] = []
+    scored: list[tuple[float, str]] = []
+    no_trait_over_one_percent = 0
     for row in corner_videos:
         video_id = str(row.get("video_id") or "")
         metrics = _share_metrics(row)
@@ -718,27 +719,19 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
                 trait_text = ", ".join(str(t) for t in traits)
                 scored.append(
                     (
-                        True,
                         -rate,
                         f"{line} / 構造: {trait_text}",
                     )
                 )
             else:
-                scored.append(
-                    (
-                        False,
-                        -rate,
-                        f"{line}（構造未記録）",
-                    )
-                )
+                no_trait_over_one_percent += 1
         else:
             below_or_missing.append(line)
     lines: list[str] = []
     shown = 0
-    # 構造付き（format_traitsあり）を最優先、次に共有率降順で並べる。
-    for _has_traits, _neg_rate, line in sorted(
-        scored, key=lambda item: (not item[0], item[1])
-    ):
+    # 構造付き（format_traitsあり）を共有率降順で並べる。構造未記録の
+    # 1%超動画は個別表示せず件数要約（Sol review指摘）。
+    for _neg_rate, line in sorted(scored, key=lambda item: item[0]):
         if shown >= _SHARE_DISPLAY_LIMIT:
             lines.append(
                 f"- 他にも共有率1%超の動画があります（先頭{_SHARE_DISPLAY_LIMIT}件のみ表示）"
@@ -746,6 +739,10 @@ def _share_text(snapshot: dict | None, corner: str) -> str:
             break
         lines.append(line)
         shown += 1
+    if no_trait_over_one_percent:
+        lines.append(
+            f"- 構造未記録の共有率1%超: {no_trait_over_one_percent} 本"
+        )
     if not scored and below_or_missing:
         for line in below_or_missing[:5]:
             lines.append(line)

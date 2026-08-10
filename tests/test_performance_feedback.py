@@ -1040,7 +1040,6 @@ class PerformanceFeedbackTest(unittest.TestCase):
                 "average_view_percentage": 72.4,
                 "likes": 5,
                 "comments": 2,
-                "shares": 50,
             }
         ]
         with (
@@ -1093,8 +1092,8 @@ class PerformanceFeedbackTest(unittest.TestCase):
             snapshot["videos"][0]["share_30d"],
             {"shares": 8, "views": 500},
         )
-        # 90日集計のanalyticsはそのまま保存される。
-        self.assertEqual(snapshot["videos"][0]["analytics"]["shares"], 50)
+        # 90日集計のanalyticsにはsharesを混ぜない（共有率はshare_30dのみ）。
+        self.assertNotIn("shares", snapshot["videos"][0]["analytics"])
         # video_analytics は90日分の1回だけ（共有率は専用関数）。
         analytics_mock.assert_called_once()
         # 専用関数はshorts IDだけ・views,sharesのみで呼ばれる。
@@ -1164,6 +1163,67 @@ class PerformanceFeedbackTest(unittest.TestCase):
             )
         # shorts（id-0）だけが照会対象。
         self.assertEqual(share_metrics_mock.call_args.args[0], ["id-0"])
+
+    def test_sync_share_metrics_failure_keeps_other_data(self) -> None:
+        """issue #144 (Sol review指摘): `video_share_metrics` だけが例外を
+        出しても90日analytics・traffic・search・retentionは保持され、
+        `share_30d.available=False` とreasonが保存される。"""
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_90d = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(performance.youtube, "video_analytics", return_value=analytics_90d),
+            patch.object(
+                performance.youtube,
+                "video_share_metrics",
+                side_effect=RuntimeError("share metrics broken"),
+            ),
+            patch.object(performance.youtube, "video_traffic_sources", return_value={}),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=({}, {}),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(snapshot["share_30d"]["available"])
+        self.assertIn("共有率(30日)readback失敗", snapshot["share_30d"]["reason"])
+        # 90日analyticsは保持される。
+        self.assertEqual(snapshot["videos"][0]["analytics"]["views"], 100)
+        self.assertNotIn("share_30d", snapshot["videos"][0])
 
     def test_analytics_relative_signal_creates_traceable_guarded_guidance(self) -> None:
         videos = []

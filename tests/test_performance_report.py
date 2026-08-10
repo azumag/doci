@@ -1160,7 +1160,7 @@ class ShareRateTest(unittest.TestCase):
                 {
                     "video_id": "s1",
                     "corner": "shorts",
-                    "format_traits": ["tier:short", "duration:0_to_59s", "scenes:1_to_4"],
+                    "format_traits": ["tier:short", "duration:under_60s", "scenes:1_to_4"],
                     "share_30d": {"views": 500, "shares": 8},
                 },
                 {
@@ -1175,7 +1175,7 @@ class ShareRateTest(unittest.TestCase):
         self.assertIn("共有率 1.600%（共有 8 / 再生 500）", text)
         self.assertIn("共有率1%超の動画の構造", text)
         self.assertIn("`s1`", text)
-        self.assertIn("構造: tier:short, duration:0_to_59s, scenes:1_to_4", text)
+        self.assertIn("構造: tier:short, duration:under_60s, scenes:1_to_4", text)
         # 1%以下の動画は件数要約に留める。
         self.assertIn("他 1 本は共有率1%以下", text)
         self.assertIn("再生数だけの評価を避けるための補助指標", text)
@@ -1204,6 +1204,23 @@ class ShareRateTest(unittest.TestCase):
         text = performance_report._share_text({"videos": videos}, "shorts")
         self.assertIn("`with-trait`", text)
         self.assertIn("構造: tier:short, scenes:1_to_4", text)
+
+    def test_share_text_summarizes_no_trait_videos(self) -> None:
+        """issue #144 (Sol review指摘): 構造未記録の1%超動画だけの場合は
+        個別ID・構造見出しを出さず、件数要約に留める。"""
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "no-trait",
+                    "corner": "shorts",
+                    "share_30d": {"views": 100, "shares": 5},
+                }
+            ]
+        }
+        text = performance_report._share_text(snapshot, "shorts")
+        self.assertIn("構造未記録の共有率1%超: 1 本", text)
+        self.assertNotIn("`no-trait`", text)
+        self.assertNotIn("共有率1%超の動画の構造", text)
 
     def test_share_text_is_fail_closed_when_missing(self) -> None:
         snapshot = {

@@ -226,9 +226,8 @@ class YouTubeSearchTest(unittest.TestCase):
                 {"name": "averageViewPercentage"},
                 {"name": "likes"},
                 {"name": "comments"},
-                {"name": "shares"},
             ],
-            "rows": [["abc123", 80, 65, 120.5, 90.0, 72.4, 5, 2, 3]],
+            "rows": [["abc123", 80, 65, 120.5, 90.0, 72.4, 5, 2]],
         }
         service = mock.Mock()
         service.reports.return_value = reports
@@ -245,13 +244,11 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(results[0]["average_view_percentage"], 72.4)
         self.assertEqual(results[0]["views"], 80)
         self.assertEqual(results[0]["engaged_views"], 65)
-        self.assertEqual(results[0]["shares"], 3)
         self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video")
         self.assertEqual(reports.query.call_args.kwargs["filters"], "video==abc123")
         self.assertEqual(reports.query.call_args.kwargs["sort"], "-views")
         self.assertEqual(reports.query.call_args.kwargs["maxResults"], 200)
         self.assertIn("engagedViews", reports.query.call_args.kwargs["metrics"])
-        self.assertIn("shares", reports.query.call_args.kwargs["metrics"])
 
     def test_video_analytics_defaults_engaged_views_to_zero_when_absent(self) -> None:
         """`engagedViews`列がレスポンスに含まれない場合でもKeyErrorにならず
@@ -330,6 +327,62 @@ class YouTubeSearchTest(unittest.TestCase):
                 end_date="2026-07-24",
             )
         self.assertIsNone(results[0]["shares"])
+
+    def test_video_share_metrics_batches_beyond_200_ids(self) -> None:
+        """issue #144 (Sol review指摘): 201件では2リクエストへ分割され、
+        両方の結果が結合される。"""
+        ids = [f"id-{index:03d}" for index in range(201)]
+        reports = mock.Mock()
+
+        def _query(**kwargs):
+            filters = str(kwargs["filters"])
+            count = filters.count(",") + 1
+            rows = [
+                [f"id-{index:03d}", count, 1]
+                for index in range(count)
+            ]
+            return mock.Mock(
+                execute=lambda: {
+                    "columnHeaders": [
+                        {"name": "video"},
+                        {"name": "views"},
+                        {"name": "shares"},
+                    ],
+                    "rows": rows,
+                }
+            )
+
+        reports.query.side_effect = _query
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            results = youtube.video_share_metrics(
+                ids,
+                start_date="2026-06-25",
+                end_date="2026-07-24",
+            )
+        self.assertEqual(len(results), 201)
+        self.assertEqual(reports.query.call_count, 2)
+
+    def test_video_share_metrics_empty_input_returns_without_api(self) -> None:
+        """issue #144 (Sol review指摘): 空IDでは認証・API buildを行わない。"""
+        with (
+            mock.patch.object(
+                youtube, "_load_credentials", side_effect=AssertionError
+            ),
+            mock.patch(
+                "googleapiclient.discovery.build", side_effect=AssertionError
+            ),
+        ):
+            results = youtube.video_share_metrics(
+                [],
+                start_date="2026-06-25",
+                end_date="2026-07-24",
+            )
+        self.assertEqual(results, [])
 
     def test_video_traffic_sources_maps_source_type_views(self) -> None:
         """issue #164: トラフィックソース種別ごとのviewsをvideo_idで返す。"""
