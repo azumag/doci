@@ -316,12 +316,14 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
   コンテンツギャップ企画（`topic_metadata.gap_query`が記録された動画）を中心に、
   YouTube検索からの視聴回数・構成比と、`gap_query`と実検索語句の一致状態を表示する。
   取得できないトラフィックソース・検索語句・維持率は0や「なし」と断定せず、
-  取得不可と明記する。形式仮説が無くても、gap動画の検索発見データがあれば
-  レポート候補として扱う。
+  取得不可と明記する。通常動画（`gap_query`未記録）はこの節の評価対象にしない。
+  形式仮説が無くても、`gap_query`が記録されたgap動画がsnapshotにあれば
+  レポート候補として扱う（検索流入・検索語句だけを持つ通常動画では候補にしない）。
 
 状態は`output/<channel>/performance_experiments.jsonl`に`proposed → applied →
 evaluated → reported`（または`expired`）として追記される。全cornerが「新仮説なし
-かつ未報告の検証結果なし」ならissue作成自体をスキップする（無内容issueの防止）。
+かつ未報告の検証結果なし、かつ`gap_query`付きのコンテンツギャップ動画も無い」なら
+issue作成自体をスキップする（無内容issueの防止）。
 
 ### YouTube Studioのタイトル・サムネイルA/Bテスト（issue #151）
 

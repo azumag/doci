@@ -165,6 +165,26 @@ class PerformanceFeedbackTest(unittest.TestCase):
         """issue #164: Analyticsが返すトラフィックソースと検索語句を
         snapshotの各videoのanalyticsへ保存する。取得できない動画は空のまま。"""
         self._history(count=2)
+        rows = []
+        for index in range(2):
+            rows.append(
+                {
+                    "ts": f"2026-07-{index + 1:02d}T00:00:00+00:00",
+                    "channel": self.spec.id,
+                    "corner": "shorts",
+                    "title": f"Title {index}",
+                    "topic": f"Topic {index}",
+                    "video_id": f"id-{index}",
+                    "status": "published",
+                    "topic_metadata": (
+                        {"gap_query": "ネタ切れ 解消"} if index == 0 else {}
+                    ),
+                }
+            )
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
         details = [
             {
                 "video_id": f"id-{index}",
@@ -203,7 +223,7 @@ class PerformanceFeedbackTest(unittest.TestCase):
                 performance.youtube,
                 "video_search_terms",
                 return_value={"id-0": [{"term": "ショート 企画", "views": 30}]},
-            ),
+            ) as search_mock,
         ):
             snapshot = performance.sync(
                 self.spec,
@@ -221,6 +241,8 @@ class PerformanceFeedbackTest(unittest.TestCase):
         video1 = snapshot["videos"][1]
         self.assertIsNone(video1["analytics"])
         self.assertIn("topic_metadata", video0)
+        # gap_query付き動画だけが検索語句APIの照会対象になる（Sol review指摘）。
+        self.assertEqual(search_mock.call_args.args[0], ["id-0"])
 
     def test_traffic_status_change_writes_new_snapshot_row(self) -> None:
         """issue #164 (Sol review指摘4): traffic_sources のavailable/reasonが

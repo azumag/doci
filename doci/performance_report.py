@@ -418,14 +418,15 @@ def _gap_match_status(gap_query: str, terms: list[dict]) -> str:
     """gap_query と実検索語句の対応を判定する（issue #164）。
 
     - `matched`: gap_query が実検索語句と正規化完全一致
-    - `unmatched`: gap_query はあるが実検索語句と一致しない
+    - `not_confirmed`: 取得できた上位語句に完全一致がない。意味的一致や上位25件
+      外に存在する可能性を否定しない（「流入語句なし」と断定しない）
     - `not_evaluated`: gap_query または実検索語句が取得できていない（推測しない）
     """
     gap = _normalise_term(gap_query)
     if not gap or not terms:
         return "not_evaluated"
     actual = {_normalise_term(item.get("term")) for item in terms}
-    return "matched" if gap in actual else "unmatched"
+    return "matched" if gap in actual else "not_confirmed"
 
 
 def _clean_text(value: object, limit: int = 200) -> str:
@@ -448,15 +449,24 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
         for row in snapshot.get("videos", [])
         if str(row.get("corner") or "") == corner
     ]
-    if not corner_videos:
-        return "- Discovery / Satisfaction: このcornerの動画がsnapshotにありません"
-    discovery_lines: list[str] = []
-    satisfaction_lines: list[str] = []
+    gap_videos: list[tuple[dict, str]] = []
     for row in corner_videos:
-        video_id = str(row.get("video_id") or "")
         metadata = row.get("topic_metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
         gap_query = _clean_text(metadata.get("gap_query"), limit=200)
+        if gap_query:
+            gap_videos.append((row, gap_query))
+    if not corner_videos:
+        return "- Discovery / Satisfaction: このcornerの動画がsnapshotにありません"
+    if not gap_videos:
+        return (
+            "- Discovery / Satisfaction: このcornerにコンテンツギャップ企画"
+            "（gap_query記録）の動画がありません。通常動画は対象外です"
+        )
+    discovery_lines: list[str] = []
+    satisfaction_lines: list[str] = []
+    for row, gap_query in gap_videos:
+        video_id = str(row.get("video_id") or "")
         analytics = row.get("analytics")
         analytics = analytics if isinstance(analytics, dict) else {}
         traffic = analytics.get("traffic_sources")
@@ -468,14 +478,14 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
         if total_views > 0 and search_views > 0:
             share = search_views * 100.0 / total_views
             gap_status = _gap_match_status(gap_query, terms)
-            if gap_query:
-                gap_line = {
-                    "matched": f"（狙った検索語「{gap_query}」と一致）",
-                    "unmatched": f"（狙った検索語「{gap_query}」と一致する流入語句なし）",
-                    "not_evaluated": "（gap_queryとの一致判定は材料不足で保留）",
-                }[gap_status]
-            else:
-                gap_line = "（gap_query未記録のため一致判定なし）"
+            gap_line = {
+                "matched": f"（狙った検索語「{gap_query}」と完全一致）",
+                "not_confirmed": (
+                    f"（取得できた上位語句に「{gap_query}」の完全一致なし。"
+                    "意味的一致・上位25件外は未評価）"
+                ),
+                "not_evaluated": "（gap_queryとの一致判定は材料不足で保留）",
+            }[gap_status]
             discovery_lines.append(
                 f"- `{video_id}`: YouTube検索からの視聴 {search_views} 回"
                 f"（全体の {share:.1f}%）{gap_line}"
@@ -579,8 +589,6 @@ def build_cycle_candidate(
     if isinstance(snapshot, dict):
         has_gap_discovery = any(
             str((row.get("topic_metadata") or {}).get("gap_query") or "").strip()
-            or (row.get("analytics") or {}).get("search_terms")
-            or (row.get("analytics") or {}).get("traffic_sources")
             for row in snapshot.get("videos", [])
         )
     has_content = has_section_content or has_gap_discovery

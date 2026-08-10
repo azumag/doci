@@ -170,13 +170,23 @@ def sync(
                     token_file=spec.publish.youtube.token,
                     client_secret_file=spec.publish.youtube.client_secret,
                 )
-                search_by_id = youtube.video_search_terms(
-                    video_ids,
-                    start_date=start,
-                    end_date=end,
-                    token_file=spec.publish.youtube.token,
-                    client_secret_file=spec.publish.youtube.client_secret,
-                )
+                # 検索語句は動画ごとにAPIを呼ぶため、コンテンツギャップ企画
+                # （gap_query記録）の動画だけへ照会対象を絞る。
+                gap_video_ids = [
+                    video_id
+                    for video_id, row in history_rows.items()
+                    if str(
+                        (history._row_topic_metadata(row)).get("gap_query") or ""
+                    ).strip()
+                ]
+                if gap_video_ids:
+                    search_by_id = youtube.video_search_terms(
+                        gap_video_ids,
+                        start_date=start,
+                        end_date=end,
+                        token_file=spec.publish.youtube.token,
+                        client_secret_file=spec.publish.youtube.client_secret,
+                    )
                 traffic_status.update({"available": True})
             except Exception as exc:
                 traffic_status["reason"] = (

@@ -393,6 +393,71 @@ class YouTubeSearchTest(unittest.TestCase):
         )
         self.assertEqual(reports.query.call_args.kwargs["maxResults"], 25)
 
+    def test_video_search_terms_keeps_partial_results_on_individual_failure(self) -> None:
+        """issue #164 (Sol review指摘): 1動画の取得不能が他動画の結果へ
+        波及しない。成功した動画の検索語句は保持する。"""
+        class Boom(Exception):
+            pass
+
+        reports = mock.Mock()
+        ok_page = {
+            "columnHeaders": [
+                {"name": "insightTrafficSourceDetail"},
+                {"name": "views"},
+            ],
+            "rows": [["コンテンツギャップ", 12]],
+        }
+        calls = 0
+
+        def _side_effect(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise Boom("privacy threshold")
+            return ok_page
+
+        reports.query.return_value.execute.side_effect = _side_effect
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            by_video = youtube.video_search_terms(
+                ["fail-1", "ok-2"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(
+            by_video,
+            {"ok-2": [{"term": "コンテンツギャップ", "views": 12}]},
+        )
+
+    def test_video_search_terms_raises_after_consecutive_failures(self) -> None:
+        """issue #164: 連続失敗が続く全体的障害では無制限に照会し続けず、
+        例外を呼び出し元へ伝える。"""
+        class Boom(Exception):
+            pass
+
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = Boom("auth failure")
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaisesRegex(Boom, "auth failure"):
+                youtube.video_search_terms(
+                    ["a", "b", "c", "d"],
+                    start_date="2026-07-01",
+                    end_date="2026-07-26",
+                )
+
+        # 3連続失敗で中断（4件目へは進まない）。
+        self.assertEqual(reports.query.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

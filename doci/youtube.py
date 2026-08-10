@@ -485,21 +485,34 @@ def video_search_terms(
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
     by_video: dict[str, list[dict]] = {}
+    consecutive_failures = 0
+    last_error: Exception | None = None
     for video_id in ids:
-        data = (
-            service.reports()
-            .query(
-                ids="channel==MINE",
-                startDate=start_date,
-                endDate=end_date,
-                metrics="views",
-                dimensions="insightTrafficSourceDetail",
-                filters=f"video=={video_id};insightTrafficSourceType==YT_SEARCH",
-                sort="-views",
-                maxResults=25,
+        # 1動画の取得不能（プライバシー閾値等）が他動画の結果へ波及しないよう
+        # 個別に隔離する。認証・クォータ等の全体的失敗は連続失敗で中断して
+        # 呼び出し元へ例外を伝える（無制限に照会し続けない）。
+        try:
+            data = (
+                service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="views",
+                    dimensions="insightTrafficSourceDetail",
+                    filters=f"video=={video_id};insightTrafficSourceType==YT_SEARCH",
+                    sort="-views",
+                    maxResults=25,
+                )
+                .execute()
             )
-            .execute()
-        )
+        except Exception as exc:
+            consecutive_failures += 1
+            last_error = exc
+            if consecutive_failures >= 3:
+                raise
+            continue
+        consecutive_failures = 0
         headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
         for values in data.get("rows", []):
             row = dict(zip(headers, values))
@@ -508,6 +521,10 @@ def video_search_terms(
             if not term or views <= 0:
                 continue
             by_video.setdefault(video_id, []).append({"term": term, "views": views})
+    if not by_video and last_error is not None:
+        # 全件失敗は全体的な障害として扱い、呼び出し元が status へ記録できる
+        # よう例外を再送出する。
+        raise last_error
     return by_video
 
 
