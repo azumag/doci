@@ -478,7 +478,9 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
                         "retention_curve": [
                             {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
                             {"elapsed_ratio": 0.2, "watch_ratio": 0.85},
-                            {"elapsed_ratio": 0.5, "watch_ratio": 0.40},  # dip
+                            {"elapsed_ratio": 0.3, "watch_ratio": 0.40},  # dip
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.6, "watch_ratio": 0.40},  # dip
                             {"elapsed_ratio": 0.7, "watch_ratio": 0.80},
                             {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
                         ]
@@ -1121,6 +1123,66 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
             [m["kind"] for m in performance.retention_moments(spike)],
             ["spike"],
         )
+
+    def test_retention_moments_dip_requires_both_sides_over_threshold(self) -> None:
+        """issue #149 (Sol review指摘): dipは前後両方との差が閾値以上の場合
+        だけ検出する。片側だけの落差（左0.10・右0.01）では検出しない。"""
+        one_sided = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.60},  # 前0.10・後0.01
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.61},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.70},
+        ]
+        self.assertEqual(performance.retention_moments(one_sided), [])
+
+        both_sides = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.60},  # 前0.10・後0.10
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.70},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.70},
+        ]
+        self.assertEqual(
+            [m["kind"] for m in performance.retention_moments(both_sides)],
+            ["dip"],
+        )
+
+    def test_retention_curve_text_limits_headings_after_ten_moments(self) -> None:
+        """issue #149 (Sol review指摘): 10件到達後は動画見出しを追加せず、
+        省略通知を一度だけ表示する。"""
+        videos = []
+        for index in range(6):
+            videos.append(
+                {
+                    "video_id": f"v{index}",
+                    "corner": "video",
+                    "data_api": {"duration": "PT1M"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.2, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.3, "watch_ratio": 0.40},  # dip
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.85},
+                            {"elapsed_ratio": 0.6, "watch_ratio": 0.40},  # dip
+                            {"elapsed_ratio": 0.7, "watch_ratio": 0.80},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
+                        ]
+                    },
+                }
+            )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": videos,
+        }
+
+        text = performance_report._retention_curve_text(snapshot, "video")
+
+        # 各動画4モーメント × 6動画 = 24。10件まで表示（動画3件目の途中で
+        # 到達するため、見出しは10モーメント分＝動画3件分以内）。
+        self.assertLessEqual(text.count("維持率カーブの山/谷"), 10)
+        self.assertEqual(text.count("先頭10件まで表示します"), 1)
+        self.assertNotIn("- `v5`", text)
 
     def test_retention_moments_ignores_flat_and_short_curves(self) -> None:
         flat = [

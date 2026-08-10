@@ -607,6 +607,9 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
                 "（形状だけで成功・失敗は断定しません）"
             )
             continue
+        if reported_moments >= 10:
+            truncated = True
+            break
         lines.append(f"- `{video_id}`: 維持率カーブの山/谷")
         for moment in annotated:
             if reported_moments >= 10:

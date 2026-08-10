@@ -211,16 +211,15 @@ def retention_moments(
                     "kind": "spike",
                 }
             )
-        elif (
-            delta_prev < 0
-            and delta_next < 0
-            and (
-                -min(delta_prev, delta_next) >= threshold
-                or math.isclose(
-                    -min(delta_prev, delta_next), threshold, abs_tol=1e-9
-                )
-            )
-        ):
+        elif delta_prev < 0 and delta_next < 0:
+            # dipは前後両方との差が閾値以上の場合だけ検出する
+            # （片側だけの落差では検出しない。Sol review指摘）。
+            dip_delta = min(prev - curr, nxt - curr)
+            if not (
+                dip_delta >= threshold
+                or math.isclose(dip_delta, threshold, abs_tol=1e-9)
+            ):
+                continue
             moments.append(
                 {
                     "elapsed_ratio": curve[index]["elapsed_ratio"],
