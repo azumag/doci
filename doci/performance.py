@@ -449,6 +449,117 @@ def retention_moment_scenes(
     return annotated
 
 
+def retention_flat_regions(
+    curve: list[dict],
+    *,
+    max_slope: float = 0.03,
+    min_span_ratio: float = 0.25,
+) -> list[dict]:
+    """維持率カーブの平坦な区間を検出する（issue #117）。
+
+    隣接観測点間の変化量の絶対値が`max_slope`以下の点が連続する区間を平坦と
+    みなし、経過比率の幅（span_ratio）が`min_span_ratio`以上の区間だけを返す。
+    `audienceWatchRatio`は比率（0.9=90%）であり、閾値も比率で指定する。
+    データが少なすぎる・無効値・同一時点の矛盾値は空を返す（fail-closed）。
+    返り値は `{start_ratio, end_ratio, span_ratio, start_watch_ratio,
+    end_watch_ratio, avg_watch_ratio}` のリストで、span_ratio降順に並ぶ。
+    平坦区間の長さは単独で良し悪しを判定せず、該当箇所の内容照合と
+    要素を削る前後の比較に使う手がかりとして返す。
+    """
+    points = _retention_points_in_range(curve, 0.0, 1.0, strict=True)
+    if not points or len(points) < 3:
+        return []
+    regions: list[dict] = []
+    start = 0
+    while start < len(points) - 1:
+        end = start
+        while end < len(points) - 1 and abs(
+            points[end + 1]["watch_ratio"] - points[end]["watch_ratio"]
+        ) <= max_slope + 1e-12:
+            end += 1
+        span = points[end]["elapsed_ratio"] - points[start]["elapsed_ratio"]
+        if span >= min_span_ratio - 1e-12 and end > start:
+            member_ratios = [
+                point["watch_ratio"] for point in points[start : end + 1]
+            ]
+            regions.append(
+                {
+                    "start_ratio": points[start]["elapsed_ratio"],
+                    "end_ratio": points[end]["elapsed_ratio"],
+                    "span_ratio": span,
+                    "start_watch_ratio": points[start]["watch_ratio"],
+                    "end_watch_ratio": points[end]["watch_ratio"],
+                    "avg_watch_ratio": (
+                        sum(member_ratios) / len(member_ratios)
+                        if member_ratios
+                        else None
+                    ),
+                }
+            )
+        start = max(end, start + 1)
+    regions.sort(key=lambda item: item["span_ratio"], reverse=True)
+    return regions
+
+
+def retention_flat_region_scenes(
+    regions: list[dict],
+    script: dict,
+    duration_iso: str | None = None,
+    *,
+    total_seconds: float | None = None,
+) -> list[dict]:
+    """平坦区間を台本のscenesと照合し、秒位置とシーンを付与する。
+
+    `duration_iso`（Data APIのISO 8601動画長）から全長を秒へ変換し、
+    区間の中間点で該当sceneを探す。変換不能・ゼロの場合は秒位置をNoneとし、
+    該当sceneが特定できない場合は `scene_index=None` のまま（推測しない）。
+    """
+    seconds = total_seconds
+    if seconds is None:
+        seconds = _iso8601_duration_seconds(duration_iso)
+    windows = _scene_time_windows(script, seconds or 1.0)
+    annotated: list[dict] = []
+    for region in regions:
+        start_seconds = (
+            region["start_ratio"] * seconds
+            if seconds and seconds > 0
+            else None
+        )
+        end_seconds = (
+            region["end_ratio"] * seconds
+            if seconds and seconds > 0
+            else None
+        )
+        midpoint = (
+            (region["start_ratio"] + region["end_ratio"]) / 2.0
+            if seconds and seconds > 0
+            else None
+        )
+        second = midpoint * seconds if midpoint is not None else None
+        scene = next(
+            (
+                win
+                for win in windows
+                if second is not None and win["start"] <= second <= win["end"]
+            ),
+            None,
+        )
+        annotated.append(
+            {
+                **region,
+                "start_seconds": (
+                    round(start_seconds, 1) if start_seconds is not None else None
+                ),
+                "end_seconds": (
+                    round(end_seconds, 1) if end_seconds is not None else None
+                ),
+                "scene_index": scene["index"] if scene else None,
+                "scene_caption": scene["caption"] if scene else "",
+            }
+        )
+    return annotated
+
+
 def _retention_points_in_range(
     curve: list[dict],
     start_ratio: float,

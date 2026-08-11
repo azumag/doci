@@ -1577,6 +1577,104 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
     return "\n".join(lines)
 
 
+def _retention_flat_region_text(snapshot: dict | None, corner: str) -> str:
+    """維持率カーブの平坦な区間の長さを表示する（issue #117）。
+
+    平坦区間は「核心ではない要素を一つだけ削る」前後で比較する手がかりであり、
+    長さだけで良し悪しを判定しない。シーン位置は動画長をscene数で均等割した
+    近似である（#149/#127と同様）。
+    """
+    if not isinstance(snapshot, dict):
+        return "- 維持率カーブの平坦区間: snapshot未取得のため評価しません"
+    retention_status = snapshot.get("retention_curve")
+    retention_status = (
+        retention_status if isinstance(retention_status, dict) else {}
+    )
+    if not retention_status.get("available"):
+        reason = str(retention_status.get("reason") or "取得不可")
+        return (
+            "- 維持率カーブの平坦区間: 取得に失敗しました"
+            f"（{reason}。推測で補いません）"
+        )
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not corner_videos:
+        return "- 維持率カーブの平坦区間: このcornerの動画がsnapshotにありません"
+    failed = set(retention_status.get("failed_video_ids") or [])
+    lines: list[str] = []
+    reported = 0
+    truncated = False
+    for row in corner_videos:
+        video_id = str(row.get("video_id") or "")
+        if video_id in failed:
+            lines.append(
+                f"- `{video_id}`: 維持率カーブを取得できませんでした"
+                "（動画固有エラー。推測で補いません）"
+            )
+            continue
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        curve = analytics.get("retention_curve")
+        if "retention_curve" not in analytics:
+            continue
+        curve = curve if isinstance(curve, list) else []
+        if not curve:
+            lines.append(
+                f"- `{video_id}`: 維持率カーブを取得できませんでした"
+                "（Shorts等ではAPIが返さない場合があります。推測で補いません）"
+            )
+            continue
+        regions = performance.retention_flat_regions(curve)
+        if not regions:
+            lines.append(
+                f"- `{video_id}`: 明瞭な平坦区間を検出しませんでした"
+                "（変化量の大きい曲線。このデータだけから削る要素は提案しません）"
+            )
+            continue
+        if reported >= 10:
+            truncated = True
+            break
+        script = _script_for_video(row)
+        data_api = row.get("data_api")
+        data_api = data_api if isinstance(data_api, dict) else {}
+        annotated = performance.retention_flat_region_scenes(
+            regions, script, str(data_api.get("duration") or "")
+        )
+        if not annotated or annotated[0].get("start_seconds") is None:
+            lines.append(
+                f"- `{video_id}`: 平坦区間を検出しましたが位置不明"
+                "（動画長を取得できませんでした）。"
+                "該当箇所の内容と照合して確認してください"
+            )
+            reported += 1
+            continue
+        region = annotated[0]
+        reported += 1
+        location = (
+            f"約{region['start_seconds']}〜{region['end_seconds']}秒"
+        )
+        scene = region.get("scene_caption")
+        if scene:
+            location += f"（シーン・均等割近似: {scene}）"
+        lines.append(
+            f"- `{video_id}`: 維持率カーブの最長の平坦区間 {location}"
+            f"（動画の{region['span_ratio'] * 100:.0f}%）。"
+            "平坦区間の長さだけで良し悪しは判定せず、該当箇所の内容を確認し、"
+            "「核心ではない要素」を1つだけ削った前後を同じcorner・近い尺で"
+            "比較してください（反映は運用者が手動で行う）"
+        )
+    if truncated:
+        lines.append("- 他にも平坦区間がありますが、レポートは先頭10件まで表示します")
+    lines.append(
+        "- 平坦区間の長さは維持率が変化しなかった箇所の目安であり、"
+        "それだけで成功・失敗・削るべき要素を判定しません。"
+    )
+    return "\n".join(lines)
+
+
 def _subscribed_status_comparison_for_row(row: dict) -> dict:
     analytics = row.get("analytics")
     analytics = analytics if isinstance(analytics, dict) else {}
@@ -2177,6 +2275,10 @@ def _cycle_body(
             "### 維持率カーブの山/谷とシーン照合（issue #149）",
             "",
             _retention_curve_text(snapshot, section["corner"]),
+            "",
+            "### 維持率カーブの平坦区間の長さ（issue #117）",
+            "",
+            _retention_flat_region_text(snapshot, section["corner"]),
             "",
             "### 購読状態別の維持率と流入元（issue #128）",
             "",

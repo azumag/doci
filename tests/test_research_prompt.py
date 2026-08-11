@@ -1762,6 +1762,56 @@ class ResearchPromptTest(unittest.TestCase):
         ):
             self.assertIn(rule, prompt)
 
+    def test_youtube_growth_subtract_one_element_rule_reaches_all_corner_prompts(
+        self,
+    ) -> None:
+        """issue #117: 「核心ではない要素を一つだけ削る」ルールは全cornerの
+        リサーチプロンプトへ反映される（出典cornerに限定しない）。"""
+        spec = channel_mod.load("youtube-growth")
+        expected = (
+            "核心ではない要素",
+            "一つだけ削り",
+            "平坦な区間",
+            "山=成功・谷=失敗と",
+            "1本の結果だけで効果を断定せず",
+            "反映は運用者が手動で行い",
+        )
+        for corner_key in ("video", "shorts", "analytics"):
+            corner = spec.corners[corner_key]
+            raw = json.dumps(
+                {
+                    "topic": "要素を一つだけ削って比較する編集",
+                    "viewer_action": (
+                        "YouTube Studioの視聴者維持率グラフで平坦な区間を確認する"
+                    ),
+                    "theme_fit": "clear",
+                    "facts": [
+                        {
+                            "claim": "公式情報で確認済み",
+                            "source_url": "https://support.google.com/youtube/answer/9314355",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            with (
+                mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+                mock.patch.object(
+                    research.llm, "run_claude", return_value=raw
+                ) as run_mock,
+            ):
+                research.web_research(
+                    corner,
+                    [],
+                    spec,
+                    backend_override="claude",
+                    require_youtube_examples=False,
+                )
+
+            prompt = run_mock.call_args.args[0]
+            for rule in expected:
+                self.assertIn(rule, prompt)
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
             mock.patch.object(config, "RESEARCH_BACKEND", "opencode-go"),
