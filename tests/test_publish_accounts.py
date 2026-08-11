@@ -32,6 +32,7 @@ class PublishAccountsTest(unittest.TestCase):
 
     def _youtube_spec(self, name: str, *, platforms=("youtube",)) -> PublishSpec:
         token = self.root / name / "youtube_token.json"
+        analytics_token = self.root / name / "youtube_analytics_token.json"
         token.parent.mkdir(parents=True)
         token.write_text("{}", encoding="utf-8")
         return PublishSpec(
@@ -40,6 +41,7 @@ class PublishAccountsTest(unittest.TestCase):
                 privacy="unlisted",
                 client_secret=self.root / name / "client_secret.json",
                 token=token,
+                analytics_token=analytics_token,
             ),
         )
 
@@ -524,6 +526,11 @@ class PublishAccountsTest(unittest.TestCase):
     def test_youtube_analytics_readonly_auth_excludes_upload_scope(self) -> None:
         settings = self._youtube_spec("alpha")
         fake_spec = SimpleNamespace(publish=settings)
+        publish_token_before = settings.youtube.token.read_text(encoding="utf-8")
+
+        def save_selected_token(*_args, **kwargs):
+            kwargs["token_file"].write_text("analytics", encoding="utf-8")
+
         with (
             patch(
                 "sys.argv",
@@ -536,7 +543,9 @@ class PublishAccountsTest(unittest.TestCase):
                 ],
             ),
             patch("doci.channel.load", return_value=fake_spec),
-            patch.object(youtube, "_load_credentials") as load_mock,
+            patch.object(
+                youtube, "_load_credentials", side_effect=save_selected_token
+            ) as load_mock,
             patch("builtins.print"),
         ):
             youtube.main()
@@ -544,6 +553,19 @@ class PublishAccountsTest(unittest.TestCase):
         scopes = load_mock.call_args.kwargs["scopes"]
         self.assertEqual(scopes, youtube.ANALYTICS_READONLY_SCOPES)
         self.assertNotIn(youtube.SCOPES[0], scopes)
+        self.assertTrue(load_mock.call_args.kwargs["exact_scopes"])
+        self.assertEqual(
+            load_mock.call_args.kwargs["token_file"],
+            settings.youtube.analytics_token,
+        )
+        self.assertEqual(
+            settings.youtube.token.read_text(encoding="utf-8"),
+            publish_token_before,
+        )
+        self.assertEqual(
+            settings.youtube.analytics_token.read_text(encoding="utf-8"),
+            "analytics",
+        )
 
     def test_youtube_manage_auth_requests_write_scope(self) -> None:
         settings = self._youtube_spec("alpha")
@@ -580,6 +602,37 @@ class PublishAccountsTest(unittest.TestCase):
             "https://www.googleapis.com/auth/yt-analytics.readonly",
             scopes,
         )
+
+    def test_youtube_analytics_readonly_auth_rejects_publish_token_path(self) -> None:
+        settings = self._youtube_spec("alpha")
+        youtube_settings = SimpleNamespace(
+            privacy=settings.youtube.privacy,
+            client_secret=settings.youtube.client_secret,
+            token=settings.youtube.token,
+            analytics_token=settings.youtube.token,
+        )
+        fake_spec = SimpleNamespace(
+            publish=SimpleNamespace(youtube=youtube_settings)
+        )
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "doci.youtube",
+                    "--auth",
+                    "--channel",
+                    "alpha",
+                    "--analytics-readonly",
+                ],
+            ),
+            patch("doci.channel.load", return_value=fake_spec),
+            patch.object(youtube, "_load_credentials") as load_mock,
+            patch("sys.stderr"),
+            self.assertRaises(SystemExit),
+        ):
+            youtube.main()
+
+        load_mock.assert_not_called()
 
     def test_youtube_whoami_cli_uses_selected_channel_paths(self) -> None:
         settings = self._youtube_spec("alpha")

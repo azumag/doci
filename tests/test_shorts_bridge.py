@@ -24,6 +24,7 @@ class ShortsBridgeTest(unittest.TestCase):
             publish=SimpleNamespace(
                 youtube=SimpleNamespace(
                     token=root / "youtube-token.json",
+                    analytics_token=root / "youtube-analytics-token.json",
                     client_secret=root / "youtube-client-secret.json",
                 )
             ),
@@ -301,7 +302,7 @@ class ShortsBridgeTest(unittest.TestCase):
             start_date="2026-08-11",
             end_date="2026-08-17",
             availability_end_date="2026-08-18",
-            token_file=self.spec.publish.youtube.token,
+            token_file=self.spec.publish.youtube.analytics_token,
             client_secret_file=self.spec.publish.youtube.client_secret,
         )
         self.assertEqual(manifest["status"], "completed")
@@ -604,6 +605,9 @@ class ShortsBridgeYouTubeMetricsTest(unittest.TestCase):
                 end_date="2026-08-17",
                 availability_end_date=availability_end,
             )
+        self.assertTrue(
+            load_credentials.call_args.kwargs["exact_scopes"]
+        )
         return (
             result,
             service.resource,
