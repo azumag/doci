@@ -1812,6 +1812,72 @@ class ResearchPromptTest(unittest.TestCase):
             for rule in expected:
                 self.assertIn(rule, prompt)
 
+    def test_youtube_growth_mid_progress_marker_rule_reaches_research_prompt(
+        self,
+    ) -> None:
+        """issue #112: corner_video.md の「中盤に視覚的な進捗指標を1つ設置」ルールが
+        リサーチプロンプトのチャンネルガイダンスとして反映される。"""
+        spec = channel_mod.load("youtube-growth")
+        corner = spec.corners["video"]
+        raw = json.dumps(
+            {
+                "topic": "中盤の進捗指標で離脱を防ぐ",
+                "viewer_action": (
+                    "YouTube Studioの視聴者維持率グラフで設置地点の離脱状況を確認する"
+                ),
+                "theme_fit": "clear",
+                "facts": [
+                    {
+                        "claim": "公式情報で確認済み",
+                        "source_url": "https://support.google.com/youtube/answer/9314355",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with (
+            mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+            mock.patch.object(research.llm, "run_claude", return_value=raw) as run_mock,
+        ):
+            research.web_research(
+                corner,
+                [],
+                spec,
+                backend_override="claude",
+                require_youtube_examples=False,
+            )
+
+        prompt = run_mock.call_args.args[0]
+        for rule in (
+            "視覚的な進捗指標",
+            "**1つだけ**設置します",
+            "設置位置",
+            "内容と照合します",
+            "成功・失敗を判定せず",
+            "1本の結果だけで効果を断定せず",
+            "反映は運用者が手動で行い",
+        ):
+            self.assertIn(rule, prompt)
+        for other_key in ("shorts", "analytics"):
+            other_corner = spec.corners[other_key]
+            with (
+                mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+                mock.patch.object(
+                    research.llm, "run_claude", return_value=raw
+                ) as other_mock,
+            ):
+                research.web_research(
+                    other_corner,
+                    [],
+                    spec,
+                    backend_override="claude",
+                    require_youtube_examples=False,
+                )
+            self.assertNotIn(
+                "視覚的な進捗指標",
+                other_mock.call_args.args[0],
+            )
+
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
             mock.patch.object(config, "RESEARCH_BACKEND", "opencode-go"),
