@@ -1527,6 +1527,7 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
             {"elapsed_ratio": 0.2, "watch_ratio": 0.70},
         ]
         self.assertIsNone(performance.opening_retention_signal(curve, None))
+        self.assertIsNone(performance.opening_retention_signal(curve, "PT0S"))
         self.assertIsNone(
             performance.opening_retention_signal(
                 [{"elapsed_ratio": 0.0, "watch_ratio": 0.95}], "PT1M"

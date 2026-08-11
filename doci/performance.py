@@ -302,6 +302,7 @@ def opening_retention_signal(
         return None
     if (
         total_seconds is None
+        or total_seconds <= 0
         or not math.isfinite(requested_window)
         or requested_window <= 0
         or not math.isfinite(detection_threshold)
