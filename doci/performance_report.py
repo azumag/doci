@@ -1526,7 +1526,7 @@ def _script_for_video(row: dict) -> dict:
 
 
 def _bounded_cycle_body(lines: list[str], guardrail_lines: list[str]) -> str:
-    """GitHub issue上限へ余裕を残し、末尾ガードレールを必ず保持する。"""
+    """GitHub issue上限へ余裕を残し、Markdownブロックとガードを保持する。"""
     content = "\n".join(lines).rstrip()
     guardrails = "\n".join(guardrail_lines).rstrip()
     full = f"{content}\n{guardrails}\n"
@@ -1539,7 +1539,16 @@ def _bounded_cycle_body(lines: list[str], guardrail_lines: list[str]) -> str:
     )
     suffix = omission + guardrails + "\n"
     budget = max(0, _CYCLE_BODY_MAX_CHARS - len(suffix))
-    return content[:budget].rstrip() + suffix
+    kept_blocks: list[str] = []
+    used = 0
+    for block in lines:
+        separator_length = 1 if kept_blocks else 0
+        if used + separator_length + len(block) > budget:
+            break
+        kept_blocks.append(block)
+        used += separator_length + len(block)
+    bounded_content = "\n".join(kept_blocks).rstrip()
+    return bounded_content + suffix
 
 
 def _cycle_body(

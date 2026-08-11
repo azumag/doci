@@ -506,10 +506,16 @@ def _run_once(
         speed=v.speed, pitch=v.pitch, intonation=v.intonation,
         intonation_vary=v.intonation_vary, volume=v.volume,
     )
-    script["_tts_timing"] = _tts_timing_payload(tts)
-    script_path.write_text(
-        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    try:
+        script["_tts_timing"] = _tts_timing_payload(tts)
+    except Exception as exc:  # noqa: BLE001
+        # 後日分析用provenanceの不備で、合成済み動画の生成・投稿を止めない。
+        script.pop("_tts_timing", None)
+        _log(f"TTS合成時刻の保存をスキップ（動画生成は続行）: {exc}")
+    else:
+        script_path.write_text(
+            json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     _log(f"narration {tts.duration:.1f}s (spk{v.speaker} speed{v.speed} into{v.intonation})")
 
     # 2.5) 尺が決まったので向き・サイズを決める。longform(>180s=YouTube通常動画)は横16:9、

@@ -1199,6 +1199,30 @@ max_uploads_per_day = {max_uploads_per_day}
             },
         )
 
+    def test_run_daily_invalid_tts_timing_does_not_abort_publish(self) -> None:
+        """issue #125: 補助provenance不良で生成・投稿を止めない。"""
+        spec = self._review_spec("review-invalid-tts-timing")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "invalid-timing-123",
+            tts_segments=[voicevox.Segment("   ", 0.0, 2.0)],
+        )
+
+        self.assertTrue(publish_mock.called)
+        self.assertEqual(result["video_id"], "invalid-timing-123")
+        saved = json.loads(
+            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("_tts_timing", saved)
+        self.assertEqual(
+            saved["_thumbnail_provenance"]["youtube_set_status"], "set"
+        )
+
     def test_run_daily_records_shortened_thumbnail_display_text(self) -> None:
         spec = self._review_spec("review-thumbnail-text")
         script = self._review_script(

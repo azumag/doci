@@ -443,6 +443,18 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIn("## ガードレール", body)
         self.assertTrue(body.endswith("- 一度に試す変数は1つ\n"))
 
+    def test_cycle_body_cap_does_not_split_markdown_block(self) -> None:
+        oversized_inline_code = "`" + ("x" * 70_000) + "`"
+        body = performance_report._bounded_cycle_body(
+            ["<!-- marker -->", oversized_inline_code, "- 後続ブロック"],
+            ["", "## ガードレール", "", "- 一度に試す変数は1つ"],
+        )
+
+        self.assertNotIn("`", body)
+        self.assertNotIn("後続ブロック", body)
+        self.assertIn("## 表示上限", body)
+        self.assertIn("## ガードレール", body)
+
     def test_build_cycle_candidate_includes_gap_discovery_without_proposal(self) -> None:
         """issue #164 (Sol review指摘6): 形式仮説が無くても、gap動画の
         検索発見データがsnapshotにあればレポート候補を生成する。"""
