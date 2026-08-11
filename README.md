@@ -302,7 +302,8 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
 
 `pipeline.performance_feedback = true`かつ`pipeline.feedback_repository`
 （`owner/repo`）を設定したチャンネルが対象。チャンネル内の全corner分を
-1つのissueにまとめ、corner毎に次の節を書く:
+1つのissueにまとめ、corner毎に次の節を書く。現在のYouTubeチャンネル
+（`youtube-growth`と`ideology`）はいずれも対象:
 
 - **調査内容**: 今回のreadback分析（指標・cohort・対象本数・上位/下位video_id）
 - **実験内容**: 新しい単一trait仮説（cooldown中や比較標本不足の場合は「新仮説なし」）
@@ -319,6 +320,16 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
   取得不可と明記する。通常動画（`gap_query`未記録）はこの節の評価対象にしない。
   形式仮説が無くても、`gap_query`が記録されたgap動画がsnapshotにあれば
   レポート候補として扱う（検索流入・検索語句だけを持つ通常動画では候補にしない）。
+- **冒頭30秒の維持率と次の1本**（issue #142）:
+  最初の観測点から冒頭30秒内の最終観測点までの累計低下と、隣接観測点間で
+  最大の低下区間を算出し、`script.json`のscene（均等割近似）と照合する。
+  30秒未満の動画は全長を対象とし、動画長不明・有効点2点未満は推測せず
+  判定材料不足とする。累計または最大区間の低下が8ポイント以上なら、同じcorner・
+  近い尺/tierの次の1本で冒頭フックだけを変え、同じ指標で比較する手動施策を示す。
+  詳細は最新動画を優先し、同時刻なら低下幅が大きい順に最大10本まで表示する。
+  8ポイントはレポート対象を絞る検知閾値であり、万能な合格ラインではない。
+  dociは編集作業時間を計測せず、台本へ自動適用もしない。運用者が映像・台本と
+  照合し、一度に変える中心変数を1つに絞って反映する。
 - **維持率カーブの山/谷とシーン照合**（issue #149）:
   Analytics APIの`audienceWatchRatio`（比率。0.9=90%）を
   `elapsedVideoTimeRatio`ディメンションで動画ごとに取得し、前後点より8%ポイント
@@ -345,8 +356,8 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
 
 状態は`output/<channel>/performance_experiments.jsonl`に`proposed → applied →
 evaluated → reported`（または`expired`）として追記される。全cornerが「新仮説なし
-かつ未報告の検証結果なし、かつ`gap_query`付きのコンテンツギャップ動画も無い」なら
-issue作成自体をスキップする（無内容issueの防止）。
+かつ未報告の検証結果なし」で、gap動画、冒頭低下、維持率の山/谷、対象となる
+共有率シグナルも無いならissue作成自体をスキップする（無内容issueの防止）。
 
 起動間隔は`StartInterval=86400`（毎日）でlaunchdジョブを登録し、Python側の
 `PERFORMANCE_REPORT_MIN_INTERVAL_HOURS`（既定72時間）ゲートで実質「3日に1回程度」
