@@ -1525,6 +1525,232 @@ def _script_for_video(row: dict) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _production_intent_for_row(row: dict) -> dict[str, str]:
+    """保存済みscript.jsonから、コメント照合に使う制作意図だけを抽出する。"""
+    script = _script_for_video(row)
+    research = script.get("_research")
+    research = research if isinstance(research, dict) else {}
+    intent = {
+        "topic": _clean_text(research.get("topic"), limit=240),
+        "angle": _clean_text(research.get("angle"), limit=320),
+        "viewer_action": _clean_text(research.get("viewer_action"), limit=240),
+        "title": _clean_text(script.get("title"), limit=200),
+    }
+    # topicだけでは「何をどう伝えたかったか」を判定できない。生成時に保存された
+    # angleも揃う動画だけを対象にし、欠落時は現在のタイトル等から推測しない。
+    if not intent["topic"] or not intent["angle"]:
+        return {}
+    return {key: value for key, value in intent.items() if value}
+
+
+def _comment_retention_context(row: dict) -> dict:
+    """コメント照合と組み合わせる実測の序盤・中盤シグナルを1つ選ぶ。"""
+    first_three = _shorts_first_three_signal_for_row(row)
+    if first_three and first_three.get("actionable"):
+        return {
+            "actionable": True,
+            "kind": "shorts_first_three_seconds",
+            "location": (
+                f"約{first_three['start_seconds']:.1f}〜"
+                f"{first_three['end_seconds']:.1f}秒"
+            ),
+            "drop_points": round(
+                max(
+                    float(first_three.get("cumulative_drop_ratio") or 0.0),
+                    float(first_three.get("largest_step_drop_ratio") or 0.0),
+                )
+                * 100,
+                1,
+            ),
+        }
+    opening = _opening_signal_for_row(row)
+    if opening and opening.get("actionable"):
+        drop_from = opening.get("drop_from_seconds")
+        drop_to = opening.get("drop_to_seconds")
+        if drop_from is not None and drop_to is not None:
+            location = f"約{float(drop_from):.1f}〜{float(drop_to):.1f}秒"
+        else:
+            location = f"冒頭{float(opening['window_seconds']):.1f}秒"
+        return {
+            "actionable": True,
+            "kind": "opening_30_seconds",
+            "location": location,
+            "drop_points": round(
+                max(
+                    float(opening.get("cumulative_drop_ratio") or 0.0),
+                    float(opening.get("largest_step_drop_ratio") or 0.0),
+                )
+                * 100,
+                1,
+            ),
+            "scene": _clean_text(opening.get("scene_caption"), limit=120),
+        }
+    midpoint = _thumbnail_opening_signal_for_row(row)
+    if midpoint and midpoint.get("actionable"):
+        return {
+            "actionable": True,
+            "kind": "opening_to_midpoint",
+            "location": (
+                f"約{midpoint['start_seconds']:.1f}〜"
+                f"{midpoint['end_seconds']:.1f}秒"
+            ),
+            "drop_points": round(float(midpoint["decline_ratio"]) * 100, 1),
+        }
+    analytics = row.get("analytics")
+    analytics = analytics if isinstance(analytics, dict) else {}
+    curve = analytics.get("retention_curve")
+    if not isinstance(curve, list) or not curve:
+        return {"actionable": False}
+    try:
+        dips = []
+        for moment in performance.retention_moments(curve):
+            ratio = moment.get("elapsed_ratio")
+            if (
+                moment.get("kind") == "dip"
+                and isinstance(ratio, (int, float))
+                and not isinstance(ratio, bool)
+                and math.isfinite(float(ratio))
+                and 0.0 < float(ratio) <= _THUMBNAIL_MIDPOINT_RATIO
+            ):
+                dips.append(moment)
+        data_api = row.get("data_api")
+        data_api = data_api if isinstance(data_api, dict) else {}
+        annotated = performance.retention_moment_scenes(
+            dips,
+            _script_for_video(row),
+            str(data_api.get("duration") or ""),
+        )
+    except (KeyError, TypeError, ValueError):
+        return {"actionable": False}
+    # 秒位置を確定できない動画は「序盤・中盤」と主張しない。
+    annotated = [
+        item for item in annotated if item.get("elapsed_seconds") is not None
+    ]
+    if not annotated:
+        return {"actionable": False}
+    dip = min(annotated, key=lambda item: float(item["elapsed_ratio"]))
+    second = dip.get("elapsed_seconds")
+    return {
+        "actionable": True,
+        "kind": "retention_dip",
+        "location": (
+            f"約{float(second):.1f}秒" if second is not None else "位置不明"
+        ),
+        "drop_points": None,
+        "scene": _clean_text(dip.get("scene_caption"), limit=120),
+    }
+
+
+def _comment_intent_retention_text(snapshot: dict | None, corner: str) -> str:
+    """最新動画の制作意図と実測離脱をStudioでの手動確認へ接続する。"""
+    if not isinstance(snapshot, dict):
+        return "- 制作意図・コメント: snapshot未取得のため評価しません"
+    rows = [
+        row
+        for row in snapshot.get("videos", [])
+        if isinstance(row, dict) and str(row.get("corner") or "") == corner
+    ]
+    if not rows:
+        return "- 制作意図・コメント: このcornerの動画がsnapshotにありません"
+
+    ranked: list[tuple[float, str, dict]] = []
+    for candidate in rows:
+        published = history._parse_ts(
+            candidate.get("published_at") or candidate.get("history_ts")
+        )
+        video_id = str(candidate.get("video_id") or "")
+        if published is None or not video_id:
+            return (
+                "- 制作意図・コメント: このcornerに公開時刻またはvideo_idを"
+                "確認できない動画があるため、最新動画を推測せず評価しません"
+            )
+        ranked.append((published.timestamp(), video_id, candidate))
+
+    # コメントが多い旧動画へfallbackすると選択バイアスになるため、cornerの
+    # 最新動画を先に固定する。材料不足ならその動画についてfail-closedにする。
+    row = max(ranked, key=lambda item: (item[0], item[1]))[2]
+    video_id_raw = str(row.get("video_id") or "")
+    video_id = _safe_markdown_inline(video_id_raw, limit=100)
+    retention_status = snapshot.get("retention_curve")
+    retention_status = (
+        retention_status if isinstance(retention_status, dict) else {}
+    )
+    failed = set(retention_status.get("failed_video_ids") or [])
+    analytics = row.get("analytics")
+    analytics = analytics if isinstance(analytics, dict) else {}
+    curve = analytics.get("retention_curve")
+    if (
+        not retention_status.get("available")
+        or video_id_raw in failed
+        or not isinstance(curve, list)
+        or not curve
+    ):
+        reason = retention_status.get("reason")
+        if video_id_raw in failed:
+            failures = retention_status.get("failures")
+            failures = failures if isinstance(failures, dict) else {}
+            reason = failures.get(video_id_raw) or "動画固有エラー"
+        reason = str(reason or "最新動画の維持率カーブを取得できません")
+        return (
+            f"- 対象動画: `{video_id}`（このcornerの最新動画）\n"
+            "- 制作意図・コメント: 最新動画の維持率を取得できないため、旧動画へ"
+            "fallbackせず評価しません"
+            f"（{_safe_markdown_inline(reason, limit=300)}。推測で補いません）"
+        )
+    intent = _production_intent_for_row(row)
+    if not intent:
+        return (
+            f"- 対象動画: `{video_id}`（このcornerの最新動画）\n"
+            "- 制作意図・コメント: 保存済みのtopic/angleが揃わないため、現在の"
+            "タイトルから意図を推測せず評価しません"
+        )
+    retention = _comment_retention_context(row)
+    lines = [
+        f"- 対象動画: `{video_id}`（このcornerの最新動画）",
+        "- 保存済み制作意図: "
+        f"題材「{_safe_markdown_inline(intent.get('topic'), limit=240)}」 / "
+        f"切り口「{_safe_markdown_inline(intent.get('angle'), limit=320)}」",
+    ]
+    if retention.get("actionable"):
+        location = _safe_markdown_inline(retention.get("location"), limit=100)
+        scene = _safe_markdown_inline(retention.get("scene"), limit=120)
+        points = retention.get("drop_points")
+        detail = f"実測低下位置 {location}"
+        if isinstance(points, (int, float)) and not isinstance(points, bool):
+            detail += f"（{float(points):.1f}ポイント低下）"
+        if scene:
+            detail += f" / シーン「{scene}」"
+        lines.append(f"- 維持率との照合: {detail}")
+        lines.append(
+            "- Studioでの確認: 対象動画のtop-levelコメントを新しい順に最大12件確認し、"
+            "運営自身のコメントを除く。除外後の分類対象が3件未満なら判定材料不足として"
+            "変更しない。3件以上なら「意図と整合」「別の解釈」「判定不能」へ人が"
+            "分類する。コメント本文・件数・投稿者情報はdociへ入力・保存しない。"
+        )
+        lines.append(
+            "- 次の1本の選択: 分母は運営自身を除外した後の有効標本数とする。"
+            "「別の解釈」が2件以上かつ有効標本の50%以上なら、"
+            "制作意図の中心語を上記低下位置までに1度だけ明示する。"
+            "「意図と整合」が2件以上かつ過半数なら、意図の表現は維持して同位置の"
+            "説明順またはテンポだけを変更する。どちらにも該当しなければ変更しない。"
+            "選んだ1変数以外の題材・構成・形式は固定し、運用者が手動で反映する。"
+        )
+    else:
+        lines.append(
+            "- 維持率との照合: 報告閾値を超える序盤・中盤低下を検出しませんでした"
+        )
+        lines.append(
+            "- Studioコメントとの組み合わせで選ぶ低下位置がないため、この分析から"
+            "次動画の変更を提案しません。"
+        )
+    lines.append(
+        "- コメント投稿者は視聴者全体から自己選択された一部で、新しい順の限定標本です。"
+        "手動確認も"
+        "制作意図が伝わった割合や離脱原因を代表・証明せず、相関を因果と断定しません。"
+    )
+    return "\n".join(lines)
+
+
 def _bounded_cycle_body(lines: list[str], guardrail_lines: list[str]) -> str:
     """GitHub issue上限へ余裕を残し、Markdownブロックとガードを保持する。"""
     content = "\n".join(lines).rstrip()
@@ -1599,6 +1825,10 @@ def _cycle_body(
             "### サムネの約束・合成入力文と30秒→中盤の傾き（issue #125）",
             "",
             _thumbnail_opening_slope_text(snapshot, section["corner"]),
+            "",
+            "### 制作意図・視聴者コメントと序盤/中盤離脱（issue #123）",
+            "",
+            _comment_intent_retention_text(snapshot, section["corner"]),
             "",
             "### 維持率カーブの山/谷とシーン照合（issue #149）",
             "",
