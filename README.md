@@ -406,34 +406,72 @@ YouTube公式仕様どおり、判定指標はクリック率ではなく総再�
 コピー済みサムネイルのSHA-256を`start`時に再検証し、計画後に案が変わっていれば
 Studioでの開始記録を拒否する。
 
-### YouTube終了画面1枠の検証（issue #165）
+### YouTube終了画面の比較実験（issues #165/#171）
 
-通常動画の終了画面を「登録・動画・再生リストを同時に並べるだけ」にせず、次の1本に
-内容が直結するvideo要素を1枠だけ設定する運用を、ローカルのマニフェストで固定して
-記録する（YouTube書込みなし）。Studioのエンゲージメント → 終了画面要素のクリック率で
-検証する。記録先は`output/<channel>/end_screen_tests/<experiment-id>/`。
+通常動画の終了画面について、内容が直結するvideo要素1枠を普遍的な正解にせず、
+`single_related_video`と`multi_element_baseline`を比較variantとしてローカルへ記録する
+（YouTube書込みなし）。全チャネル・全コーナーで利用できるが、対象と遷移先は同じ
+チャネル履歴にある`published`、`public`/`unlisted`の通常動画に限る。記録先は
+`output/<channel>/end_screen_tests/<experiment-id>/`。
+
+`comparison_key`には近い題材・尺を表すcohort名を付け、観測期間は太平洋時間の完了日
+7日または28日に固定する。各variantが同じcorner・comparison_key・観測期間で異なる
+元動画2本以上`observed`になるまで、`summary`は比較材料不足とする。同じ元動画の再実験は
+別の1本として数えない。対象要素クリック率の中央値は記述統計として表示するだけで、
+勝者や因果を決めない。
+
+比較時はtargetと追加要素のtype・selection・timing・positionから`setup_signature`を作る。
+実際のvideo ID、playlist ID、channel ID、URLは各manifestへ保存する一方、signatureでは
+content-specific参照として正規化する。同じvariant内に複数signatureが混在したgroupは
+`incompatible_setup_profiles`として保留し、異なる構成のクリック率を一つの中央値へ混ぜない。
+さらにsingle/multi間でtarget要素のtype・selection・timing・positionが一致しなければ
+`incompatible_cross_variant_target_profile`として保留し、追加要素以外の差を混同しない。
 
 ```bash
-# 次の1本へ直結する終了画面video要素を1枠だけ計画
+# 内容直結のvideo要素1枠を、比較実験の1variantとして計画
 python -m doci.end_screen plan \
   --channel youtube-growth --video-id <video-id> --link-video-id <next-video-id> \
-  --confirm-content-direct
+  --variant single_related_video --comparison-key "同ジャンル-8分級" \
+  --target-timing last_20_seconds_to_end --target-position center \
+  --observation-days 7 --confirm-content-direct
 
-# Studioで1枠だけ設定した後、runningへ進める
+# 複数要素baselineは選択方式・参照先・タイミング・位置まで記録
+python -m doci.end_screen plan \
+  --channel youtube-growth --video-id <video-id> --link-video-id <next-video-id> \
+  --variant multi_element_baseline \
+  --target-timing last_20_seconds_to_end --target-position center \
+  --extra-element '{"type":"subscribe","selection":"current_channel","reference":null,"timing":"last_20_seconds_to_end","position":"bottom_right"}' \
+  --extra-element '{"type":"playlist","selection":"specific","reference":"<playlist-id>","timing":"last_20_seconds_to_end","position":"top_left"}' \
+  --comparison-key "同ジャンル-8分級" \
+  --observation-days 7 --confirm-content-direct
+
+# Studioで計画variantを設定した後、runningへ進める
 python -m doci.end_screen start \
   --channel youtube-growth --experiment-id <experiment-id> \
   --confirm-studio-setup
 
-# 終了画面要素のクリック率を記録
+# 観測期間後、対象video要素のクリック率と遷移先の終了画面流入視聴を記録
 python -m doci.end_screen complete \
   --channel youtube-growth --experiment-id <experiment-id> \
-  --outcome clicked --click-rate 3.5 --confirm-setup-unchanged \
-  --notes "次の一本の冒頭が視聴された"
+  --sample-sufficient --click-rate 3.5 --end-screen-traffic-views 12 \
+  --confirm-period-data-complete --confirm-setup-unchanged
+
+# 同条件の記述統計（勝者判定なし）
+python -m doci.end_screen summary --channel youtube-growth
 ```
 
-`not_clicked`・`insufficient_views`ではクリック率の勝者判定をせず、テスト中に終了
-画面の構成を変更した場合は`--outcome stopped_changed_setup`で`invalidated`にする。
-クリック率は0〜100の範囲のみ受け付ける。結果は`next_idea_memo.md`へ書き出す。
+クリック率は指定したtarget video要素の操作指標、`end-screen-traffic-views`は遷移先動画に
+入った全終了画面トラフィックの視聴数であり、元動画だけへのsource別帰属とはみなさない。
+同じ遷移先・同じ期間の総流入は一つの文脈観測として扱い、値の食い違いを拒否し、variant別
+中央値には使わない。
+公式API文書では`END_SCREEN`のsource detail可否に不整合があるため、dociはsource別の値を
+推測しない。取得不能時は`--insufficient-views --insufficient-reason analytics_unavailable`
+と、取得できないKPIだけを`--missing-metric click_rate`または
+`--missing-metric end_screen_traffic_views`で指定する。取得済みKPIは残し、両方取得不能なら
+両方を指定して`null`にする。低母数時は両KPIを記録したうえで`--insufficient-reason
+low_views`として結論を保留する。テスト中に構成を変えた場合は`--setup-changed`で
+`invalidated`にする。schema v1の既存記録は引き続き読み取りと完了ができるが、新規計画は
+schema v2だけを作成する。結果は`next_idea_memo.md`へ書き出す。
 
 ### Shortsから関連動画への橋渡し検証（issue #138）
 
@@ -558,7 +596,7 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/performance.py` 実績readbackと形式仮説の生成（自動適用はしない）
 - `doci/performance_report.py` 3日毎の実績レポートissueサイクル（issue #92、`run_daily`とは独立）
 - `doci/youtube_ab_test.py` YouTube Studioの通常動画A/Bテスト計画・結果記録（YouTube書込みなし）
-- `doci/end_screen.py` YouTube終了画面1枠の計画・クリック率検証記録（YouTube書込みなし）
+- `doci/end_screen.py` YouTube終了画面variantの比較・二段階KPI記録（YouTube書込みなし）
 - `doci/shorts_bridge.py` Shorts関連動画への橋渡し計画・read-only検証記録（YouTube書込みなし）
 - `doci/feedback_issues.py` issueの重複防止・週次レート制御・GitHub I/O基盤
 - `doci/tactic_issues.py` 動画が紹介するYouTube運用施策(viewer_action)の検知・issue化（issue #90）

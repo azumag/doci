@@ -1669,7 +1669,7 @@ class ResearchPromptTest(unittest.TestCase):
             self.assertIn(rule, prompt)
 
     def test_youtube_growth_end_screen_rule_reaches_research_prompt(self) -> None:
-        """issue #165: corner_video.md の終了画面1枠ルールがリサーチプロンプトの
+        """issue #171: corner_video.md の終了画面比較ルールがリサーチプロンプトの
         チャンネルガイダンスとして反映される。"""
         spec = channel_mod.load("youtube-growth")
         corner = spec.corners["video"]
@@ -1701,13 +1701,24 @@ class ResearchPromptTest(unittest.TestCase):
 
         prompt = run_mock.call_args.args[0]
         for rule in (
-            "登録ボタン・再生リスト",
-            "1枠だけ設定",
-            "終了画面要素の",
-            "クリック率を使い",
+            "1枠は普遍的な最適解ではなく",
+            "single_related_video",
+            "multi_element_baseline",
+            "表示タイミング、位置まで構成として記録",
+            "異なる構成を同じ",
+            "variant標本へ混ぜず",
+            "single/multi間でも対象video要素のタイミングと位置を揃えます",
+            "同じ元動画の再測定を別の1本として数えません",
+            "7日または28日",
+            "対象video要素のクリック率",
+            "トラフィックソース`END_SCREEN`",
+            "元動画やvariantだけの効果として集計・断定せず",
+            "文脈指標",
+            "判定材料不足",
             "万能な合格ラインとして捏造しません",
         ):
             self.assertIn(rule, prompt)
+        self.assertNotIn("1枠だけ設定する運用", prompt)
 
     def test_youtube_growth_pause_pacing_rule_reaches_research_prompt(self) -> None:
         """issue #150: corner_shorts.md の「情報を留める間を3箇所」ルールは
