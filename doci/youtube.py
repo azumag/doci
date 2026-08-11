@@ -650,6 +650,330 @@ def comment_reply_short_metrics(
     }
 
 
+_CHANNEL_PAGE_REPORT_DIMENSIONS = {
+    "day",
+    "video",
+    "insightTrafficSourceType",
+}
+
+
+def _validated_channel_page_rows(
+    data: object,
+    *,
+    dimensions: tuple[str, ...],
+) -> list[dict]:
+    """YT_CHANNEL専用reportの列・provenance・count型を検証する。"""
+    if not isinstance(data, dict):
+        raise RuntimeError("YouTube Analytics returned an invalid report")
+    if not dimensions or any(
+        dimension not in _CHANNEL_PAGE_REPORT_DIMENSIONS
+        for dimension in dimensions
+    ):
+        raise RuntimeError("YouTube Analytics dimensions are invalid")
+    headers = data.get("columnHeaders")
+    if not isinstance(headers, list) or not headers:
+        raise RuntimeError("YouTube Analytics report lacks column headers")
+    expected = {*dimensions, "views"}
+    names: list[str] = []
+    for header in headers:
+        if not isinstance(header, dict):
+            raise RuntimeError("YouTube Analytics column header is invalid")
+        name = header.get("name")
+        if not isinstance(name, str) or name not in expected or name in names:
+            raise RuntimeError("YouTube Analytics column names are invalid")
+        is_dimension = name in dimensions
+        if (
+            header.get("columnType")
+            != ("DIMENSION" if is_dimension else "METRIC")
+            or header.get("dataType")
+            != ("STRING" if is_dimension else "INTEGER")
+        ):
+            raise RuntimeError(
+                f"YouTube Analytics column type is invalid for {name}"
+            )
+        names.append(name)
+    if set(names) != expected or len(names) != len(expected):
+        raise RuntimeError("YouTube Analytics report columns are incomplete")
+    raw_rows = data.get("rows", [])
+    if raw_rows is None:
+        raw_rows = []
+    if not isinstance(raw_rows, list):
+        raise RuntimeError("YouTube Analytics rows are invalid")
+    rows: list[dict] = []
+    for values in raw_rows:
+        if not isinstance(values, list) or len(values) != len(names):
+            raise RuntimeError("YouTube Analytics row width is invalid")
+        row = dict(zip(names, values))
+        for dimension in dimensions:
+            if not isinstance(row[dimension], str) or not row[dimension]:
+                raise RuntimeError(
+                    f"YouTube Analytics {dimension} value is invalid"
+                )
+        views = row["views"]
+        if isinstance(views, bool) or not isinstance(views, int) or views < 0:
+            raise RuntimeError(
+                "YouTube Analytics views must be a non-negative integer"
+            )
+        rows.append(row)
+    return rows
+
+
+def _channel_page_metric_row(service, base: dict) -> dict:
+    """1動画の全viewsとYT_CHANNEL viewsを同じ固定窓で取得する。"""
+    video_id = base["video_id"]
+    start_date = base["start_date"]
+    end_date = base["end_date"]
+    total_data = (
+        service.reports()
+        .query(
+            ids="channel==MINE",
+            startDate=start_date,
+            endDate=end_date,
+            metrics="views",
+            dimensions="video",
+            filters=f"video=={video_id}",
+            maxResults=1,
+        )
+        .execute()
+    )
+    total_rows = _validated_channel_page_rows(
+        total_data,
+        dimensions=("video",),
+    )
+    if len(total_rows) > 1:
+        raise RuntimeError(
+            "YouTube Analytics returned multiple total rows for one video"
+        )
+    if total_rows and total_rows[0]["video"] != video_id:
+        raise RuntimeError(
+            "YouTube Analytics video provenance does not match the request"
+        )
+    if not total_rows:
+        return {
+            **base,
+            "status": "total_unavailable",
+            "views": None,
+            "channel_page_views": None,
+        }
+
+    source_data = (
+        service.reports()
+        .query(
+            ids="channel==MINE",
+            startDate=start_date,
+            endDate=end_date,
+            metrics="views",
+            dimensions="video,insightTrafficSourceType",
+            filters=f"video=={video_id}",
+            sort="-views",
+            maxResults=200,
+        )
+        .execute()
+    )
+    source_rows = _validated_channel_page_rows(
+        source_data,
+        dimensions=("video", "insightTrafficSourceType"),
+    )
+    source_counts: dict[str, int] = {}
+    for source_row in source_rows:
+        if source_row["video"] != video_id:
+            raise RuntimeError(
+                "YouTube Analytics video provenance does not match the request"
+            )
+        source_type = source_row["insightTrafficSourceType"]
+        if source_type in source_counts:
+            raise RuntimeError(
+                "YouTube Analytics returned duplicate traffic-source rows"
+            )
+        source_counts[source_type] = source_row["views"]
+    channel_page_views = source_counts.get("YT_CHANNEL")
+    if channel_page_views is None:
+        return {
+            **base,
+            "status": "channel_page_unavailable",
+            "views": total_rows[0]["views"],
+            "channel_page_views": None,
+        }
+    total_views = total_rows[0]["views"]
+    if channel_page_views > total_views:
+        return {
+            **base,
+            "status": "invalid_counts",
+            "views": total_views,
+            "channel_page_views": channel_page_views,
+        }
+    return {
+        **base,
+        "status": "available",
+        "views": total_views,
+        "channel_page_views": channel_page_views,
+    }
+
+
+def video_channel_page_share_metrics(
+    video_windows: list[dict],
+    *,
+    availability_start_date: str,
+    availability_end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict:
+    """動画ごとの固定期間YT_CHANNEL views / 全viewsを取得する。
+
+    traffic-source reportの日次行で利用可能最終日を先に確認する。APIは
+    `endDate`よりデータ提供が遅い場合に応答期間を黙って短縮するため、固定窓の
+    終了日がその日を超える動画は照会せず`window_incomplete`として返す。
+    """
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+
+    video_specific_reasons = frozenset(
+        {
+            "insighttrafficsourcetype",
+            "privacy",
+            "private",
+            "videonotfound",
+            "invalidvideoid",
+        }
+    )
+
+    def _http_reason(exc: HttpError) -> str:
+        try:
+            details = exc.error_details
+        except Exception:
+            details = None
+        if isinstance(details, list):
+            for entry in details:
+                if isinstance(entry, dict) and entry.get("reason"):
+                    return " ".join(str(entry["reason"]).split()).casefold()
+        public_reason = getattr(exc, "reason", None)
+        if public_reason:
+            return " ".join(str(public_reason).split()).casefold()
+        return ""
+
+    if not video_windows:
+        return {
+            "source": "youtube_analytics_api_v2",
+            "availability_start_date": availability_start_date,
+            "availability_probe_end_date": availability_end_date,
+            "data_through_date": None,
+            "videos": [],
+        }
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+
+    available_days: list[str] = []
+    start_index = 1
+    while True:
+        data = (
+            service.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=availability_start_date,
+                endDate=availability_end_date,
+                metrics="views",
+                dimensions="day,insightTrafficSourceType",
+                sort="day,insightTrafficSourceType",
+                maxResults=200,
+                startIndex=start_index,
+            )
+            .execute()
+        )
+        page = _validated_channel_page_rows(
+            data,
+            dimensions=("day", "insightTrafficSourceType"),
+        )
+        for row in page:
+            day = row["day"]
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                raise RuntimeError("YouTube Analytics day value is invalid")
+            try:
+                date.fromisoformat(day)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "YouTube Analytics day value is invalid"
+                ) from exc
+            available_days.append(day)
+        if len(page) < 200:
+            break
+        start_index += len(page)
+
+    data_through_date = max(available_days) if available_days else None
+    rows: list[dict] = []
+    for window in video_windows:
+        video_id = str(window.get("video_id") or "")
+        start_date = str(window.get("start_date") or "")
+        end_date = str(window.get("end_date") or "")
+        if not video_id:
+            raise RuntimeError("channel-page window lacks video_id")
+        try:
+            start_day = date.fromisoformat(start_date)
+            end_day = date.fromisoformat(end_date)
+        except ValueError as exc:
+            raise RuntimeError("channel-page window date is invalid") from exc
+        if end_day < start_day:
+            raise RuntimeError("channel-page window date range is invalid")
+        base = {
+            "video_id": video_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "window_days": (end_day - start_day).days + 1,
+            "data_through_date": data_through_date,
+        }
+        if data_through_date is None or end_date > data_through_date:
+            rows.append(
+                {
+                    **base,
+                    "status": "window_incomplete",
+                    "views": None,
+                    "channel_page_views": None,
+                }
+            )
+            continue
+
+        try:
+            rows.append(_channel_page_metric_row(service, base))
+        except HttpError as exc:
+            status = int(getattr(exc.resp, "status", 0) or 0)
+            reason = _http_reason(exc)
+            if not (
+                status in {400, 404} and reason in video_specific_reasons
+            ):
+                raise
+            rows.append(
+                {
+                    **base,
+                    "status": "query_failed",
+                    "views": None,
+                    "channel_page_views": None,
+                    "reason": f"HTTP {status}: {reason}",
+                }
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            rows.append(
+                {
+                    **base,
+                    "status": "invalid_response",
+                    "views": None,
+                    "channel_page_views": None,
+                    "reason": str(exc)[:400],
+                }
+            )
+    return {
+        "source": "youtube_analytics_api_v2",
+        "availability_start_date": availability_start_date,
+        "availability_probe_end_date": availability_end_date,
+        "data_through_date": data_through_date,
+        "videos": rows,
+    }
+
+
 def video_analytics(
     video_ids: list[str],
     *,
