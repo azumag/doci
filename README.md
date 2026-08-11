@@ -435,6 +435,55 @@ python -m doci.end_screen complete \
 画面の構成を変更した場合は`--outcome stopped_changed_setup`で`invalidated`にする。
 クリック率は0〜100の範囲のみ受け付ける。結果は`next_idea_memo.md`へ書き出す。
 
+### Shortsから関連動画への橋渡し検証（issue #138）
+
+特定のチャネルや「アナリティクス」コーナー専用ではなく、dociの全チャネル・全コーナー
+に共通する手動検証として扱う。doci履歴で`published`かつ`public`/`unlisted`と確認できる
+元Shortと、同じチャネル履歴にある内容直結の通常動画（`tier=longform`）を固定する。
+橋渡し文は元Shortの
+`script.json`を空白正規化した本文の最終3分の1に開始位置があり、実在しなければならない。
+位置と本文SHA-256も計画へ固定する。YouTube Studioの関連動画設定は人が行い、dociから
+YouTubeへの書込みはしない。Analytics照会には`youtube.readonly`と
+`yt-analytics.readonly`だけを要求し、`youtube.upload`は要求しない。記録先は
+`output/<channel>/shorts_bridge_tests/<experiment-id>/`。
+
+```bash
+# Analyticsだけを使うtokenを新規作成する場合（upload権限なし）
+python -m doci.youtube --auth --analytics-readonly --channel youtube-growth
+
+# 公開済みShortと、内容が直結する次の動画を固定
+python -m doci.shorts_bridge plan \
+  --channel youtube-growth --source-video-id <short-id> \
+  --target-video-id <next-video-id> \
+  --bridge-text "続きは関連動画で確認してください" \
+  --observation-days 7 --confirm-content-direct
+
+# Studioで元Shortの関連動画を手動設定した後、次の太平洋時間の完了日から観測
+python -m doci.shorts_bridge start \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --confirm-studio-setup
+
+# 観測期間終了後、設定が変わっていない場合だけAnalyticsをread-only取得
+python -m doci.shorts_bridge complete \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --confirm-setup-unchanged --notes "次の比較で変える要素"
+
+# 同じsource corner・source/target tier・観測日数の観測だけを比較
+python -m doci.shorts_bridge summary --channel youtube-growth
+```
+
+同一観測期間の元Shortの`views`と、遷移先動画の`RELATED_VIDEO`上位25参照元のうち
+元ShortのIDと一致した`views`を記録する。ただし公式資料はShortsの「関連動画」リンクが
+Analyticsの`RELATED_VIDEO`へ必ず分類されるとは明記していない。参照元行が無い場合は
+0件とせず`insufficient_data`にする。この比率はクリック率ではなく、5%などの万能な
+合格ラインは適用しない。同じ条件の有効な観測が3件以上揃った場合だけmedianを参考表示し、
+因果・勝者・次施策を自動決定しない。観測中に橋渡し文または関連動画設定を変えた場合は
+`complete --setup-changed`で`invalidated`にする。`complete`時は先に`day`次元で`views`の
+利用可能最終日を、最新の完了PT日まで広げて確認する。観測終了日以降の行があれば期間確定と
+みなし、届いていなければ実験を`running`のまま残して同じコマンドを再実行する。観測終了後
+7完了日を待っても行が無い場合は、無再生を0と推測せず`insufficient_data`（取得不可）で
+終了し、比較対象に含めない。要求期間を実取得期間として推測保存しない。
+
 ### YouTube攻略Ch の公開判定
 
 `youtube-growth` は `max_uploads_per_day = 1` とし、JSTで1日1本だけ実投稿する。
@@ -510,6 +559,7 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/performance_report.py` 3日毎の実績レポートissueサイクル（issue #92、`run_daily`とは独立）
 - `doci/youtube_ab_test.py` YouTube Studioの通常動画A/Bテスト計画・結果記録（YouTube書込みなし）
 - `doci/end_screen.py` YouTube終了画面1枠の計画・クリック率検証記録（YouTube書込みなし）
+- `doci/shorts_bridge.py` Shorts関連動画への橋渡し計画・read-only検証記録（YouTube書込みなし）
 - `doci/feedback_issues.py` issueの重複防止・週次レート制御・GitHub I/O基盤
 - `doci/tactic_issues.py` 動画が紹介するYouTube運用施策(viewer_action)の検知・issue化（issue #90）
 - `channels/<id>/` チャンネル定義・ペルソナ・声・BGM

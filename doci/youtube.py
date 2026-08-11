@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import json
 from pathlib import Path
 import re
@@ -19,10 +20,15 @@ from urllib.parse import parse_qs, urlparse
 from . import config
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-ACCOUNT_SCOPES = [*SCOPES, "https://www.googleapis.com/auth/youtube.readonly"]
+YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+ANALYTICS_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/yt-analytics.readonly"
+)
+ANALYTICS_READONLY_SCOPES = [YOUTUBE_READONLY_SCOPE, ANALYTICS_READONLY_SCOPE]
+ACCOUNT_SCOPES = [*SCOPES, YOUTUBE_READONLY_SCOPE]
 ANALYTICS_SCOPES = [
     *ACCOUNT_SCOPES,
-    "https://www.googleapis.com/auth/yt-analytics.readonly",
+    ANALYTICS_READONLY_SCOPE,
 ]
 # videos.update は `youtube` と `youtube.force-ssl` の両方を許可する。
 # 公式scope説明で前者はアカウント全体管理、後者は動画・評価・コメント・字幕に
@@ -98,8 +104,12 @@ def _load_credentials(
     )
     required_scopes = scopes or SCOPES
     auth_flags: list[str] = []
-    if "https://www.googleapis.com/auth/yt-analytics.readonly" in required_scopes:
-        auth_flags.append("--analytics")
+    if ANALYTICS_READONLY_SCOPE in required_scopes:
+        auth_flags.append(
+            "--analytics"
+            if SCOPES[0] in required_scopes
+            else "--analytics-readonly"
+        )
     if MANAGE_SCOPE in required_scopes:
         auth_flags.append("--manage")
     auth_hint = " ".join(
@@ -452,6 +462,162 @@ def video_share_metrics(
                 }
             )
     return results
+
+
+def shorts_bridge_metrics(
+    source_video_id: str,
+    target_video_id: str,
+    *,
+    start_date: str,
+    end_date: str,
+    availability_end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict:
+    """Shortsから関連動画へ遷移した視聴を同一期間で読む（issue #138）。
+
+    分母は元Shortの ``views``、分子候補は遷移先動画の
+    ``insightTrafficSourceType==RELATED_VIDEO`` 詳細のうち、参照元動画IDが
+    元Shortと一致する ``views``。後者は公式APIが返す上位25件だけであり、行が
+    無い場合は0と断定せず ``None`` を返す。これはクリック数ではなく遷移先で
+    発生した視聴数なので、呼び出し側もCTRとは呼ばない。
+
+    最初に ``day`` 次元で ``views`` の利用可能最終日を、観測終了日より後の
+    完了日も含めて確認する。終了日以降の行が無ければ集計クエリを実行せず、
+    呼び出し側が再試行または判定材料不足として終了できるようcountを ``None`` で
+    返す。確認できた場合だけ、元の ``start_date`` / ``end_date`` で元Short合計と
+    遷移先の参照元詳細を読む。
+    """
+    from googleapiclient.discovery import build
+
+    source_id = str(source_video_id or "").strip()
+    target_id = str(target_video_id or "").strip()
+    if not source_id or not target_id:
+        raise ValueError("source_video_id and target_video_id are required")
+    if source_id == target_id:
+        raise ValueError("source_video_id and target_video_id must differ")
+    try:
+        requested_end = date.fromisoformat(end_date)
+        availability_end = date.fromisoformat(availability_end_date)
+    except ValueError as exc:
+        raise ValueError("end dates must be YYYY-MM-DD") from exc
+    if availability_end < requested_end:
+        raise ValueError("availability_end_date must not precede end_date")
+
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_READONLY_SCOPES,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+
+    availability_data = (
+        service.reports()
+        .query(
+            ids="channel==MINE",
+            startDate=start_date,
+            endDate=availability_end_date,
+            metrics="views",
+            dimensions="day",
+            sort="day",
+            maxResults=200,
+        )
+        .execute()
+    )
+    availability_headers = [
+        header.get("name", "")
+        for header in availability_data.get("columnHeaders", [])
+    ]
+    available_dates: list[str] = []
+    for values in availability_data.get("rows", []):
+        row = dict(zip(availability_headers, values))
+        raw_day = str(row.get("day") or "")
+        try:
+            parsed = date.fromisoformat(raw_day)
+        except ValueError:
+            continue
+        if start_date <= parsed.isoformat() <= availability_end_date:
+            available_dates.append(parsed.isoformat())
+    data_through_date = max(available_dates, default=None)
+    base_result = {
+        "source_video_id": source_id,
+        "target_video_id": target_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "availability_probe_end_date": availability_end_date,
+        "views_data_through_date": data_through_date,
+        "source_views": None,
+        "attributed_target_views": None,
+        "attribution_source_type": "RELATED_VIDEO",
+        "attribution_detail_limit": 25,
+    }
+    if data_through_date is None or data_through_date < end_date:
+        return base_result
+
+    source_data = (
+        service.reports()
+        .query(
+            ids="channel==MINE",
+            startDate=start_date,
+            endDate=end_date,
+            metrics="views",
+            dimensions="video",
+            filters=f"video=={source_id}",
+            maxResults=1,
+        )
+        .execute()
+    )
+    source_headers = [
+        header.get("name", "") for header in source_data.get("columnHeaders", [])
+    ]
+    source_views: int | None = None
+    for values in source_data.get("rows", []):
+        row = dict(zip(source_headers, values))
+        if str(row.get("video") or "") != source_id:
+            continue
+        raw_views = row.get("views")
+        if raw_views is None:
+            continue
+        source_views = int(raw_views)
+        break
+
+    target_data = (
+        service.reports()
+        .query(
+            ids="channel==MINE",
+            startDate=start_date,
+            endDate=end_date,
+            metrics="views",
+            dimensions="insightTrafficSourceDetail",
+            filters=(
+                f"video=={target_id};"
+                "insightTrafficSourceType==RELATED_VIDEO"
+            ),
+            sort="-views",
+            maxResults=25,
+        )
+        .execute()
+    )
+    target_headers = [
+        header.get("name", "") for header in target_data.get("columnHeaders", [])
+    ]
+    attributed_views: int | None = None
+    for values in target_data.get("rows", []):
+        row = dict(zip(target_headers, values))
+        if str(row.get("insightTrafficSourceDetail") or "") != source_id:
+            continue
+        raw_views = row.get("views")
+        if raw_views is None:
+            continue
+        value = int(raw_views)
+        attributed_views = (attributed_views or 0) + value
+
+    return {
+        **base_result,
+        "source_views": source_views,
+        "attributed_target_views": attributed_views,
+    }
 
 
 def video_retention_curves(
@@ -1313,10 +1479,16 @@ def post_comment(
 def main() -> None:
     ap = argparse.ArgumentParser(description="YouTube アップロード")
     ap.add_argument("--auth", action="store_true", help="初回OAuth同意してtokenを保存")
-    ap.add_argument(
+    analytics_mode = ap.add_mutually_exclusive_group()
+    analytics_mode.add_argument(
         "--analytics",
         action="store_true",
         help="--auth時にYouTube Analytics読み取りscopeも要求",
+    )
+    analytics_mode.add_argument(
+        "--analytics-readonly",
+        action="store_true",
+        help="--auth時にAnalytics用read-only scopeだけを要求（upload権限なし）",
     )
     ap.add_argument(
         "--manage",
@@ -1380,9 +1552,14 @@ def main() -> None:
         token_file = spec.publish.youtube.token
         client_secret_file = spec.publish.youtube.client_secret
     if args.auth:
-        auth_scopes = list(
-            ANALYTICS_SCOPES if args.analytics else ACCOUNT_SCOPES
-        )
+        if args.analytics_readonly and args.manage:
+            ap.error("--analytics-readonly cannot be combined with --manage")
+        if args.analytics_readonly:
+            auth_scopes = list(ANALYTICS_READONLY_SCOPES)
+        else:
+            auth_scopes = list(
+                ANALYTICS_SCOPES if args.analytics else ACCOUNT_SCOPES
+            )
         if args.manage and MANAGE_SCOPE not in auth_scopes:
             auth_scopes.append(MANAGE_SCOPE)
         _load_credentials(

@@ -521,6 +521,30 @@ class PublishAccountsTest(unittest.TestCase):
             settings.youtube.client_secret,
         )
 
+    def test_youtube_analytics_readonly_auth_excludes_upload_scope(self) -> None:
+        settings = self._youtube_spec("alpha")
+        fake_spec = SimpleNamespace(publish=settings)
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "doci.youtube",
+                    "--auth",
+                    "--channel",
+                    "alpha",
+                    "--analytics-readonly",
+                ],
+            ),
+            patch("doci.channel.load", return_value=fake_spec),
+            patch.object(youtube, "_load_credentials") as load_mock,
+            patch("builtins.print"),
+        ):
+            youtube.main()
+
+        scopes = load_mock.call_args.kwargs["scopes"]
+        self.assertEqual(scopes, youtube.ANALYTICS_READONLY_SCOPES)
+        self.assertNotIn(youtube.SCOPES[0], scopes)
+
     def test_youtube_manage_auth_requests_write_scope(self) -> None:
         settings = self._youtube_spec("alpha")
         fake_spec = SimpleNamespace(publish=settings)

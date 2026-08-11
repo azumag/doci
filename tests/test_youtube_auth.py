@@ -95,6 +95,36 @@ class LoadCredentialsTest(unittest.TestCase):
             self.token_file.read_text(encoding="utf-8"), before
         )
 
+    def test_analytics_readonly_token_does_not_require_upload_scope(self) -> None:
+        """Issue #138のreadbackは書込みscopeなしのtokenを受理する。"""
+        self.assertNotIn(
+            youtube.SCOPES[0], youtube.ANALYTICS_READONLY_SCOPES
+        )
+        _write_token_file(
+            self.token_file,
+            youtube.ANALYTICS_READONLY_SCOPES,
+            expired=False,
+        )
+
+        creds = youtube._load_credentials(
+            False,
+            token_file=self.token_file,
+            scopes=youtube.ANALYTICS_READONLY_SCOPES,
+        )
+
+        self.assertIsNotNone(creds)
+        self.assertTrue(creds.has_scopes(youtube.ANALYTICS_READONLY_SCOPES))
+
+    def test_analytics_readonly_scope_error_uses_readonly_auth_hint(self) -> None:
+        _write_token_file(self.token_file, youtube.SCOPES, expired=False)
+
+        with self.assertRaisesRegex(RuntimeError, "--analytics-readonly"):
+            youtube._load_credentials(
+                False,
+                token_file=self.token_file,
+                scopes=youtube.ANALYTICS_READONLY_SCOPES,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
