@@ -569,7 +569,9 @@ class YouTubeSearchTest(unittest.TestCase):
         service = mock.Mock()
         service.reports.return_value = reports
         with (
-            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch.object(
+                youtube, "_load_credentials", return_value=object()
+            ) as credentials,
             mock.patch("googleapiclient.discovery.build", return_value=service),
         ):
             results = youtube.video_analytics(
@@ -586,6 +588,11 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(reports.query.call_args.kwargs["sort"], "-views")
         self.assertEqual(reports.query.call_args.kwargs["maxResults"], 200)
         self.assertIn("engagedViews", reports.query.call_args.kwargs["metrics"])
+        self.assertEqual(
+            credentials.call_args.kwargs["scopes"],
+            youtube.ANALYTICS_READONLY_SCOPES,
+        )
+        self.assertTrue(credentials.call_args.kwargs["exact_scopes"])
 
     def test_video_analytics_defaults_engaged_views_to_zero_when_absent(self) -> None:
         """`engagedViews`列がレスポンスに含まれない場合でもKeyErrorにならず
@@ -625,7 +632,9 @@ class YouTubeSearchTest(unittest.TestCase):
         service = mock.Mock()
         service.reports.return_value = reports
         with (
-            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch.object(
+                youtube, "_load_credentials", return_value=object()
+            ) as credentials,
             mock.patch("googleapiclient.discovery.build", return_value=service),
         ):
             results = youtube.video_share_metrics(
@@ -645,6 +654,11 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(
             reports.query.call_args.kwargs["endDate"], "2026-07-24"
         )
+        self.assertEqual(
+            credentials.call_args.kwargs["scopes"],
+            youtube.ANALYTICS_READONLY_SCOPES,
+        )
+        self.assertTrue(credentials.call_args.kwargs["exact_scopes"])
 
     def test_video_share_metrics_keeps_missing_shares_as_none(self) -> None:
         reports = mock.Mock()
@@ -753,7 +767,9 @@ class YouTubeSearchTest(unittest.TestCase):
         service = mock.Mock()
         service.reports.return_value = reports
         with (
-            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch.object(
+                youtube, "_load_credentials", return_value=object()
+            ) as credentials,
             mock.patch("googleapiclient.discovery.build", return_value=service),
         ):
             by_video = youtube.video_traffic_sources(
@@ -771,6 +787,11 @@ class YouTubeSearchTest(unittest.TestCase):
         )
         self.assertEqual(reports.query.call_args.kwargs["dimensions"], "video,insightTrafficSourceType")
         self.assertEqual(reports.query.call_args.kwargs["metrics"], "views")
+        self.assertEqual(
+            credentials.call_args.kwargs["scopes"],
+            youtube.ANALYTICS_READONLY_SCOPES,
+        )
+        self.assertTrue(credentials.call_args.kwargs["exact_scopes"])
 
     def test_video_traffic_sources_drops_zero_and_empty_rows(self) -> None:
         """issue #164: views0や空の種別は欠落を0と断定せず結果から除く。"""
@@ -857,7 +878,9 @@ class YouTubeSearchTest(unittest.TestCase):
         service = mock.Mock()
         service.reports.return_value = reports
         with (
-            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch.object(
+                youtube, "_load_credentials", return_value=object()
+            ) as credentials,
             mock.patch("googleapiclient.discovery.build", return_value=service),
         ):
             by_video, failed = youtube.video_search_terms(
@@ -885,6 +908,11 @@ class YouTubeSearchTest(unittest.TestCase):
             "video==abc123;insightTrafficSourceType==YT_SEARCH",
         )
         self.assertEqual(reports.query.call_args.kwargs["maxResults"], 25)
+        self.assertEqual(
+            credentials.call_args.kwargs["scopes"],
+            youtube.ANALYTICS_READONLY_SCOPES,
+        )
+        self.assertTrue(credentials.call_args.kwargs["exact_scopes"])
 
     def test_video_search_terms_keeps_partial_results_on_individual_failure(self) -> None:
         """issue #164 (Sol review指摘): 1動画の取得不能が他動画の結果へ
@@ -1033,6 +1061,123 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(reports.query.call_args.kwargs["filters"], "video==abc123")
         self.assertIn("audienceWatchRatio", reports.query.call_args.kwargs["metrics"])
 
+    def test_video_retention_curves_filters_subscribed_status_and_reads_impressions(
+        self,
+    ) -> None:
+        """issue #128: 購読状態filterとsegment observationsを同じ点へ保存する。"""
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "elapsedVideoTimeRatio"},
+                {"name": "audienceWatchRatio"},
+                {"name": "totalSegmentImpressions"},
+            ],
+            "rows": [
+                [0.2, 0.8, 35],
+                [0.4, 0.7, 19.5],
+                [0.6, 0.6, 21],
+            ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(
+                youtube, "_load_credentials", return_value=object()
+            ) as credentials,
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            curves, failed = youtube.video_retention_curves(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+                subscribed_status="SUBSCRIBED",
+                include_segment_impressions=True,
+            )
+
+        self.assertEqual(
+            curves["abc123"],
+            [
+                {
+                    "elapsed_ratio": 0.2,
+                    "watch_ratio": 0.8,
+                    "segment_impressions": 35,
+                },
+                {
+                    "elapsed_ratio": 0.6,
+                    "watch_ratio": 0.6,
+                    "segment_impressions": 21,
+                },
+            ],
+        )
+        self.assertEqual(failed, {})
+        query = reports.query.call_args.kwargs
+        self.assertEqual(
+            query["filters"],
+            "video==abc123;subscribedStatus==SUBSCRIBED",
+        )
+        self.assertEqual(
+            query["metrics"],
+            "audienceWatchRatio,totalSegmentImpressions",
+        )
+        self.assertEqual(
+            credentials.call_args.kwargs["scopes"],
+            youtube.ANALYTICS_READONLY_SCOPES,
+        )
+        self.assertTrue(credentials.call_args.kwargs["exact_scopes"])
+
+    def test_video_retention_curves_rejects_unknown_subscribed_status(self) -> None:
+        with self.assertRaisesRegex(ValueError, "subscribed_status"):
+            youtube.video_retention_curves(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+                subscribed_status="RETURNING",
+            )
+
+    def test_video_retention_curves_by_subscribed_status_keeps_segments_separate(
+        self,
+    ) -> None:
+        def curves(_ids, **kwargs):
+            status = kwargs["subscribed_status"]
+            value = 0.8 if status == "SUBSCRIBED" else 0.6
+            return (
+                {
+                    "abc123": [
+                        {
+                            "elapsed_ratio": 0.5,
+                            "watch_ratio": value,
+                            "segment_impressions": 30,
+                        }
+                    ]
+                },
+                {},
+            )
+
+        with mock.patch.object(
+            youtube,
+            "video_retention_curves",
+            side_effect=curves,
+        ) as retention:
+            by_video, failed = (
+                youtube.video_retention_curves_by_subscribed_status(
+                    ["abc123"],
+                    start_date="2026-07-01",
+                    end_date="2026-07-26",
+                )
+            )
+
+        self.assertEqual(set(by_video["abc123"]), {"SUBSCRIBED", "UNSUBSCRIBED"})
+        self.assertEqual(
+            by_video["abc123"]["SUBSCRIBED"][0]["watch_ratio"], 0.8
+        )
+        self.assertEqual(
+            by_video["abc123"]["UNSUBSCRIBED"][0]["watch_ratio"], 0.6
+        )
+        self.assertEqual(failed, {})
+        self.assertEqual(retention.call_count, 2)
+        for call in retention.call_args_list:
+            self.assertTrue(call.kwargs["include_segment_impressions"])
+
     def test_video_retention_curves_issues_one_query_per_video(self) -> None:
         """issue #149: 複数IDではID数分の単一動画クエリになり、filterに
         カンマが入らない。動画固有reasonのHTTP 400は他動画の成功を妨げない。"""
@@ -1096,7 +1241,7 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(failed, {})
 
     def test_video_retention_curves_drops_out_of_range_and_empty_rows(self) -> None:
-        """issue #149: 経過比率が0〜1の範囲外・欠落行は除外する（fail-closed）。"""
+        """issue #149/#128: 公式範囲0.01〜1.0外と欠落行を除外する。"""
         reports = mock.Mock()
         reports.query.return_value.execute.return_value = {
             "columnHeaders": [
@@ -1104,6 +1249,10 @@ class YouTubeSearchTest(unittest.TestCase):
                 {"name": "audienceWatchRatio"},
             ],
             "rows": [
+                ["-0.1", 0.60],
+                ["0", 0.60],
+                ["0.01", 0.99],
+                ["1.0", 0.20],
                 ["1.5", 0.50],
                 ["", 0.50],
                 ["0.2", "bad"],
@@ -1121,7 +1270,15 @@ class YouTubeSearchTest(unittest.TestCase):
                 end_date="2026-07-26",
             )
 
-        self.assertEqual(curves, {})
+        self.assertEqual(
+            curves,
+            {
+                "abc123": [
+                    {"elapsed_ratio": 0.01, "watch_ratio": 0.99},
+                    {"elapsed_ratio": 1.0, "watch_ratio": 0.20},
+                ]
+            },
+        )
         self.assertEqual(failed, {})
 
 

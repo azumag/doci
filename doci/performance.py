@@ -21,6 +21,9 @@ MIN_PUBLIC_VIEWS = 50
 MIN_GROUP_SIZE = 2
 MIN_TRAIT_SUPPORT = 2
 MIN_EVAL_PEERS = 4  # 2 * MIN_GROUP_SIZE。medianとの相対比較に最低限必要なpeer数
+MAX_SUBSCRIBED_RETENTION_VIDEOS_PER_CORNER = 5
+MIN_SUBSCRIBED_RETENTION_SEGMENT_IMPRESSIONS = 20
+MIN_SUBSCRIBED_RETENTION_COMMON_POINTS = 5
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -60,6 +63,9 @@ def _snapshot_signature(snapshot: dict) -> str:
         "traffic_sources": snapshot.get("traffic_sources", {}),
         "search_terms": snapshot.get("search_terms", {}),
         "retention_curve": snapshot.get("retention_curve", {}),
+        "retention_by_subscribed_status": snapshot.get(
+            "retention_by_subscribed_status", {}
+        ),
         # issue #144: 共有率(30日)readbackのavailable/reason変化も署名へ含める。
         "share_30d": snapshot.get("share_30d", {}),
         "videos": snapshot.get("videos", []),
@@ -137,6 +143,46 @@ def _safe_workdir(spec: ChannelSpec, workdir_raw: str) -> str:
     if not workdir.is_relative_to(output_root):
         return ""
     return str(workdir)
+
+
+def _latest_video_ids_per_corner(
+    history_rows: dict[str, dict],
+    details: list[dict],
+    candidate_ids: list[str],
+    *,
+    limit: int = MAX_SUBSCRIBED_RETENTION_VIDEOS_PER_CORNER,
+) -> list[str]:
+    """比較候補をcornerごとの最新動画へ絞る（issue #128）。
+
+    購読状態別の維持率は1動画につき2 API queryが必要なため、全履歴へ無制限に
+    広げない。公開日時を優先し、欠落時は履歴日時、同時刻はvideo_idで決定する。
+    """
+    if limit <= 0:
+        return []
+    detail_by_id = {
+        str(row.get("video_id") or ""): row
+        for row in details
+        if str(row.get("video_id") or "")
+    }
+    grouped: dict[str, list[tuple[float, str]]] = {}
+    for video_id in dict.fromkeys(str(item) for item in candidate_ids if item):
+        recorded = history_rows.get(video_id)
+        if not isinstance(recorded, dict):
+            continue
+        corner = str(recorded.get("corner") or "").strip()
+        if not corner:
+            continue
+        detail = detail_by_id.get(video_id, {})
+        published = history._parse_ts(
+            detail.get("published_at") or recorded.get("ts")
+        )
+        timestamp = published.timestamp() if published is not None else float("-inf")
+        grouped.setdefault(corner, []).append((timestamp, video_id))
+    selected: list[str] = []
+    for corner in sorted(grouped):
+        ranked = sorted(grouped[corner], key=lambda item: (item[0], item[1]), reverse=True)
+        selected.extend(video_id for _timestamp, video_id in ranked[:limit])
+    return selected
 
 
 def _scene_time_windows(script: dict, total_seconds: float) -> list[dict]:
@@ -446,6 +492,160 @@ def _iso8601_duration_seconds(duration_iso: str | None) -> float | None:
     return total if total > 0 else None
 
 
+def subscribed_status_retention_comparison(
+    curves: dict | None,
+    duration_iso: str | None,
+    script: dict | None = None,
+    *,
+    threshold: float = 0.08,
+    min_segment_impressions: int = MIN_SUBSCRIBED_RETENTION_SEGMENT_IMPRESSIONS,
+    min_common_points: int = MIN_SUBSCRIBED_RETENTION_COMMON_POINTS,
+) -> dict:
+    """購読者/非購読者カーブの同じ経過点を記述比較する（issue #128）。
+
+    両segmentの`totalSegmentImpressions`が閾値以上の共通点だけを使う。
+    最大差は次の手動仮説を考える場所を絞る検知値であり、購読状態や流入元が
+    差の原因だとは判定しない。`SUBSCRIBED`/`UNSUBSCRIBED`を
+    新規視聴者/リピーターへ読み替えない。
+    """
+    base = {
+        "status": "insufficient_data",
+        "reason": "",
+        "common_point_count": 0,
+        "reliable_point_count": 0,
+        "min_segment_impressions": min_segment_impressions,
+        "min_common_points": min_common_points,
+        "threshold": threshold,
+    }
+    if (
+        not isinstance(curves, dict)
+        or not isinstance(min_segment_impressions, int)
+        or isinstance(min_segment_impressions, bool)
+        or min_segment_impressions < 1
+        or not isinstance(min_common_points, int)
+        or isinstance(min_common_points, bool)
+        or min_common_points < 2
+    ):
+        return {**base, "reason": "invalid_or_missing_input"}
+    try:
+        threshold_value = float(threshold)
+    except (TypeError, ValueError):
+        return {**base, "reason": "invalid_threshold"}
+    if not math.isfinite(threshold_value) or threshold_value < 0:
+        return {**base, "reason": "invalid_threshold"}
+    base["threshold"] = threshold_value
+
+    def point_map(raw_curve: object) -> dict[float, dict] | None:
+        if not isinstance(raw_curve, list):
+            return None
+        points: dict[float, dict] = {}
+        for raw in raw_curve:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                elapsed = float(raw.get("elapsed_ratio"))
+                watch = float(raw.get("watch_ratio"))
+                impressions = int(raw.get("segment_impressions"))
+                raw_impressions = float(raw.get("segment_impressions"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if (
+                not math.isfinite(elapsed)
+                or not math.isfinite(watch)
+                or not 0.0 < elapsed <= 1.0
+                or watch < 0
+                or impressions < 0
+                or raw_impressions != float(impressions)
+            ):
+                continue
+            key = round(elapsed, 9)
+            point = {
+                "elapsed_ratio": elapsed,
+                "watch_ratio": watch,
+                "segment_impressions": impressions,
+            }
+            if key in points and points[key] != point:
+                return None
+            points[key] = point
+        return points
+
+    subscribed = point_map(curves.get("SUBSCRIBED"))
+    unsubscribed = point_map(curves.get("UNSUBSCRIBED"))
+    if subscribed is None or unsubscribed is None:
+        return {**base, "reason": "segment_curve_missing"}
+    common = sorted(set(subscribed).intersection(unsubscribed))
+    reliable = [
+        key
+        for key in common
+        if subscribed[key]["segment_impressions"] >= min_segment_impressions
+        and unsubscribed[key]["segment_impressions"] >= min_segment_impressions
+    ]
+    base.update(
+        {
+            "common_point_count": len(common),
+            "reliable_point_count": len(reliable),
+        }
+    )
+    if len(reliable) < min_common_points:
+        return {**base, "reason": "insufficient_reliable_common_points"}
+
+    def gap_key(key: float) -> tuple[float, float]:
+        gap = (
+            subscribed[key]["watch_ratio"]
+            - unsubscribed[key]["watch_ratio"]
+        )
+        return abs(gap), -key
+
+    elapsed_key = max(reliable, key=gap_key)
+    subscribed_point = subscribed[elapsed_key]
+    unsubscribed_point = unsubscribed[elapsed_key]
+    gap = subscribed_point["watch_ratio"] - unsubscribed_point["watch_ratio"]
+    gap_abs = abs(gap)
+    actionable = gap_abs > threshold_value or math.isclose(
+        gap_abs, threshold_value, abs_tol=1e-9
+    )
+    total_seconds = _iso8601_duration_seconds(duration_iso)
+    elapsed_seconds = (
+        elapsed_key * total_seconds
+        if total_seconds is not None and total_seconds > 0
+        else None
+    )
+    scene = None
+    if elapsed_seconds is not None:
+        scene = next(
+            (
+                window
+                for window in _scene_time_windows(script or {}, total_seconds)
+                if window["start"] <= elapsed_seconds <= window["end"]
+            ),
+            None,
+        )
+    return {
+        **base,
+        "status": "ready" if actionable else "no_clear_difference",
+        "reason": "",
+        "elapsed_ratio": elapsed_key,
+        "elapsed_seconds": (
+            round(elapsed_seconds, 1) if elapsed_seconds is not None else None
+        ),
+        "scene_index": scene["index"] if scene else None,
+        "scene_caption": scene["caption"] if scene else "",
+        "subscribed_watch_ratio": subscribed_point["watch_ratio"],
+        "unsubscribed_watch_ratio": unsubscribed_point["watch_ratio"],
+        "subscribed_segment_impressions": subscribed_point[
+            "segment_impressions"
+        ],
+        "unsubscribed_segment_impressions": unsubscribed_point[
+            "segment_impressions"
+        ],
+        "gap_ratio": gap,
+        "higher_segment": (
+            "SUBSCRIBED" if gap > 0 else "UNSUBSCRIBED" if gap < 0 else ""
+        ),
+        "actionable": actionable,
+    }
+
+
 def sync(
     spec: ChannelSpec,
     *,
@@ -461,6 +661,11 @@ def sync(
         token_file=spec.publish.youtube.token,
         client_secret_file=spec.publish.youtube.client_secret,
     )
+    analytics_token = getattr(
+        spec.publish.youtube,
+        "analytics_token",
+        spec.publish.youtube.token,
+    )
     analytics_status: dict = {
         "available": False,
         "source": "youtube_analytics_api_v2",
@@ -472,6 +677,14 @@ def sync(
         "available": False,
         "source": "youtube_analytics_api_v2",
     }
+    subscribed_retention_status: dict = {
+        "available": False,
+        "source": "youtube_analytics_api_v2",
+        "segments": ["SUBSCRIBED", "UNSUBSCRIBED"],
+        "max_videos_per_corner": MAX_SUBSCRIBED_RETENTION_VIDEOS_PER_CORNER,
+        "min_segment_impressions": MIN_SUBSCRIBED_RETENTION_SEGMENT_IMPRESSIONS,
+        "min_common_points": MIN_SUBSCRIBED_RETENTION_COMMON_POINTS,
+    }
     share_30d_status: dict = {
         "available": False,
         "source": "youtube_analytics_api_v2",
@@ -480,8 +693,15 @@ def sync(
     search_by_id: dict[str, list[dict]] = {}
     retention_by_id: dict[str, list[dict]] = {}
     retention_failures: dict[str, str] = {}
+    retention_by_subscribed_status: dict[str, dict[str, list[dict]]] = {}
+    subscribed_retention_failures: dict[str, dict[str, str]] = {}
+    retention_ids: list[str] = []
     share_30d_by_id: dict[str, dict] = {}
-    if youtube._token_has_scopes(spec.publish.youtube.token, youtube.ANALYTICS_SCOPES):
+    if youtube._token_has_scopes(
+        analytics_token,
+        youtube.ANALYTICS_READONLY_SCOPES,
+        exact=True,
+    ):
         start = (current.date() - timedelta(days=lookback_days)).isoformat()
         end = current.date().isoformat()
         try:
@@ -489,7 +709,7 @@ def sync(
                 video_ids,
                 start_date=start,
                 end_date=end,
-                token_file=spec.publish.youtube.token,
+                token_file=analytics_token,
                 client_secret_file=spec.publish.youtube.client_secret,
             )
             analytics_status.update(
@@ -532,7 +752,7 @@ def sync(
                 share_ids,
                 start_date=share_start,
                 end_date=share_end,
-                token_file=spec.publish.youtube.token,
+                token_file=analytics_token,
                 client_secret_file=spec.publish.youtube.client_secret,
             )
             share_30d_status.update(
@@ -565,7 +785,7 @@ def sync(
                     video_ids,
                     start_date=start,
                     end_date=end,
-                    token_file=spec.publish.youtube.token,
+                    token_file=analytics_token,
                     client_secret_file=spec.publish.youtube.client_secret,
                 )
                 traffic_status.update({"available": True})
@@ -595,7 +815,7 @@ def sync(
                         gap_video_ids,
                         start_date=start,
                         end_date=end,
-                        token_file=spec.publish.youtube.token,
+                        token_file=analytics_token,
                         client_secret_file=spec.publish.youtube.client_secret,
                     )
                 search_status.update({"available": True})
@@ -628,7 +848,7 @@ def sync(
                         retention_ids,
                         start_date=start,
                         end_date=end,
-                        token_file=spec.publish.youtube.token,
+                        token_file=analytics_token,
                         client_secret_file=spec.publish.youtube.client_secret,
                     )
                 retention_status.update({"available": True})
@@ -642,17 +862,75 @@ def sync(
                     "維持率カーブreadback失敗。平均指標のみ保存: "
                     f"{str(exc)[:400]}"
                 )
+            if spec.pipeline_get("performance_feedback", False):
+                if retention_status.get("available"):
+                    segment_ids = _latest_video_ids_per_corner(
+                        history_rows,
+                        details,
+                        list(retention_by_id),
+                    )
+                    try:
+                        if segment_ids:
+                            (
+                                retention_by_subscribed_status,
+                                subscribed_retention_failures,
+                            ) = youtube.video_retention_curves_by_subscribed_status(
+                                segment_ids,
+                                start_date=start,
+                                end_date=end,
+                                token_file=analytics_token,
+                                client_secret_file=spec.publish.youtube.client_secret,
+                            )
+                        subscribed_retention_status.update(
+                            {
+                                "available": True,
+                                "queried_video_ids": segment_ids,
+                            }
+                        )
+                        if subscribed_retention_failures:
+                            subscribed_retention_status["failed_video_ids"] = sorted(
+                                subscribed_retention_failures
+                            )
+                            subscribed_retention_status["failures"] = (
+                                subscribed_retention_failures
+                            )
+                    except Exception as exc:
+                        subscribed_retention_status["reason"] = (
+                            "購読状態別の維持率カーブreadback失敗。"
+                            "集約カーブは保存: "
+                            f"{str(exc)[:400]}"
+                        )
+                else:
+                    subscribed_retention_status["reason"] = (
+                        "集約維持率カーブを取得できないため照会しません"
+                    )
+            else:
+                subscribed_retention_status["reason"] = (
+                    "performance_feedback_disabled"
+                )
     else:
         analytics_status["reason"] = (
             "YouTube Analytics APIをOAuthクライアントのGoogle Cloud projectで"
             "有効化し、yt-analytics.readonly scopeを明示的に許可する必要があります。"
-            "有効化後に `python -m doci.youtube --auth --analytics "
+            "有効化後に `python -m doci.youtube --auth --analytics-readonly "
             f"--channel {spec.id}` で再認証してください"
+        )
+        subscribed_retention_status["reason"] = analytics_status["reason"]
+    if (
+        not subscribed_retention_status.get("reason")
+        and not subscribed_retention_status.get("available")
+    ):
+        subscribed_retention_status["reason"] = str(
+            analytics_status.get("reason")
+            or "集約Analyticsを取得できないため照会しません"
         )
     analytics_by_id = {
         str(row.get("video_id")): row for row in analytics_rows if row.get("video_id")
     }
     videos: list[dict] = []
+    subscribed_retention_queried = set(
+        subscribed_retention_status.get("queried_video_ids") or []
+    )
     for detail in details:
         video_id = str(detail.get("video_id") or "")
         recorded = history_rows.get(video_id, {})
@@ -665,6 +943,10 @@ def sync(
                 "search_terms": search_by_id.get(video_id, []),
                 "retention_curve": retention_by_id.get(video_id, []),
             }
+            if video_id in subscribed_retention_queried:
+                analytics["retention_by_subscribed_status"] = (
+                    retention_by_subscribed_status.get(video_id, {})
+                )
         share_30d = share_30d_by_id.get(video_id)
         workdir = _safe_workdir(spec, str(recorded.get("workdir") or ""))
         videos.append(
@@ -700,6 +982,7 @@ def sync(
         "traffic_sources": traffic_status,
         "search_terms": search_status,
         "retention_curve": retention_status,
+        "retention_by_subscribed_status": subscribed_retention_status,
         "share_30d": share_30d_status,
         "videos": videos,
     }
