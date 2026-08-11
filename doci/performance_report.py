@@ -542,6 +542,142 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
     )
 
 
+def _opening_signal_for_row(row: dict) -> dict | None:
+    analytics = row.get("analytics")
+    analytics = analytics if isinstance(analytics, dict) else {}
+    curve = analytics.get("retention_curve")
+    if not isinstance(curve, list) or not curve:
+        return None
+    data_api = row.get("data_api")
+    data_api = data_api if isinstance(data_api, dict) else {}
+    duration_iso = str(data_api.get("duration") or "")
+    return performance.opening_retention_signal(
+        curve,
+        duration_iso,
+        _script_for_video(row),
+    )
+
+
+_OPENING_REPORT_LIMIT = 10
+
+
+def _opening_retention_text(snapshot: dict | None, corner: str) -> str:
+    """冒頭30秒の維持率低下と、次の1本で試す変更を表示する（issue #142）。"""
+    if not isinstance(snapshot, dict):
+        return "- 冒頭30秒: snapshot未取得のため評価しません"
+    retention_status = snapshot.get("retention_curve")
+    retention_status = (
+        retention_status if isinstance(retention_status, dict) else {}
+    )
+    if not retention_status.get("available"):
+        reason = str(retention_status.get("reason") or "取得不可")
+        return (
+            "- 冒頭30秒: 維持率カーブの取得に失敗しました"
+            f"（{reason}。推測で補いません）"
+        )
+
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not corner_videos:
+        return "- 冒頭30秒: このcornerの動画がsnapshotにありません"
+
+    failed = set(retention_status.get("failed_video_ids") or [])
+    analysed = 0
+    unavailable = 0
+    actionable: list[tuple[dict, dict]] = []
+    for row in corner_videos:
+        video_id = str(row.get("video_id") or "")
+        if video_id in failed:
+            unavailable += 1
+            continue
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        # Analytics対象外の動画は「取得失敗」に数えない。
+        if "retention_curve" not in analytics:
+            continue
+        signal = _opening_signal_for_row(row)
+        if signal is None:
+            unavailable += 1
+            continue
+        analysed += 1
+        if signal.get("actionable"):
+            actionable.append((row, signal))
+
+    if analysed == 0:
+        suffix = f"（判定材料不足 {unavailable}本）" if unavailable else ""
+        return (
+            "- 冒頭30秒: 分析可能な維持率カーブがありません"
+            f"{suffix}。推測で補いません"
+        )
+
+    def priority(item: tuple[dict, dict]) -> tuple[float, float, str]:
+        row, signal = item
+        published = history._parse_ts(
+            row.get("history_ts") or row.get("published_at")
+        )
+        timestamp = published.timestamp() if published is not None else float("-inf")
+        severity = max(
+            float(signal.get("cumulative_drop_ratio") or 0.0),
+            float(signal.get("largest_step_drop_ratio") or 0.0),
+        )
+        return timestamp, severity, str(row.get("video_id") or "")
+
+    # 次の1本の判断には新しい実績を優先し、同時刻なら低下幅が大きい順にする。
+    # snapshot自体はhistory_ts昇順なので、入力順のまま先頭10本を採ると
+    # 最新動画が常に省略される（Sol review指摘）。
+    actionable.sort(key=priority, reverse=True)
+
+    lines = [
+        f"- 分析対象 {analysed}本 / 冒頭低下シグナル {len(actionable)}本"
+        + (f" / 判定材料不足 {unavailable}本" if unavailable else "")
+    ]
+    for row, signal in actionable[:_OPENING_REPORT_LIMIT]:
+        video_id = str(row.get("video_id") or "")
+        cumulative_points = signal["cumulative_drop_ratio"] * 100
+        step_points = signal["largest_step_drop_ratio"] * 100
+        lines.append(
+            f"- `{video_id}`: 最初の観測点 約{signal['start_seconds']:.1f}秒 "
+            f"{signal['start_watch_ratio'] * 100:.1f}% → "
+            f"冒頭{signal['window_seconds']:.1f}秒内の最終観測点 "
+            f"約{signal['end_seconds']:.1f}秒 {signal['end_watch_ratio'] * 100:.1f}%"
+            f"（累計 {cumulative_points:.1f}ポイント低下）"
+        )
+        drop_from = signal.get("drop_from_seconds")
+        drop_to = signal.get("drop_to_seconds")
+        scene = " ".join(str(signal.get("scene_caption") or "").split())[:120]
+        if drop_from is not None and drop_to is not None:
+            location = f"約{drop_from:.1f}→{drop_to:.1f}秒"
+            if scene:
+                location += f"（シーン: {scene}）"
+            lines.append(
+                f"  - 最大区間低下: {location}で {step_points:.1f}ポイント"
+            )
+    if len(actionable) > _OPENING_REPORT_LIMIT:
+        lines.append(
+            f"- 他にも{len(actionable) - _OPENING_REPORT_LIMIT}本ありますが、"
+            f"詳細は先頭{_OPENING_REPORT_LIMIT}本まで表示します"
+        )
+    if actionable:
+        lines.append(
+            "- 次の1本: 上記区間の実際の映像・台本を確認し、同じcorner・近い尺/tierで"
+            "冒頭フックだけを変更する。他の中心変数は固定し、同じ冒頭ウィンドウの"
+            "累計低下と最大区間低下を比較する（反映は運用者が手動で行う）。"
+        )
+    else:
+        lines.append(
+            "- 8ポイント以上の冒頭低下を検出しなかったため、冒頭フック変更を"
+            "このデータだけから提案しません。"
+        )
+    lines.append(
+        "- 8ポイントはレポート対象を絞る検知閾値であり、万能な合格ラインではありません。"
+        "低下の原因は動画内容と照合し、相関を因果と断定しません。"
+    )
+    return "\n".join(lines)
+
+
 def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
     """維持率カーブの山/谷とシーン照合を表示する（issue #149）。
 
@@ -830,6 +966,10 @@ def _cycle_body(
             "",
             _discovery_satisfaction_text(snapshot, section["corner"]),
             "",
+            "### 冒頭30秒の維持率と次の1本（issue #142）",
+            "",
+            _opening_retention_text(snapshot, section["corner"]),
+            "",
             "### 維持率カーブの山/谷とシーン照合（issue #149）",
             "",
             _retention_curve_text(snapshot, section["corner"]),
@@ -871,6 +1011,7 @@ def build_cycle_candidate(
     # 存在しない動画のgap_queryは、無内容issueを防ぐため候補判定に含めない
     # （Claude review指摘）。
     has_gap_discovery = False
+    has_opening_content = False
     has_retention_content = False
     has_share_content = False
     if isinstance(snapshot, dict):
@@ -880,9 +1021,9 @@ def build_cycle_candidate(
             and str(row.get("corner") or "") in section_corners
             for row in snapshot.get("videos", [])
         )
-        # issue #149: 形式仮説・gap動画が無くても、matching cornerに明瞭な
-        # 維持率の山/谷がある動画があれば候補として報告する（無内容issueは
-        # 防ぎつつ、分析結果を運用者へ届ける）。
+        # issue #142/#149: 形式仮説・gap動画が無くても、matching cornerに
+        # 冒頭低下シグナルまたは明瞭な山/谷があれば候補として報告する。
+        # 無内容issueは防ぎつつ、分析結果を次の1本の手動施策へつなぐ。
         retention_status = snapshot.get("retention_curve")
         retention_status = (
             retention_status if isinstance(retention_status, dict) else {}
@@ -899,8 +1040,12 @@ def build_cycle_candidate(
                 curve = analytics.get("retention_curve")
                 if not isinstance(curve, list) or not curve:
                     continue
+                opening_signal = _opening_signal_for_row(row)
+                if opening_signal and opening_signal.get("actionable"):
+                    has_opening_content = True
                 if performance.retention_moments(curve):
                     has_retention_content = True
+                if has_opening_content and has_retention_content:
                     break
         # issue #144: 共有率1%超の動画がmatching cornerにあれば報告候補とする。
         # 対象はshorts cornerのみ。1%超でも構造（format_traits）が未記録なら
@@ -915,6 +1060,7 @@ def build_cycle_candidate(
     has_content = (
         has_section_content
         or has_gap_discovery
+        or has_opening_content
         or has_retention_content
         or has_share_content
     )

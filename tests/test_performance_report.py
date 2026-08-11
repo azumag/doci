@@ -496,6 +496,51 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertIn("維持率カーブの山/谷", candidate["body"])
 
+    def test_build_cycle_candidate_includes_monotonic_opening_drop(self) -> None:
+        """issue #142: 山/谷が無い単調低下でも、冒頭シグナルから候補を作る。"""
+        spec = SimpleNamespace(id="ideology")
+        decision = self._decision(status="insufficient_data", reason="比較可能な動画が2本")
+        section = performance_report.build_corner_section(
+            spec, "capitalism", decision, [], set()
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "opening-drop",
+                    "corner": "capitalism",
+                    "data_api": {"duration": "PT100S"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                            {"elapsed_ratio": 0.1, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.2, "watch_ratio": 0.82},
+                            {"elapsed_ratio": 0.3, "watch_ratio": 0.70},
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.60},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.40},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        self.assertEqual(
+            performance.retention_moments(
+                snapshot["videos"][0]["analytics"]["retention_curve"]
+            ),
+            [],
+        )
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("冒頭30秒の維持率と次の1本", candidate["body"])
+        self.assertIn("冒頭フックだけを変更", candidate["body"])
+
     def test_build_cycle_candidate_ignores_flat_retention_curve(self) -> None:
         """issue #149: 山/谷の無い平坦なカーブでは無内容issueを作らない。"""
         spec = SimpleNamespace(id="youtube-growth")
@@ -1365,7 +1410,218 @@ class ShareRateTest(unittest.TestCase):
 
 
 class RetentionCurveAnalysisTest(unittest.TestCase):
-    """issue #149: 維持率カーブの山/谷検出・シーン照合・レポート表示。"""
+    """issue #142/#149: 冒頭低下と山/谷の分析・レポート表示。"""
+
+    def test_opening_retention_signal_detects_monotonic_drop_and_scene(self) -> None:
+        """山/谷のない単調低下でも、冒頭30秒の累計・最大区間低下を返す。"""
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+            {"elapsed_ratio": 0.1, "watch_ratio": 0.92},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.70},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.50},
+        ]
+        script = {
+            "scenes": [
+                {"caption": "導入"},
+                {"caption": "問題提起"},
+                {"caption": "展開"},
+                {"caption": "結び"},
+            ]
+        }
+
+        signal = performance.opening_retention_signal(curve, "PT100S", script)
+
+        self.assertIsNotNone(signal)
+        self.assertTrue(signal["actionable"])
+        self.assertAlmostEqual(signal["cumulative_drop_ratio"], 0.25)
+        self.assertAlmostEqual(signal["largest_step_drop_ratio"], 0.20)
+        self.assertEqual(signal["drop_from_seconds"], 20.0)
+        self.assertEqual(signal["drop_to_seconds"], 30.0)
+        self.assertEqual(signal["scene_index"], 1)
+        self.assertEqual(signal["scene_caption"], "問題提起")
+
+    def test_opening_retention_signal_ignores_drop_after_30_seconds(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.92},
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.4, "watch_ratio": 0.50},
+        ]
+
+        signal = performance.opening_retention_signal(curve, "PT100S")
+
+        self.assertIsNotNone(signal)
+        self.assertFalse(signal["actionable"])
+        self.assertAlmostEqual(signal["cumulative_drop_ratio"], 0.05)
+        self.assertAlmostEqual(signal["largest_step_drop_ratio"], 0.03)
+        self.assertEqual(signal["end_seconds"], 30.0)
+
+    def test_opening_retention_signal_uses_full_short_video(self) -> None:
+        signal = performance.opening_retention_signal(
+            [
+                {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                {"elapsed_ratio": 0.5, "watch_ratio": 0.88},
+                {"elapsed_ratio": 1.0, "watch_ratio": 0.75},
+            ],
+            "PT20S",
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal["window_seconds"], 20.0)
+        self.assertEqual(signal["end_seconds"], 20.0)
+        self.assertTrue(signal["actionable"])
+
+    def test_opening_retention_signal_includes_exact_threshold(self) -> None:
+        signal = performance.opening_retention_signal(
+            [
+                {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                {"elapsed_ratio": 0.3, "watch_ratio": 0.87},
+            ],
+            "PT100S",
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertTrue(signal["actionable"])
+
+    def test_opening_retention_signal_rejects_conflicting_duplicate_points(self) -> None:
+        """同一時点の異値重複は、位置や入力順に関わらずfail-closedにする。"""
+        base = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+            {"elapsed_ratio": 0.15, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.75},
+        ]
+        for index, point in enumerate(base):
+            conflicting = {
+                "elapsed_ratio": point["elapsed_ratio"],
+                "watch_ratio": point["watch_ratio"] - 0.20,
+            }
+            for duplicate_first in (False, True):
+                curve = list(base)
+                insert_at = index if duplicate_first else index + 1
+                curve.insert(insert_at, conflicting)
+                with self.subTest(index=index, duplicate_first=duplicate_first):
+                    self.assertIsNone(
+                        performance.opening_retention_signal(curve, "PT100S")
+                    )
+
+    def test_opening_retention_signal_merges_identical_duplicate_points(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+            {"elapsed_ratio": 0.15, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.15, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.75},
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.75},
+        ]
+
+        signal = performance.opening_retention_signal(curve, "PT100S")
+
+        self.assertIsNotNone(signal)
+        self.assertTrue(signal["actionable"])
+        self.assertAlmostEqual(signal["cumulative_drop_ratio"], 0.20)
+
+    def test_opening_retention_signal_is_fail_closed(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.70},
+        ]
+        self.assertIsNone(performance.opening_retention_signal(curve, None))
+        self.assertIsNone(performance.opening_retention_signal(curve, "PT0S"))
+        self.assertIsNone(
+            performance.opening_retention_signal(
+                [{"elapsed_ratio": 0.0, "watch_ratio": 0.95}], "PT1M"
+            )
+        )
+        self.assertIsNone(
+            performance.opening_retention_signal(curve, "PT1M", window_seconds=0)
+        )
+
+    def test_opening_retention_text_proposes_one_manual_hook_change(self) -> None:
+        snapshot = {
+            "videos": [
+                {
+                    "video_id": "v-opening",
+                    "corner": "capitalism",
+                    "workdir": str(Path(self._workdir())),
+                    "data_api": {"duration": "PT100S"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                            {"elapsed_ratio": 0.1, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.2, "watch_ratio": 0.80},
+                            {"elapsed_ratio": 0.3, "watch_ratio": 0.65},
+                        ]
+                    },
+                }
+            ],
+            "retention_curve": {"available": True},
+        }
+
+        text = performance_report._opening_retention_text(snapshot, "capitalism")
+
+        self.assertIn("冒頭低下シグナル 1本", text)
+        self.assertIn("最大区間低下", text)
+        self.assertIn("次の1本", text)
+        self.assertIn("冒頭フックだけを変更", text)
+        self.assertIn("運用者が手動", text)
+        self.assertIn("万能な合格ラインではありません", text)
+
+    def test_opening_retention_text_prioritises_recent_then_larger_drop(self) -> None:
+        videos = []
+        for index in range(9):
+            videos.append(
+                {
+                    "video_id": f"old-{index}",
+                    "corner": "video",
+                    "history_ts": f"2026-08-{index + 1:02d}T00:00:00+00:00",
+                    "data_api": {"duration": "PT100S"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                            {"elapsed_ratio": 0.3, "watch_ratio": 0.80},
+                        ]
+                    },
+                }
+            )
+        videos += [
+            {
+                "video_id": "latest-mild",
+                "corner": "video",
+                "history_ts": "2026-08-10T00:00:00+00:00",
+                "data_api": {"duration": "PT100S"},
+                "analytics": {
+                    "retention_curve": [
+                        {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                        {"elapsed_ratio": 0.3, "watch_ratio": 0.80},
+                    ]
+                },
+            },
+            {
+                "video_id": "latest-strong",
+                "corner": "video",
+                "history_ts": "2026-08-10T00:00:00+00:00",
+                "data_api": {"duration": "PT100S"},
+                "analytics": {
+                    "retention_curve": [
+                        {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                        {"elapsed_ratio": 0.3, "watch_ratio": 0.60},
+                    ]
+                },
+            },
+        ]
+        snapshot = {
+            "videos": videos,
+            "retention_curve": {"available": True},
+        }
+
+        text = performance_report._opening_retention_text(snapshot, "video")
+
+        self.assertIn("`latest-strong`", text)
+        self.assertIn("`latest-mild`", text)
+        self.assertLess(text.index("`latest-strong`"), text.index("`latest-mild`"))
+        self.assertNotIn("`old-0`", text)
+        self.assertIn("他にも1本", text)
 
     def test_retention_moments_detects_spike_and_dip(self) -> None:
         curve = [

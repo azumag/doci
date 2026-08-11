@@ -34,6 +34,8 @@ client_secret = "secrets/ideology/client_secret.json"
 token = "secrets/ideology/youtube_token.json"
 
 [pipeline]
+performance_feedback = true
+feedback_repository = "azumag/doci"
 narration_opening_guard = true
 narration_pattern_check = true
 # corner_communism/corner_capitalismの「ショート動画用」という一般的な文言が

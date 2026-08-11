@@ -276,6 +276,145 @@ def retention_moment_scenes(
     return annotated
 
 
+def opening_retention_signal(
+    curve: list[dict],
+    duration_iso: str | None,
+    script: dict | None = None,
+    *,
+    window_seconds: float = 30.0,
+    threshold: float = 0.08,
+) -> dict | None:
+    """冒頭30秒内の維持率低下と最大低下区間を観測する（issue #142）。
+
+    最初と最後の観測点の差（累計低下）に加え、隣接点間で最も大きい低下を
+    返す。どちらかが ``threshold`` 以上なら ``actionable`` とするが、これは
+    レポート対象を絞るための検知閾値であり、動画の合否や因果を示さない。
+
+    秒位置を捏造しないため動画長が不明、冒頭ウィンドウ内の有効点が2点未満、
+    または設定値が不正な場合は ``None`` を返す。30秒未満の動画は全長を
+    ウィンドウとして扱う。
+    """
+    total_seconds = _iso8601_duration_seconds(duration_iso)
+    try:
+        requested_window = float(window_seconds)
+        detection_threshold = float(threshold)
+    except (TypeError, ValueError):
+        return None
+    if (
+        total_seconds is None
+        or total_seconds <= 0
+        or not math.isfinite(requested_window)
+        or requested_window <= 0
+        or not math.isfinite(detection_threshold)
+        or detection_threshold < 0
+    ):
+        return None
+
+    opening_seconds = min(requested_window, total_seconds)
+    opening_ratio = opening_seconds / total_seconds
+    points: list[dict] = []
+    for raw in curve if isinstance(curve, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            elapsed_ratio = float(raw.get("elapsed_ratio"))
+            watch_ratio = float(raw.get("watch_ratio"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not math.isfinite(elapsed_ratio)
+            or not math.isfinite(watch_ratio)
+            or not 0.0 <= elapsed_ratio <= opening_ratio + 1e-9
+            or watch_ratio < 0
+        ):
+            continue
+        points.append(
+            {
+                "elapsed_ratio": elapsed_ratio,
+                "watch_ratio": watch_ratio,
+            }
+        )
+    points.sort(key=lambda item: item["elapsed_ratio"])
+
+    # 同じ経過位置・同じ値の重複だけを統合する。同じ位置に異なる値が
+    # ある場合は返却順によって検知結果が変わるため、カーブ全体を
+    # 判定材料不足として扱う（Sol review指摘）。
+    unique_points: list[dict] = []
+    for point in points:
+        if unique_points and math.isclose(
+            unique_points[-1]["elapsed_ratio"],
+            point["elapsed_ratio"],
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            if not math.isclose(
+                unique_points[-1]["watch_ratio"],
+                point["watch_ratio"],
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                return None
+            continue
+        unique_points.append(point)
+    if len(unique_points) < 2:
+        return None
+
+    start = unique_points[0]
+    end = unique_points[-1]
+    cumulative_drop = max(0.0, start["watch_ratio"] - end["watch_ratio"])
+    steepest_pair: tuple[dict, dict, float] | None = None
+    for previous, current in zip(unique_points, unique_points[1:]):
+        drop = previous["watch_ratio"] - current["watch_ratio"]
+        if drop <= 0:
+            continue
+        if steepest_pair is None or drop > steepest_pair[2]:
+            steepest_pair = (previous, current, drop)
+
+    largest_step_drop = steepest_pair[2] if steepest_pair else 0.0
+    drop_from_seconds = (
+        steepest_pair[0]["elapsed_ratio"] * total_seconds
+        if steepest_pair
+        else None
+    )
+    drop_to_seconds = (
+        steepest_pair[1]["elapsed_ratio"] * total_seconds
+        if steepest_pair
+        else None
+    )
+    scene = None
+    if drop_to_seconds is not None:
+        for window in _scene_time_windows(script or {}, total_seconds):
+            if window["start"] <= drop_to_seconds <= window["end"]:
+                scene = window
+                break
+
+    actionable = (
+        cumulative_drop > detection_threshold
+        or math.isclose(cumulative_drop, detection_threshold, abs_tol=1e-9)
+        or largest_step_drop > detection_threshold
+        or math.isclose(largest_step_drop, detection_threshold, abs_tol=1e-9)
+    )
+    return {
+        "window_seconds": round(opening_seconds, 1),
+        "start_seconds": round(start["elapsed_ratio"] * total_seconds, 1),
+        "end_seconds": round(end["elapsed_ratio"] * total_seconds, 1),
+        "start_watch_ratio": start["watch_ratio"],
+        "end_watch_ratio": end["watch_ratio"],
+        "cumulative_drop_ratio": cumulative_drop,
+        "largest_step_drop_ratio": largest_step_drop,
+        "drop_from_seconds": (
+            round(drop_from_seconds, 1) if drop_from_seconds is not None else None
+        ),
+        "drop_to_seconds": (
+            round(drop_to_seconds, 1) if drop_to_seconds is not None else None
+        ),
+        "scene_index": scene["index"] if scene else None,
+        "scene_caption": scene["caption"] if scene else "",
+        "threshold": detection_threshold,
+        "actionable": actionable,
+    }
+
+
 def _iso8601_duration_seconds(duration_iso: str | None) -> float | None:
     """ISO 8601動画長（PT1M30S 等）を秒へ変換する。
 

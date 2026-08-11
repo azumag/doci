@@ -86,6 +86,8 @@ voice = "narrator"
             (config.ROOT / "secrets/ideology/youtube_token.json").resolve(),
         )
         self.assertEqual(spec.publish.youtube.privacy, "public")
+        self.assertTrue(spec.pipeline_get("performance_feedback"))
+        self.assertEqual(spec.pipeline_get("feedback_repository"), "azumag/doci")
 
     def test_reference_youtube_growth_matches_channel_theme(self) -> None:
         spec = channel.load("youtube-growth")
