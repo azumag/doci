@@ -51,6 +51,8 @@ _CHANNEL_PAGE_SHARE_MIN_TOTAL_VIEWS = performance.CHANNEL_PAGE_SHARE_MIN_VIEWS
 _CHANNEL_PAGE_SHARE_MIN_PEERS = 3
 _CHANNEL_PAGE_SHARE_PEER_LIMIT = performance.CHANNEL_PAGE_SHARE_MAX_PEERS
 _CHANNEL_PAGE_SHARE_DIFF_THRESHOLD_POINTS = 5.0
+_FORMAT_RETENTION_GROUP_SIZE = performance.MIN_FORMAT_RETENTION_GROUP_SIZE
+_FORMAT_RETENTION_REPORT_LIMIT = 5
 _CYCLE_BODY_MAX_CHARS = 60_000
 
 
@@ -404,6 +406,7 @@ def fingerprint(
     sections: list[dict],
     *,
     channel_page_signals: dict[str, dict] | None = None,
+    format_retention_best: list[dict] | None = None,
 ) -> str:
     seed = {
         "channel": channel_id,
@@ -425,6 +428,8 @@ def fingerprint(
     }
     if channel_page_signals:
         seed["channel_page_signals"] = channel_page_signals
+    if format_retention_best:
+        seed["format_retention_best"] = format_retention_best
     return hashlib.sha256(
         json.dumps(seed, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]
@@ -1685,6 +1690,52 @@ def _retention_flat_region_text(snapshot: dict | None, corner: str) -> str:
     return "\n".join(lines)
 
 
+def _format_retention_cross_tab_text(snapshot: dict | None, corner: str) -> str:
+    """尺×フォーマット別の平均維持率クロス集計を表示する（issue #115）。
+
+    維持率の高い組み合わせを「次の1本の仮説候補」として提示するが、標本数が
+    少なく尺/フォーマット以外の要因も混ざるため、因果と断定しない。
+    """
+    if not isinstance(snapshot, dict):
+        return "- 尺×フォーマット別の維持率: snapshot未取得のため評価しません"
+    rows = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not rows:
+        return "- 尺×フォーマット別の維持率: このcornerの動画がsnapshotにありません"
+    tab = performance.format_retention_cross_tab(rows)
+    if not tab:
+        return (
+            "- 尺×フォーマット別の維持率: 判定材料不足"
+            f"（同じ尺×tierの組み合わせで維持率の揃った動画が"
+            f"{_FORMAT_RETENTION_GROUP_SIZE}本以上ありません。推測で補いません）"
+        )
+    lines: list[str] = []
+    for entry in tab[:_FORMAT_RETENTION_REPORT_LIMIT]:
+        lines.append(
+            f"- duration={entry['duration']} / tier={entry['tier']}: "
+            f"平均維持率 {entry['mean_retention_percent']:.1f}%"
+            f"（{entry['count']}本）"
+        )
+    best = tab[0]
+    lines.append(
+        f"- 次の1本の仮説候補: このcornerで平均維持率が最も高い組み合わせは "
+        f"duration={best['duration']} / tier={best['tier']}"
+        f"（平均維持率 {best['mean_retention_percent']:.1f}%、{best['count']}本）。"
+        "尺/フォーマット以外の要因（題材・公開条件・企画内容）も混ざるため、"
+        "このデータだけから因果と断定せず、同じ視聴者・近い題材で次回1本を試し、"
+        "同じ指標で比較する（反映は運用者が手動で行う）"
+    )
+    if len(tab) > _FORMAT_RETENTION_REPORT_LIMIT:
+        lines.append(
+            f"- 他にも{len(tab) - _FORMAT_RETENTION_REPORT_LIMIT}組み合わせがありますが、"
+            f"詳細は先頭{_FORMAT_RETENTION_REPORT_LIMIT}件まで表示します"
+        )
+    return "\n".join(lines)
+
+
 def _subscribed_status_comparison_for_row(row: dict) -> dict:
     analytics = row.get("analytics")
     analytics = analytics if isinstance(analytics, dict) else {}
@@ -2290,6 +2341,10 @@ def _cycle_body(
             "",
             _retention_flat_region_text(snapshot, section["corner"]),
             "",
+            "### 尺×フォーマット別の維持率クロス集計（issue #115）",
+            "",
+            _format_retention_cross_tab_text(snapshot, section["corner"]),
+            "",
             "### 購読状態別の維持率と流入元（issue #128）",
             "",
             _subscribed_status_retention_text(snapshot, section["corner"]),
@@ -2338,7 +2393,9 @@ def build_cycle_candidate(
     has_subscribed_retention_content = False
     has_share_content = False
     has_channel_page_share_content = False
+    has_format_retention_content = False
     channel_page_signals: dict[str, dict] = {}
+    format_retention_best: list[dict] = []
     if isinstance(snapshot, dict):
         section_corners = {section["corner"] for section in sections}
         has_gap_discovery = any(
@@ -2435,6 +2492,24 @@ def build_cycle_candidate(
                 ],
             }
         has_channel_page_share_content = bool(channel_page_signals)
+        # issue #115: 尺×フォーマット別の平均維持率クロス集計が成立し、比較対象の
+        # 組み合わせが2つ以上あるcornerがあれば報告候補とする。同一corner・同一
+        # 最良cohortはfingerprintのidentityとして重複issueを防ぐ。
+        for corner in sorted(section_corners):
+            rows = [
+                row
+                for row in snapshot.get("videos", [])
+                if str(row.get("corner") or "") == corner
+            ]
+            tab = performance.format_retention_cross_tab(rows)
+            if len(tab) >= 2:
+                has_format_retention_content = True
+                format_retention_best.append(
+                    {
+                        "corner": corner,
+                        "cohort": tab[0]["cohort"],
+                    }
+                )
     has_content = (
         has_section_content
         or has_gap_discovery
@@ -2445,6 +2520,7 @@ def build_cycle_candidate(
         or has_subscribed_retention_content
         or has_share_content
         or has_channel_page_share_content
+        or has_format_retention_content
     )
     if not has_content:
         return None
@@ -2452,6 +2528,7 @@ def build_cycle_candidate(
         spec.id,
         sections,
         channel_page_signals=channel_page_signals,
+        format_retention_best=format_retention_best,
     )
     hypothesis_keys = [
         section["proposal"]["hypothesis_key"]
