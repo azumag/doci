@@ -429,6 +429,32 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         )
         self.assertIsNone(candidate)
 
+    def test_cycle_body_cap_preserves_markers_and_guardrails(self) -> None:
+        body = performance_report._bounded_cycle_body(
+            ["<!-- marker -->", "x" * 70_000],
+            ["", "## ガードレール", "", "- 一度に試す変数は1つ"],
+        )
+
+        self.assertLessEqual(
+            len(body), performance_report._CYCLE_BODY_MAX_CHARS
+        )
+        self.assertTrue(body.startswith("<!-- marker -->"))
+        self.assertIn("## 表示上限", body)
+        self.assertIn("## ガードレール", body)
+        self.assertTrue(body.endswith("- 一度に試す変数は1つ\n"))
+
+    def test_cycle_body_cap_does_not_split_markdown_block(self) -> None:
+        oversized_inline_code = "`" + ("x" * 70_000) + "`"
+        body = performance_report._bounded_cycle_body(
+            ["<!-- marker -->", oversized_inline_code, "- 後続ブロック"],
+            ["", "## ガードレール", "", "- 一度に試す変数は1つ"],
+        )
+
+        self.assertNotIn("`", body)
+        self.assertNotIn("後続ブロック", body)
+        self.assertIn("## 表示上限", body)
+        self.assertIn("## ガードレール", body)
+
     def test_build_cycle_candidate_includes_gap_discovery_without_proposal(self) -> None:
         """issue #164 (Sol review指摘6): 形式仮説が無くても、gap動画の
         検索発見データがsnapshotにあればレポート候補を生成する。"""
@@ -600,6 +626,143 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertIn("冒頭30秒の維持率と次の1本", candidate["body"])
         self.assertIn("冒頭フックだけを変更", candidate["body"])
+
+    def test_build_cycle_candidate_includes_thumbnail_opening_slope_for_ideology(
+        self,
+    ) -> None:
+        """issue #125: source cornerに限定せず、30秒→中盤低下だけで候補化する。"""
+        spec = SimpleNamespace(id="ideology")
+        decision = self._decision(
+            status="insufficient_data", reason="比較可能な動画が2本"
+        )
+        section = performance_report.build_corner_section(
+            spec, "capitalism", decision, [], set()
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "script.json").write_text(
+                json.dumps(
+                    {
+                        "title": "資本主義が約束した自由",
+                        "_tts_timing": {
+                            "duration_seconds": 120.0,
+                            "segments": [
+                                {
+                                    "text": "自由という約束から始めます。",
+                                    "start_seconds": 0.0,
+                                    "end_seconds": 12.0,
+                                },
+                                {
+                                    "text": "その代償を確認します。",
+                                    "start_seconds": 12.0,
+                                    "end_seconds": 28.0,
+                                },
+                            ],
+                        },
+                        "_thumbnail_provenance": {
+                            "display_text": "資本主義が約束した自由",
+                            "render_status": "rendered",
+                            "youtube_set_status": "set",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            snapshot = {
+                "retention_curve": {"available": True},
+                "videos": [
+                    {
+                        "video_id": "ideology-mid-drop",
+                        "title": "資本主義が約束した自由",
+                        "corner": "capitalism",
+                        "workdir": tmp,
+                        "history_ts": "2026-07-25T00:00:00+00:00",
+                        "data_api": {"duration": "PT2M"},
+                        "analytics": {
+                            "retention_curve": [
+                                {"elapsed_ratio": 0.00, "watch_ratio": 0.95},
+                                {"elapsed_ratio": 0.10, "watch_ratio": 0.94},
+                                {"elapsed_ratio": 0.20, "watch_ratio": 0.93},
+                                {"elapsed_ratio": 0.25, "watch_ratio": 0.92},
+                                {"elapsed_ratio": 0.30, "watch_ratio": 0.90},
+                                {"elapsed_ratio": 0.35, "watch_ratio": 0.88},
+                                {"elapsed_ratio": 0.40, "watch_ratio": 0.86},
+                                {"elapsed_ratio": 0.45, "watch_ratio": 0.84},
+                                {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+                                {"elapsed_ratio": 1.00, "watch_ratio": 0.80},
+                            ]
+                        },
+                    }
+                ],
+            }
+
+            opening = performance_report._opening_signal_for_row(
+                snapshot["videos"][0]
+            )
+            self.assertIsNotNone(opening)
+            self.assertFalse(opening["actionable"])
+            self.assertEqual(
+                performance.retention_moments(
+                    snapshot["videos"][0]["analytics"]["retention_curve"]
+                ),
+                [],
+            )
+            candidate = performance_report.build_cycle_candidate(
+                spec,
+                [section],
+                datetime(2026, 7, 26, tzinfo=timezone.utc),
+                snapshot,
+            )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("サムネの約束・合成入力文と30秒→中盤の傾き", candidate["body"])
+        self.assertIn("生成時サムネ描画文字", candidate["body"])
+        self.assertIn("自由という約束から始めます", candidate["body"])
+        self.assertIn("一方だけを手動変更", candidate["body"])
+
+    def test_thumbnail_slope_without_comparison_evidence_is_not_a_candidate(
+        self,
+    ) -> None:
+        spec = SimpleNamespace(id="ideology")
+        decision = self._decision(
+            status="insufficient_data", reason="比較可能な動画が2本"
+        )
+        section = performance_report.build_corner_section(
+            spec, "capitalism", decision, [], set()
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "no-script-evidence",
+                    "corner": "capitalism",
+                    "data_api": {"duration": "PT2M"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.00, "watch_ratio": 0.95},
+                            {"elapsed_ratio": 0.10, "watch_ratio": 0.94},
+                            {"elapsed_ratio": 0.20, "watch_ratio": 0.93},
+                            {"elapsed_ratio": 0.25, "watch_ratio": 0.92},
+                            {"elapsed_ratio": 0.30, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.35, "watch_ratio": 0.88},
+                            {"elapsed_ratio": 0.40, "watch_ratio": 0.86},
+                            {"elapsed_ratio": 0.45, "watch_ratio": 0.84},
+                            {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+                            {"elapsed_ratio": 1.00, "watch_ratio": 0.80},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+
+        self.assertIsNone(candidate)
 
     def test_build_cycle_candidate_includes_first_three_drop_for_short_tier(self) -> None:
         """issue #127: corner名に依存せず、実際のShort tierの冒頭3秒低下だけで
@@ -1686,6 +1849,309 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
             performance.opening_retention_signal(curve, "PT1M", window_seconds=0)
         )
 
+    def test_opening_to_midpoint_signal_uses_real_points_and_slope(self) -> None:
+        """issue #125: 30秒から50%地点内の端点だけで変化と傾きを算出する。"""
+        signal = performance.opening_to_midpoint_retention_signal(
+            [
+                {"elapsed_ratio": 0.20, "watch_ratio": 0.94},  # 24秒: 対象外
+                {"elapsed_ratio": 0.25, "watch_ratio": 0.92},  # 30秒
+                {"elapsed_ratio": 0.30, "watch_ratio": 0.90},  # 36秒
+                {"elapsed_ratio": 0.35, "watch_ratio": 0.88},  # 42秒
+                {"elapsed_ratio": 0.40, "watch_ratio": 0.86},  # 48秒
+                {"elapsed_ratio": 0.45, "watch_ratio": 0.84},  # 54秒
+                {"elapsed_ratio": 0.50, "watch_ratio": 0.82},  # 60秒
+                {"elapsed_ratio": 0.75, "watch_ratio": 0.40},  # 対象外
+            ],
+            "PT2M",
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertTrue(signal["actionable"])
+        self.assertEqual(signal["start_seconds"], 30.0)
+        self.assertEqual(signal["end_seconds"], 60.0)
+        self.assertEqual(signal["observed_points"], 6)
+        self.assertAlmostEqual(signal["decline_ratio"], 0.10)
+        self.assertAlmostEqual(signal["slope_ratio_per_10_seconds"], -1 / 30)
+        self.assertAlmostEqual(signal["coverage_ratio"], 1.0)
+        self.assertEqual(signal["max_observed_gap_seconds"], 6.0)
+
+    def test_opening_to_midpoint_signal_includes_exact_threshold(self) -> None:
+        signal = performance.opening_to_midpoint_retention_signal(
+            [
+                {"elapsed_ratio": 0.25, "watch_ratio": 0.90},
+                {"elapsed_ratio": 0.3125, "watch_ratio": 0.88},
+                {"elapsed_ratio": 0.375, "watch_ratio": 0.86},
+                {"elapsed_ratio": 0.4375, "watch_ratio": 0.84},
+                {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+            ],
+            "PT2M",
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertTrue(signal["actionable"])
+        self.assertAlmostEqual(signal["decline_ratio"], 0.08)
+
+    def test_opening_to_midpoint_signal_is_fail_closed(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.50, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.50, "watch_ratio": 0.70},
+        ]
+        self.assertIsNone(
+            performance.opening_to_midpoint_retention_signal(curve, "PT60S")
+        )
+        self.assertIsNone(
+            performance.opening_to_midpoint_retention_signal(curve, None)
+        )
+        self.assertIsNone(
+            performance.opening_to_midpoint_retention_signal(curve, "PT2M")
+        )
+        self.assertIsNone(
+            performance.opening_to_midpoint_retention_signal(
+                [{"elapsed_ratio": 0.25, "watch_ratio": 0.90}], "PT2M"
+            )
+        )
+
+    def test_opening_to_midpoint_signal_rejects_sparse_or_missing_coverage(
+        self,
+    ) -> None:
+        cases = {
+            "middle_only": [
+                {"elapsed_ratio": 0.49, "watch_ratio": 0.90},
+                {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+            ],
+            "missing_start": [
+                {"elapsed_ratio": 0.35, "watch_ratio": 0.90},
+                {"elapsed_ratio": 0.40, "watch_ratio": 0.87},
+                {"elapsed_ratio": 0.45, "watch_ratio": 0.84},
+                {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+            ],
+            "missing_end": [
+                {"elapsed_ratio": 0.25, "watch_ratio": 0.90},
+                {"elapsed_ratio": 0.30, "watch_ratio": 0.87},
+                {"elapsed_ratio": 0.35, "watch_ratio": 0.84},
+                {"elapsed_ratio": 0.40, "watch_ratio": 0.82},
+            ],
+            "large_middle_gap": [
+                {"elapsed_ratio": 0.25, "watch_ratio": 0.90},
+                {"elapsed_ratio": 0.30, "watch_ratio": 0.88},
+                {"elapsed_ratio": 0.45, "watch_ratio": 0.84},
+                {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+            ],
+        }
+        for name, curve in cases.items():
+            with self.subTest(name=name):
+                self.assertIsNone(
+                    performance.opening_to_midpoint_retention_signal(
+                        curve, "PT2M"
+                    )
+                )
+
+    def test_opening_to_midpoint_signal_rejects_any_invalid_curve_point(
+        self,
+    ) -> None:
+        valid = [
+            {"elapsed_ratio": 0.25, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.30, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.35, "watch_ratio": 0.86},
+            {"elapsed_ratio": 0.40, "watch_ratio": 0.84},
+            {"elapsed_ratio": 0.45, "watch_ratio": 0.83},
+            {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+        ]
+        invalid_points = [
+            {"elapsed_ratio": 0.375, "watch_ratio": "bad"},
+            {"elapsed_ratio": 0.375, "watch_ratio": float("nan")},
+            {"elapsed_ratio": 0.375, "watch_ratio": -0.1},
+            {"elapsed_ratio": "bad", "watch_ratio": 0.85},
+        ]
+        for invalid in invalid_points:
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(
+                    performance.opening_to_midpoint_retention_signal(
+                        [*valid, invalid], "PT2M"
+                    )
+                )
+
+    def test_opening_to_midpoint_signal_merges_only_identical_duplicates(
+        self,
+    ) -> None:
+        base = [
+            {"elapsed_ratio": 0.25, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.30, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.35, "watch_ratio": 0.86},
+            {"elapsed_ratio": 0.40, "watch_ratio": 0.84},
+            {"elapsed_ratio": 0.45, "watch_ratio": 0.83},
+            {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+        ]
+        identical = [*base, dict(base[2])]
+        signal = performance.opening_to_midpoint_retention_signal(
+            identical, "PT2M"
+        )
+        self.assertIsNotNone(signal)
+        self.assertTrue(signal["actionable"])
+
+        conflicting = [
+            *base,
+            {"elapsed_ratio": 0.35, "watch_ratio": 0.50},
+        ]
+        self.assertIsNone(
+            performance.opening_to_midpoint_retention_signal(
+                conflicting, "PT2M"
+            )
+        )
+
+    def test_tts_opening_excerpt_uses_actual_segments_and_marks_boundary(self) -> None:
+        excerpt = performance_report._tts_opening_excerpt(
+            {
+                "_tts_timing": {
+                    "duration_seconds": 70.0,
+                    "segments": [
+                        {
+                            "text": "最初の文です。",
+                            "start_seconds": 0.0,
+                            "end_seconds": 20.0,
+                        },
+                        {
+                            "text": "境界をまたぐ文です。",
+                            "start_seconds": 20.0,
+                            "end_seconds": 35.0,
+                        },
+                        {
+                            "text": "中盤の文です。",
+                            "start_seconds": 35.0,
+                            "end_seconds": 50.0,
+                        },
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual(
+            excerpt["text"], "最初の文です。 境界をまたぐ文です。"
+        )
+        self.assertTrue(excerpt["crosses_boundary"])
+        self.assertFalse(excerpt["truncated"])
+
+    def test_tts_opening_excerpt_marks_truncated_input(self) -> None:
+        long_text = "あ" * 450
+        excerpt = performance_report._tts_opening_excerpt(
+            {
+                "_tts_timing": {
+                    "duration_seconds": 40.0,
+                    "segments": [
+                        {
+                            "text": long_text,
+                            "start_seconds": 0.0,
+                            "end_seconds": 35.0,
+                        }
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual(
+            len(excerpt["text"]),
+            performance_report._THUMBNAIL_OPENING_EXCERPT_LIMIT,
+        )
+        self.assertTrue(excerpt["crosses_boundary"])
+        self.assertTrue(excerpt["truncated"])
+
+    def test_tts_opening_excerpt_rejects_invalid_timing(self) -> None:
+        self.assertIsNone(performance_report._tts_opening_excerpt({}))
+        self.assertIsNone(
+            performance_report._tts_opening_excerpt(
+                {
+                    "_tts_timing": {
+                        "duration_seconds": 60,
+                        "segments": [
+                            {
+                                "text": "後の文",
+                                "start_seconds": 10,
+                                "end_seconds": 20,
+                            },
+                            {
+                                "text": "重なる文",
+                                "start_seconds": 15,
+                                "end_seconds": 25,
+                            },
+                        ],
+                    }
+                }
+            )
+        )
+
+    def test_thumbnail_opening_evidence_requires_all_provenance(self) -> None:
+        def write_script(payload: dict) -> dict:
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            Path(tmp.name, "script.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            return {"workdir": tmp.name}
+
+        timing = {
+            "duration_seconds": 60,
+            "segments": [
+                {"text": "冒頭です。", "start_seconds": 0, "end_seconds": 10}
+            ],
+        }
+        valid = {
+            "title": "生成タイトル",
+            "_tts_timing": timing,
+            "_thumbnail_provenance": {
+                "display_text": "描画文字",
+                "render_status": "rendered",
+                "youtube_set_status": "set",
+            },
+        }
+        evidence = performance_report._thumbnail_opening_evidence_for_row(
+            write_script(valid)
+        )
+        self.assertTrue(evidence["available"])
+        self.assertEqual(evidence["display_text"], "描画文字")
+
+        variants = {
+            "missing_title": {**valid, "title": ""},
+            "render_failed": {
+                **valid,
+                "_thumbnail_provenance": {
+                    **valid["_thumbnail_provenance"],
+                    "render_status": "failed",
+                },
+            },
+            "set_failed": {
+                **valid,
+                "_thumbnail_provenance": {
+                    **valid["_thumbnail_provenance"],
+                    "youtube_set_status": "failed",
+                },
+            },
+            "missing_timing": {key: value for key, value in valid.items() if key != "_tts_timing"},
+        }
+        for name, payload in variants.items():
+            with self.subTest(name=name):
+                self.assertFalse(
+                    performance_report._thumbnail_opening_evidence_for_row(
+                        write_script(payload)
+                    )["available"]
+                )
+        self.assertFalse(
+            performance_report._thumbnail_opening_evidence_for_row(
+                {"title": "Data APIだけの現在タイトル"}
+            )["available"]
+        )
+
+    def test_safe_markdown_inline_disables_mentions_html_and_links(self) -> None:
+        safe = performance_report._safe_markdown_inline(
+            "@user @org/team <details> [label](https://example.com) `code`"
+        )
+
+        self.assertNotIn("@user", safe)
+        self.assertNotIn("@org/team", safe)
+        self.assertIn("@\u200buser", safe)
+        self.assertIn("&lt;details&gt;", safe)
+        self.assertIn(r"\[label\]\(https://example.com\)", safe)
+        self.assertIn(r"\`code\`", safe)
+
     def test_short_tier_detection_is_fail_closed(self) -> None:
         self.assertEqual(
             performance_report._youtube_short_tier(
@@ -1949,6 +2415,163 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         self.assertLess(text.index("`latest-strong`"), text.index("`latest-mild`"))
         self.assertNotIn("`old-0`", text)
         self.assertIn("他にも1本", text)
+
+    def test_thumbnail_opening_slope_text_prioritises_latest_then_decline(
+        self,
+    ) -> None:
+        def row(video_id: str, published: str, midpoint_watch: float) -> dict:
+            return {
+                "video_id": video_id,
+                "title": f"{video_id} title",
+                "corner": "communism",
+                "workdir": self._workdir(),
+                "history_ts": published,
+                "data_api": {"duration": "PT2M"},
+                "analytics": {
+                    "retention_curve": [
+                        {"elapsed_ratio": 0.00, "watch_ratio": 0.95},
+                        {"elapsed_ratio": 0.25, "watch_ratio": 0.92},
+                        {"elapsed_ratio": 0.30, "watch_ratio": 0.90},
+                        {"elapsed_ratio": 0.35, "watch_ratio": 0.88},
+                        {"elapsed_ratio": 0.40, "watch_ratio": 0.86},
+                        {"elapsed_ratio": 0.45, "watch_ratio": 0.84},
+                        {"elapsed_ratio": 0.50, "watch_ratio": midpoint_watch},
+                        {"elapsed_ratio": 1.00, "watch_ratio": midpoint_watch},
+                    ]
+                },
+            }
+
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                row("older-strongest", "2026-08-09T00:00:00+00:00", 0.62),
+                row("latest-mild", "2026-08-10T00:00:00+00:00", 0.82),
+                row("latest-strong", "2026-08-10T00:00:00+00:00", 0.72),
+            ],
+        }
+
+        text = performance_report._thumbnail_opening_slope_text(
+            snapshot, "communism"
+        )
+
+        self.assertLess(text.index("`latest-strong`"), text.index("`latest-mild`"))
+        self.assertLess(text.index("`latest-mild`"), text.index("`older-strongest`"))
+        self.assertIn("VOICEVOX合成入力文", text)
+        self.assertIn("一方だけを手動変更", text)
+        self.assertIn("サムネ背景画像の意味的一致", text)
+
+    def test_thumbnail_opening_slope_text_withholds_for_short_video(self) -> None:
+        text = performance_report._thumbnail_opening_slope_text(
+            {
+                "retention_curve": {"available": True},
+                "videos": [
+                    {
+                        "video_id": "short",
+                        "corner": "shorts",
+                        "data_api": {"duration": "PT60S"},
+                        "analytics": {
+                            "retention_curve": [
+                                {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                                {"elapsed_ratio": 0.5, "watch_ratio": 0.80},
+                                {"elapsed_ratio": 1.0, "watch_ratio": 0.60},
+                            ]
+                        },
+                    }
+                ],
+            },
+            "shorts",
+        )
+
+        self.assertIn("分析可能な維持率カーブがありません", text)
+        self.assertIn("判定材料不足 1本", text)
+        self.assertIn("推測で補いません", text)
+
+    def test_thumbnail_opening_slope_text_withholds_without_evidence(self) -> None:
+        text = performance_report._thumbnail_opening_slope_text(
+            {
+                "retention_curve": {"available": True},
+                "videos": [
+                    {
+                        "video_id": "legacy-no-timing",
+                        "corner": "video",
+                        "data_api": {"duration": "PT2M"},
+                        "analytics": {
+                            "retention_curve": [
+                                {"elapsed_ratio": 0.25, "watch_ratio": 0.92},
+                                {"elapsed_ratio": 0.30, "watch_ratio": 0.90},
+                                {"elapsed_ratio": 0.35, "watch_ratio": 0.88},
+                                {"elapsed_ratio": 0.40, "watch_ratio": 0.86},
+                                {"elapsed_ratio": 0.45, "watch_ratio": 0.84},
+                                {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+                            ]
+                        },
+                    }
+                ],
+            },
+            "video",
+        )
+
+        self.assertIn("比較証拠不足 1本", text)
+        self.assertIn("#125の変更提案には使いません", text)
+        self.assertIn("#125の変更を提案しません", text)
+        self.assertNotIn("- 次の1本:", text)
+
+    def test_thumbnail_opening_slope_text_labels_truncated_synthesis_input(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "script.json").write_text(
+                json.dumps(
+                    {
+                        "title": "生成タイトル",
+                        "_tts_timing": {
+                            "duration_seconds": 120,
+                            "segments": [
+                                {
+                                    "text": "あ" * 450,
+                                    "start_seconds": 0,
+                                    "end_seconds": 35,
+                                }
+                            ],
+                        },
+                        "_thumbnail_provenance": {
+                            "display_text": "描画文字",
+                            "render_status": "rendered",
+                            "youtube_set_status": "set",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            text = performance_report._thumbnail_opening_slope_text(
+                {
+                    "retention_curve": {"available": True},
+                    "videos": [
+                        {
+                            "video_id": "long-opening",
+                            "corner": "video",
+                            "workdir": tmp,
+                            "data_api": {"duration": "PT2M"},
+                            "analytics": {
+                                "retention_curve": [
+                                    {"elapsed_ratio": 0.25, "watch_ratio": 0.92},
+                                    {"elapsed_ratio": 0.30, "watch_ratio": 0.90},
+                                    {"elapsed_ratio": 0.35, "watch_ratio": 0.88},
+                                    {"elapsed_ratio": 0.40, "watch_ratio": 0.86},
+                                    {"elapsed_ratio": 0.45, "watch_ratio": 0.84},
+                                    {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
+                                ]
+                            },
+                        }
+                    ],
+                },
+                "video",
+            )
+
+        self.assertIn("30秒境界をまたぐ文を含む", text)
+        self.assertIn("先頭400字の抜粋", text)
+        self.assertNotIn("全文表示", text)
 
     def test_retention_moments_detects_spike_and_dip(self) -> None:
         curve = [
@@ -2337,8 +2960,24 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         path.write_text(
             json.dumps(
                 {
+                    "title": "生成時タイトル",
                     "narration": "あ" * 20 + "い" * 30,
                     "scenes": [{"caption": "導入"}, {"caption": "展開"}],
+                    "_tts_timing": {
+                        "duration_seconds": 100.0,
+                        "segments": [
+                            {
+                                "text": "冒頭の合成入力文です。",
+                                "start_seconds": 0.0,
+                                "end_seconds": 12.0,
+                            }
+                        ],
+                    },
+                    "_thumbnail_provenance": {
+                        "display_text": "生成時タイトル",
+                        "render_status": "rendered",
+                        "youtube_set_status": "set",
+                    },
                 }
             ),
             encoding="utf-8",

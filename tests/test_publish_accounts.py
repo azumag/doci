@@ -295,6 +295,35 @@ class PublishAccountsTest(unittest.TestCase):
         self.assertEqual(
             thumbnail_mock.call_args.kwargs["token_file"], settings.youtube.token
         )
+        self.assertEqual(result.thumbnail_status, "set")
+        self.assertEqual(result.thumbnail_detail, "")
+
+    def test_youtube_thumbnail_failure_is_recorded_without_losing_upload(
+        self,
+    ) -> None:
+        settings = self._youtube_spec("alpha")
+        thumbnail_path = self.root / "thumbnail.png"
+        with (
+            patch.object(youtube, "upload", return_value="video-id"),
+            patch.object(
+                youtube, "set_thumbnail", side_effect=RuntimeError("set failed")
+            ),
+        ):
+            result = publish._do_upload(
+                "youtube",
+                self.root / "video.mp4",
+                "Title",
+                "Description",
+                ["tag"],
+                self.route,
+                settings,
+                thumbnail_path,
+            )
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.id, "video-id")
+        self.assertEqual(result.thumbnail_status, "failed")
+        self.assertEqual(result.thumbnail_detail, "RuntimeError")
 
     def test_youtube_privacy_override_takes_precedence_for_one_upload(self) -> None:
         settings = self._youtube_spec("alpha")

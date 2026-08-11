@@ -24,6 +24,9 @@ MIN_EVAL_PEERS = 4  # 2 * MIN_GROUP_SIZE。medianとの相対比較に最低限�
 MAX_SUBSCRIBED_RETENTION_VIDEOS_PER_CORNER = 5
 MIN_SUBSCRIBED_RETENTION_SEGMENT_IMPRESSIONS = 20
 MIN_SUBSCRIBED_RETENTION_COMMON_POINTS = 5
+_OPENING_TO_MIDPOINT_MIN_COVERAGE = 0.80
+_OPENING_TO_MIDPOINT_MAX_ENDPOINT_SECONDS = 10.0
+_OPENING_TO_MIDPOINT_MAX_GAP_SECONDS = 30.0
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -322,6 +325,91 @@ def retention_moment_scenes(
     return annotated
 
 
+def _retention_points_in_range(
+    curve: list[dict],
+    start_ratio: float,
+    end_ratio: float,
+    *,
+    strict: bool = False,
+) -> list[dict] | None:
+    """指定した経過比率内の維持率観測点を正規化する。
+
+    同じ経過位置・同じ値の重複だけを統合する。同じ位置に異なる値が
+    ある場合は返却順で結果が変わるため、範囲全体を判定材料不足とする。
+    """
+    if (
+        not isinstance(curve, list)
+        or not math.isfinite(start_ratio)
+        or not math.isfinite(end_ratio)
+        or start_ratio < 0
+        or end_ratio > 1
+        or start_ratio > end_ratio
+    ):
+        return None
+
+    points: list[dict] = []
+    for raw in curve:
+        if not isinstance(raw, dict):
+            if strict:
+                return None
+            continue
+        try:
+            elapsed_ratio = float(raw.get("elapsed_ratio"))
+            watch_ratio = float(raw.get("watch_ratio"))
+        except (TypeError, ValueError):
+            if strict:
+                return None
+            continue
+        if (
+            not math.isfinite(elapsed_ratio)
+            or not math.isfinite(watch_ratio)
+            or elapsed_ratio < 0
+            or elapsed_ratio > 1 + 1e-9
+            or watch_ratio < 0
+        ):
+            if strict:
+                return None
+            continue
+        points.append(
+            {
+                "elapsed_ratio": elapsed_ratio,
+                "watch_ratio": watch_ratio,
+            }
+        )
+    if not strict:
+        points = [
+            point
+            for point in points
+            if start_ratio <= point["elapsed_ratio"] <= end_ratio + 1e-9
+        ]
+    points.sort(key=lambda item: item["elapsed_ratio"])
+
+    unique_points: list[dict] = []
+    for point in points:
+        if unique_points and math.isclose(
+            unique_points[-1]["elapsed_ratio"],
+            point["elapsed_ratio"],
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            if not math.isclose(
+                unique_points[-1]["watch_ratio"],
+                point["watch_ratio"],
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                return None
+            continue
+        unique_points.append(point)
+    if strict:
+        unique_points = [
+            point
+            for point in unique_points
+            if start_ratio <= point["elapsed_ratio"] <= end_ratio + 1e-9
+        ]
+    return unique_points
+
+
 def opening_retention_signal(
     curve: list[dict],
     duration_iso: str | None,
@@ -359,50 +447,9 @@ def opening_retention_signal(
 
     opening_seconds = min(requested_window, total_seconds)
     opening_ratio = opening_seconds / total_seconds
-    points: list[dict] = []
-    for raw in curve if isinstance(curve, list) else []:
-        if not isinstance(raw, dict):
-            continue
-        try:
-            elapsed_ratio = float(raw.get("elapsed_ratio"))
-            watch_ratio = float(raw.get("watch_ratio"))
-        except (TypeError, ValueError):
-            continue
-        if (
-            not math.isfinite(elapsed_ratio)
-            or not math.isfinite(watch_ratio)
-            or not 0.0 <= elapsed_ratio <= opening_ratio + 1e-9
-            or watch_ratio < 0
-        ):
-            continue
-        points.append(
-            {
-                "elapsed_ratio": elapsed_ratio,
-                "watch_ratio": watch_ratio,
-            }
-        )
-    points.sort(key=lambda item: item["elapsed_ratio"])
-
-    # 同じ経過位置・同じ値の重複だけを統合する。同じ位置に異なる値が
-    # ある場合は返却順によって検知結果が変わるため、カーブ全体を
-    # 判定材料不足として扱う（Sol review指摘）。
-    unique_points: list[dict] = []
-    for point in points:
-        if unique_points and math.isclose(
-            unique_points[-1]["elapsed_ratio"],
-            point["elapsed_ratio"],
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ):
-            if not math.isclose(
-                unique_points[-1]["watch_ratio"],
-                point["watch_ratio"],
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            ):
-                return None
-            continue
-        unique_points.append(point)
+    unique_points = _retention_points_in_range(curve, 0.0, opening_ratio)
+    if unique_points is None:
+        return None
     if len(unique_points) < 2:
         return None
 
@@ -457,6 +504,108 @@ def opening_retention_signal(
         ),
         "scene_index": scene["index"] if scene else None,
         "scene_caption": scene["caption"] if scene else "",
+        "threshold": detection_threshold,
+        "actionable": actionable,
+    }
+
+
+def opening_to_midpoint_retention_signal(
+    curve: list[dict],
+    duration_iso: str | None,
+    *,
+    opening_seconds: float = 30.0,
+    midpoint_ratio: float = 0.5,
+    threshold: float = 0.08,
+) -> dict | None:
+    """冒頭30秒後から動画中間点までの実測維持率の傾きを返す（issue #125）。
+
+    範囲内の最初と最後の観測点を結ぶ変化量と10秒当たりの傾きを返す。
+    指定範囲に有効点が2点未満、両端から遠い、区間カバー率80%未満、観測間隔が
+    大きい、動画が短く範囲を作れない、動画長不明、カーブ中に不正値がある、
+    または同一位置に異なる値がある場合は秒位置や傾きを推測せず ``None`` にする。
+    ``threshold`` は報告対象を絞る検知閾値で、原因や合否を示さない。
+    """
+    total_seconds = _iso8601_duration_seconds(duration_iso)
+    try:
+        opening = float(opening_seconds)
+        midpoint = float(midpoint_ratio)
+        detection_threshold = float(threshold)
+    except (TypeError, ValueError):
+        return None
+    if (
+        total_seconds is None
+        or total_seconds <= 0
+        or not math.isfinite(opening)
+        or opening <= 0
+        or not math.isfinite(midpoint)
+        or not 0 < midpoint <= 1
+        or not math.isfinite(detection_threshold)
+        or detection_threshold < 0
+    ):
+        return None
+
+    start_ratio = opening / total_seconds
+    if start_ratio >= midpoint:
+        return None
+    points = _retention_points_in_range(
+        curve,
+        start_ratio,
+        midpoint,
+        strict=True,
+    )
+    if points is None or len(points) < 2:
+        return None
+
+    start = points[0]
+    end = points[-1]
+    requested_start_seconds = opening
+    requested_end_seconds = midpoint * total_seconds
+    requested_span_seconds = requested_end_seconds - requested_start_seconds
+    start_seconds = start["elapsed_ratio"] * total_seconds
+    end_seconds = end["elapsed_ratio"] * total_seconds
+    span_seconds = end_seconds - start_seconds
+    if span_seconds <= 0 or not math.isfinite(span_seconds):
+        return None
+    endpoint_tolerance_seconds = min(
+        _OPENING_TO_MIDPOINT_MAX_ENDPOINT_SECONDS,
+        max(2.0, total_seconds * 0.02),
+    )
+    max_gap_seconds = min(
+        _OPENING_TO_MIDPOINT_MAX_GAP_SECONDS,
+        max(5.0, requested_span_seconds * 0.25),
+    )
+    observed_gaps = [
+        (current["elapsed_ratio"] - previous["elapsed_ratio"]) * total_seconds
+        for previous, current in zip(points, points[1:])
+    ]
+    coverage_ratio = span_seconds / requested_span_seconds
+    if (
+        start_seconds - requested_start_seconds > endpoint_tolerance_seconds + 1e-9
+        or requested_end_seconds - end_seconds > endpoint_tolerance_seconds + 1e-9
+        or coverage_ratio < _OPENING_TO_MIDPOINT_MIN_COVERAGE
+        or any(gap > max_gap_seconds + 1e-9 for gap in observed_gaps)
+    ):
+        return None
+    change_ratio = end["watch_ratio"] - start["watch_ratio"]
+    decline_ratio = max(0.0, -change_ratio)
+    slope_ratio_per_10_seconds = change_ratio / span_seconds * 10.0
+    actionable = (
+        decline_ratio > detection_threshold
+        or math.isclose(decline_ratio, detection_threshold, abs_tol=1e-9)
+    )
+    return {
+        "opening_seconds": opening,
+        "midpoint_ratio": midpoint,
+        "start_seconds": round(start_seconds, 1),
+        "end_seconds": round(end_seconds, 1),
+        "start_watch_ratio": start["watch_ratio"],
+        "end_watch_ratio": end["watch_ratio"],
+        "change_ratio": change_ratio,
+        "decline_ratio": decline_ratio,
+        "slope_ratio_per_10_seconds": slope_ratio_per_10_seconds,
+        "observed_points": len(points),
+        "coverage_ratio": coverage_ratio,
+        "max_observed_gap_seconds": round(max(observed_gaps), 3),
         "threshold": detection_threshold,
         "actionable": actionable,
     }

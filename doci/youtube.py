@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from datetime import date
 import json
+import math
 from pathlib import Path
 import re
 import time
@@ -972,7 +973,9 @@ def video_retention_curves(
     `failed_by_video` へ記録して継続する。`invalidFilters` 等のリクエスト構造
     不備や 401/403/429/5xx・ネットワーク障害は全体障害として即時 raise する。
     Shorts等でAPIがデータを返さない場合は空のまま（欠落を0や「なし」と断定
-    しない fail-closed）。
+    しない fail-closed）。応答に欠落・変換不能・非有限・範囲外の観測点や
+    同一経過位置の異なる値が1件でもあれば、残りの点だけで曲線を作らず、
+    その動画全体を `failed_by_video` へ記録する。
 
     戻り値は `(by_video, failed_by_video)` のタプル。
     """
@@ -1055,21 +1058,64 @@ def video_retention_curves(
                 failed_by_video[video_id] = f"HTTP {status}: {reason}"
                 continue
             raise
-        headers = [header.get("name", "") for header in data.get("columnHeaders", [])]
+        raw_headers = data.get("columnHeaders", [])
+        if not isinstance(raw_headers, list) or any(
+            not isinstance(header, dict) for header in raw_headers
+        ):
+            failed_by_video[video_id] = "invalid retention response headers"
+            continue
+        raw_header_names = [header.get("name") for header in raw_headers]
+        if any(
+            not isinstance(name, str) or not name.strip()
+            for name in raw_header_names
+        ):
+            failed_by_video[video_id] = "invalid retention response headers"
+            continue
+        headers = raw_header_names
+        if len(headers) != len(set(headers)):
+            failed_by_video[video_id] = "duplicate retention response columns"
+            continue
+        required_headers = {"elapsedVideoTimeRatio", "audienceWatchRatio"}
+        if include_segment_impressions:
+            required_headers.add("totalSegmentImpressions")
+        raw_rows = data.get("rows", [])
+        if not isinstance(raw_rows, list):
+            failed_by_video[video_id] = "invalid retention response rows"
+            continue
+        if raw_rows and not required_headers.issubset(headers):
+            failed_by_video[video_id] = "missing retention response columns"
+            continue
         points: list[dict] = []
-        for values in data.get("rows", []):
+        invalid_reason = ""
+        for values in raw_rows:
+            if not isinstance(values, (list, tuple)) or len(values) != len(headers):
+                invalid_reason = "invalid retention response row"
+                break
             row = dict(zip(headers, values))
             ratio = row.get("elapsedVideoTimeRatio")
             watch_ratio = row.get("audienceWatchRatio")
-            if ratio is None or watch_ratio is None:
-                continue
+            if (
+                isinstance(ratio, bool)
+                or isinstance(watch_ratio, bool)
+                or ratio is None
+                or watch_ratio is None
+            ):
+                invalid_reason = "invalid retention response row"
+                break
             try:
                 ratio_value = float(ratio)
                 watch_value = float(watch_ratio)
-            except (TypeError, ValueError):
-                continue
-            if not (0.0 < ratio_value <= 1.0):
-                continue
+            except (TypeError, ValueError, OverflowError):
+                invalid_reason = "invalid retention response row"
+                break
+            if (
+                not math.isfinite(ratio_value)
+                or not math.isfinite(watch_value)
+                or not 0.0 < ratio_value <= 1.0
+                or watch_value < 0
+            ):
+                invalid_reason = "invalid retention response row"
+                break
             point = {
                 "elapsed_ratio": ratio_value,
                 "watch_ratio": watch_value,
@@ -1077,19 +1123,45 @@ def video_retention_curves(
             if include_segment_impressions:
                 raw_impressions = row.get("totalSegmentImpressions")
                 if isinstance(raw_impressions, bool) or raw_impressions is None:
-                    continue
+                    invalid_reason = "invalid retention response row"
+                    break
                 try:
                     impressions = int(raw_impressions)
                     numeric_impressions = float(raw_impressions)
                 except (TypeError, ValueError, OverflowError):
-                    continue
-                if impressions < 0 or numeric_impressions != float(impressions):
-                    continue
+                    invalid_reason = "invalid retention response row"
+                    break
+                if (
+                    not math.isfinite(numeric_impressions)
+                    or impressions < 0
+                    or numeric_impressions != float(impressions)
+                ):
+                    invalid_reason = "invalid retention response row"
+                    break
                 point["segment_impressions"] = impressions
             points.append(point)
+        if invalid_reason:
+            failed_by_video[video_id] = invalid_reason
+            continue
         if points:
             points.sort(key=lambda item: item["elapsed_ratio"])
-            by_video[video_id] = points
+            unique_points: list[dict] = []
+            for point in points:
+                if unique_points and math.isclose(
+                    point["elapsed_ratio"],
+                    unique_points[-1]["elapsed_ratio"],
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ):
+                    if point != unique_points[-1]:
+                        invalid_reason = "conflicting retention response rows"
+                        break
+                    continue
+                unique_points.append(point)
+            if invalid_reason:
+                failed_by_video[video_id] = invalid_reason
+                continue
+            by_video[video_id] = unique_points
     return by_video, failed_by_video
 
 

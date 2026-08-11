@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from doci import youtube
+from doci import performance, youtube
 
 
 class _FakeResp:
@@ -1074,7 +1074,7 @@ class YouTubeSearchTest(unittest.TestCase):
             ],
             "rows": [
                 [0.2, 0.8, 35],
-                [0.4, 0.7, 19.5],
+                [0.4, 0.7, 20],
                 [0.6, 0.6, 21],
             ],
         }
@@ -1101,6 +1101,11 @@ class YouTubeSearchTest(unittest.TestCase):
                     "elapsed_ratio": 0.2,
                     "watch_ratio": 0.8,
                     "segment_impressions": 35,
+                },
+                {
+                    "elapsed_ratio": 0.4,
+                    "watch_ratio": 0.7,
+                    "segment_impressions": 20,
                 },
                 {
                     "elapsed_ratio": 0.6,
@@ -1240,8 +1245,8 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(curves, {})
         self.assertEqual(failed, {})
 
-    def test_video_retention_curves_drops_out_of_range_and_empty_rows(self) -> None:
-        """issue #149/#128: 公式範囲0.01〜1.0外と欠落行を除外する。"""
+    def test_video_retention_curves_rejects_whole_curve_with_invalid_row(self) -> None:
+        """issue #125/#149: 不正点だけを捨てて部分曲線を返さない。"""
         reports = mock.Mock()
         reports.query.return_value.execute.return_value = {
             "columnHeaders": [
@@ -1249,14 +1254,91 @@ class YouTubeSearchTest(unittest.TestCase):
                 {"name": "audienceWatchRatio"},
             ],
             "rows": [
-                ["-0.1", 0.60],
-                ["0", 0.60],
-                ["0.01", 0.99],
-                ["1.0", 0.20],
-                ["1.5", 0.50],
-                ["", 0.50],
-                ["0.2", "bad"],
+                [0.25, 0.90],
+                [0.30, 0.88],
+                [0.35, 0.86],
+                [0.40, "bad"],
+                [0.45, 0.84],
+                [0.50, 0.82],
             ],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            curves, failed = youtube.video_retention_curves(
+                ["abc123"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertEqual(curves, {})
+        self.assertEqual(failed, {"abc123": "invalid retention response row"})
+
+    def test_video_retention_curves_rejects_each_malformed_curve_shape(self) -> None:
+        """issue #125: 欠落、非有限、負値、範囲外、異値重複を動画単位で拒否する。"""
+        valid_headers = [
+            {"name": "elapsedVideoTimeRatio"},
+            {"name": "audienceWatchRatio"},
+        ]
+        cases = {
+            "missing_column": (
+                [{"name": "elapsedVideoTimeRatio"}],
+                [[0.25], [0.50]],
+            ),
+            "missing_row_value": (valid_headers, [[0.25, 0.90], [0.40]]),
+            "nan_watch_ratio": (valid_headers, [[0.25, 0.90], [0.40, "NaN"]]),
+            "negative_watch_ratio": (valid_headers, [[0.25, 0.90], [0.40, -0.1]]),
+            "out_of_range_elapsed": (valid_headers, [[0.25, 0.90], [1.1, 0.80]]),
+            "conflicting_duplicate": (
+                valid_headers,
+                [[0.25, 0.90], [0.40, 0.85], [0.40, 0.80], [0.50, 0.82]],
+            ),
+            "non_string_extra_header": (
+                [*valid_headers, {"name": 123}],
+                [[0.25, 0.90, "unused"], [0.50, 0.82, "unused"]],
+            ),
+            "missing_extra_header_name": (
+                [*valid_headers, {}],
+                [[0.25, 0.90, "unused"], [0.50, 0.82, "unused"]],
+            ),
+        }
+        for name, (headers, rows) in cases.items():
+            with self.subTest(name=name):
+                reports = mock.Mock()
+                reports.query.return_value.execute.return_value = {
+                    "columnHeaders": headers,
+                    "rows": rows,
+                }
+                service = mock.Mock()
+                service.reports.return_value = reports
+                with (
+                    mock.patch.object(
+                        youtube, "_load_credentials", return_value=object()
+                    ),
+                    mock.patch(
+                        "googleapiclient.discovery.build", return_value=service
+                    ),
+                ):
+                    curves, failed = youtube.video_retention_curves(
+                        ["abc123"],
+                        start_date="2026-07-01",
+                        end_date="2026-07-26",
+                    )
+
+                self.assertEqual(curves, {})
+                self.assertIn("abc123", failed)
+
+    def test_video_retention_curves_deduplicates_identical_points(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": [
+                {"name": "elapsedVideoTimeRatio"},
+                {"name": "audienceWatchRatio"},
+            ],
+            "rows": [[0.25, 0.90], [0.25, 0.90], [0.50, 0.82]],
         }
         service = mock.Mock()
         service.reports.return_value = reports
@@ -1274,12 +1356,60 @@ class YouTubeSearchTest(unittest.TestCase):
             curves,
             {
                 "abc123": [
-                    {"elapsed_ratio": 0.01, "watch_ratio": 0.99},
-                    {"elapsed_ratio": 1.0, "watch_ratio": 0.20},
+                    {"elapsed_ratio": 0.25, "watch_ratio": 0.90},
+                    {"elapsed_ratio": 0.50, "watch_ratio": 0.82},
                 ]
             },
         )
         self.assertEqual(failed, {})
+
+    def test_video_retention_curves_separates_invalid_video_from_dense_boundary(
+        self,
+    ) -> None:
+        """issue #125: 不正動画を拒否しても、別動画の8pp境界は保持する。"""
+        headers = [
+            {"name": "elapsedVideoTimeRatio"},
+            {"name": "audienceWatchRatio"},
+        ]
+        invalid_page = {
+            "columnHeaders": headers,
+            "rows": [[0.25, 0.90], [0.40, "bad"], [0.50, 0.82]],
+        }
+        valid_page = {
+            "columnHeaders": headers,
+            "rows": [
+                [0.25, 0.90],
+                [0.30, 0.88],
+                [0.35, 0.86],
+                [0.40, 0.85],
+                [0.45, 0.84],
+                [0.50, 0.82],
+            ],
+        }
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [invalid_page, valid_page]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            curves, failed = youtube.video_retention_curves(
+                ["bad-id", "ok-id"],
+                start_date="2026-07-01",
+                end_date="2026-07-26",
+            )
+
+        self.assertNotIn("bad-id", curves)
+        self.assertIn("bad-id", failed)
+        self.assertEqual(len(curves["ok-id"]), 6)
+        signal = performance.opening_to_midpoint_retention_signal(
+            curves["ok-id"],
+            "PT2M",
+        )
+        self.assertIsNotNone(signal)
+        self.assertTrue(signal["actionable"])
+        self.assertAlmostEqual(signal["decline_ratio"], 0.08)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from doci import (
     publish,
     research as research_mod,
     run_daily,
+    thumbnail,
     topic_ledger,
     voicevox,
 )
@@ -978,6 +979,8 @@ factcheck = false
         publish_unknown: bool = False,
         publish_results: list[publish.PublishResult] | None = None,
         generate_side_effect=None,
+        tts_segments: list[voicevox.Segment] | None = None,
+        thumbnail_render_error: bool = False,
     ):
         def fake_fetch_image(_prompt, out_path, **_kwargs):
             Path(out_path).write_bytes(b"image")
@@ -1001,6 +1004,9 @@ factcheck = false
             url=f"https://youtu.be/{video_id}",
             id=None if publish_dry_run or publish_unknown else video_id,
             detail="投稿結果不明" if publish_unknown else "",
+            thumbnail_status=(
+                "set" if not publish_dry_run and not publish_unknown else ""
+            ),
         )
         result_rows = publish_results if publish_results is not None else [uploaded]
         with contextlib.ExitStack() as stack:
@@ -1022,14 +1028,23 @@ factcheck = false
                     return_value=voicevox.TtsResult(
                         wav_path=self.root / "fake.wav",
                         duration=10.0,
-                        segments=[],
+                        segments=list(tts_segments or []),
                     ),
                 )
             )
             enter(patch.object(run_daily.assets, "fetch_video", side_effect=fake_fetch_image))
             enter(patch.object(run_daily.assets, "fetch_image", side_effect=fake_fetch_image))
             enter(patch.object(run_daily.compose, "compose", side_effect=fake_compose))
-            enter(patch("doci.thumbnail.render", side_effect=fake_thumbnail))
+            enter(
+                patch(
+                    "doci.thumbnail.render",
+                    side_effect=(
+                        RuntimeError("render failed")
+                        if thumbnail_render_error
+                        else fake_thumbnail
+                    ),
+                )
+            )
             enter(patch("doci.thumbnail.to_16x9", side_effect=fake_thumbnail))
             publish_mock = enter(patch("doci.publish.publish", return_value=result_rows))
             ledger_reserve_mock = enter(
@@ -1136,6 +1151,125 @@ max_uploads_per_day = {max_uploads_per_day}
             "public",
         )
         self.assertEqual(result["youtube_privacy"], "public")
+
+    def test_run_daily_persists_actual_tts_segment_timing(self) -> None:
+        """issue #125: 後日の照合に合成入力文とWAV区間を残す。"""
+        spec = self._review_spec("review-tts-timing")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+
+        result, _, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "timing123",
+            tts_segments=[
+                voicevox.Segment("最初の文です。", 0.0, 3.25),
+                voicevox.Segment("次の文です。", 3.25, 7.5),
+            ],
+        )
+
+        saved = json.loads(
+            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["_tts_timing"]["duration_seconds"], 10.0)
+        self.assertEqual(
+            saved["_tts_timing"]["segments"],
+            [
+                {
+                    "text": "最初の文です。",
+                    "start_seconds": 0.0,
+                    "end_seconds": 3.25,
+                },
+                {
+                    "text": "次の文です。",
+                    "start_seconds": 3.25,
+                    "end_seconds": 7.5,
+                },
+            ],
+        )
+        self.assertEqual(
+            saved["_thumbnail_provenance"],
+            {
+                "display_text": "YouTubeショートの冒頭離脱を直す",
+                "render_status": "rendered",
+                "render_detail": "",
+                "youtube_set_status": "set",
+                "youtube_set_detail": "",
+            },
+        )
+
+    def test_run_daily_invalid_tts_timing_does_not_abort_publish(self) -> None:
+        """issue #125: 補助provenance不良で生成・投稿を止めない。"""
+        spec = self._review_spec("review-invalid-tts-timing")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+
+        result, publish_mock, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "invalid-timing-123",
+            tts_segments=[voicevox.Segment("   ", 0.0, 2.0)],
+        )
+
+        self.assertTrue(publish_mock.called)
+        self.assertEqual(result["video_id"], "invalid-timing-123")
+        saved = json.loads(
+            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("_tts_timing", saved)
+        self.assertEqual(
+            saved["_thumbnail_provenance"]["youtube_set_status"], "set"
+        )
+
+    def test_run_daily_records_shortened_thumbnail_display_text(self) -> None:
+        spec = self._review_spec("review-thumbnail-text")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+        script["title"] = "約束したテーマ――後半の長い説明はサムネに描画しない"
+
+        result, _, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "thumbnail-text-123",
+        )
+
+        saved = json.loads(
+            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            saved["_thumbnail_provenance"]["display_text"],
+            thumbnail.display_text(script["title"]),
+        )
+        self.assertEqual(
+            saved["_thumbnail_provenance"]["display_text"], "約束したテーマ"
+        )
+        self.assertEqual(thumbnail.display_text("あ" * 30), "あ" * 24 + "…")
+
+    def test_run_daily_records_thumbnail_render_failure_without_claiming_set(
+        self,
+    ) -> None:
+        spec = self._review_spec("review-thumbnail-failure")
+        script = self._review_script(
+            viewer_action="YouTube Studioで視聴維持率を確認して冒頭を編集する"
+        )
+
+        result, _, _, _ = self._run_review_pipeline(
+            spec,
+            script,
+            "thumbnail-failure-123",
+            thumbnail_render_error=True,
+        )
+
+        saved = json.loads(
+            (Path(result["workdir"]) / "script.json").read_text(encoding="utf-8")
+        )
+        provenance = saved["_thumbnail_provenance"]
+        self.assertEqual(provenance["render_status"], "failed")
+        self.assertEqual(provenance["youtube_set_status"], "not_attempted")
+        self.assertIn("render failed", provenance["render_detail"])
 
     def test_global_publish_dry_run_does_not_queue_topic_reservations(self) -> None:
         spec = self._review_spec("review-dry-run")

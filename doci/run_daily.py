@@ -53,9 +53,51 @@ def _publish_result_summary(results: list) -> list[dict[str, object]]:
             "status": str(result.status)[:40],
             "id": str(result.id)[:200] if result.id else None,
             "detail": str(result.detail or "")[:240],
+            "thumbnail_status": str(
+                getattr(result, "thumbnail_status", "") or ""
+            )[:40],
+            "thumbnail_detail": str(
+                getattr(result, "thumbnail_detail", "") or ""
+            )[:180],
         }
         for result in results
     ][:12]
+
+
+def _tts_timing_payload(result: voicevox.TtsResult) -> dict[str, object]:
+    """後日の分析用にVOICEVOX入力文と合成WAV区間をJSON化する。"""
+    duration = float(result.duration)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("TTS duration must be a positive finite number")
+
+    segments: list[dict[str, object]] = []
+    previous_end = 0.0
+    for segment in result.segments:
+        text = str(segment.text).strip()
+        start = float(segment.start)
+        end = float(segment.end)
+        if (
+            not text
+            or not math.isfinite(start)
+            or not math.isfinite(end)
+            or start < 0
+            or start < previous_end - 1e-9
+            or end <= start
+            or end > duration + 1e-9
+        ):
+            raise ValueError("TTS segment timing is invalid")
+        segments.append(
+            {
+                "text": text,
+                "start_seconds": round(start, 6),
+                "end_seconds": round(end, 6),
+            }
+        )
+        previous_end = end
+    return {
+        "duration_seconds": round(duration, 6),
+        "segments": segments,
+    }
 
 
 def _credits(spec: ChannelSpec, corner) -> str:
@@ -450,7 +492,10 @@ def _run_once(
                 + " / ".join(theme_assessment.reasons)
                 + "→unlisted"
             )
-    (workdir / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
+    script_path = workdir / "script.json"
+    script_path.write_text(
+        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     _log(f"title: {script['title']}  (narration {len(script['narration'])}字 / scenes {len(script['scenes'])})")
 
     # 2) 音声（voices.json の話者＋速度/ピッチ/抑揚/音量を適用: issue #1）
@@ -461,6 +506,16 @@ def _run_once(
         speed=v.speed, pitch=v.pitch, intonation=v.intonation,
         intonation_vary=v.intonation_vary, volume=v.volume,
     )
+    try:
+        script["_tts_timing"] = _tts_timing_payload(tts)
+    except Exception as exc:  # noqa: BLE001
+        # 後日分析用provenanceの不備で、合成済み動画の生成・投稿を止めない。
+        script.pop("_tts_timing", None)
+        _log(f"TTS合成時刻の保存をスキップ（動画生成は続行）: {exc}")
+    else:
+        script_path.write_text(
+            json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     _log(f"narration {tts.duration:.1f}s (spk{v.speaker} speed{v.speed} into{v.intonation})")
 
     # 2.5) 尺が決まったので向き・サイズを決める。longform(>180s=YouTube通常動画)は横16:9、
@@ -615,8 +670,18 @@ def _run_once(
     # 4.6) サムネイル生成（縦タイトルカードを作り、API送信直前だけ16:9ピラーボックス化）。
     #      失敗しても動画生成・投稿自体は止めない。
     thumbnail_path = None
+    thumbnail_provenance: dict[str, object] = {
+        "display_text": "",
+        "render_status": "not_attempted",
+        "render_detail": "",
+        "youtube_set_status": "not_attempted",
+        "youtube_set_detail": "",
+    }
     try:
         from . import thumbnail
+        thumbnail_provenance["display_text"] = thumbnail.display_text(
+            script["title"]
+        )
         # act重みが最大の非チャートシーンの実素材を背景に選ぶ
         non_chart_candidates = [
             si for si in primary_assets
@@ -647,9 +712,16 @@ def _run_once(
         thumb_final = workdir / "thumbnail.png"
         thumbnail.to_16x9(thumb_vertical, thumb_final)
         thumbnail_path = thumb_final
+        thumbnail_provenance["render_status"] = "rendered"
         _log(f"サムネイル生成: {thumb_final}")
     except Exception as e:
+        thumbnail_provenance["render_status"] = "failed"
+        thumbnail_provenance["render_detail"] = str(e)[:180]
         _log(f"サムネイル生成失敗（動画は続行）: {e}")
+    script["_thumbnail_provenance"] = thumbnail_provenance
+    script_path.write_text(
+        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     # 5) アップロード（route.platforms と各 PUBLISH_* で出し分け: issue #3）
     video_id = None
@@ -711,6 +783,27 @@ def _run_once(
         # queued予約をcancelしない。公開済み題材の再投稿防止を優先する。
         if any(result.status == "ok" for result in pub_results):
             reservation_state["external_published"] = True
+        youtube_result = next(
+            (result for result in pub_results if result.platform == "youtube"),
+            None,
+        )
+        if thumbnail_provenance["render_status"] == "rendered" and youtube_result:
+            if youtube_result.status == "ok":
+                thumbnail_provenance["youtube_set_status"] = (
+                    str(getattr(youtube_result, "thumbnail_status", "") or "unknown")
+                )
+                thumbnail_provenance["youtube_set_detail"] = str(
+                    getattr(youtube_result, "thumbnail_detail", "") or ""
+                )[:180]
+            else:
+                thumbnail_provenance["youtube_set_status"] = "not_attempted"
+        try:
+            script_path.write_text(
+                json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            # 投稿後の補助provenance保存失敗で外部成功を巻き戻さない。
+            _log(f"サムネイル設定結果の保存失敗（投稿結果は維持）: {exc}")
         if video_id:
             _apply_youtube_engagement_actions(spec, corner, script, video_id)
     else:
