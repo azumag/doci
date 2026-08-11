@@ -24,6 +24,7 @@ class PerformanceFeedbackTest(unittest.TestCase):
             publish=SimpleNamespace(
                 youtube=SimpleNamespace(
                     token=self.root / "token.json",
+                    analytics_token=self.root / "analytics-token.json",
                     client_secret=self.root / "client.json",
                 )
             ),
@@ -78,7 +79,10 @@ class PerformanceFeedbackTest(unittest.TestCase):
         analytics_mock.assert_not_called()
         self.assertFalse(snapshot["analytics"]["available"])
         self.assertIn("YouTube Analytics API", snapshot["analytics"]["reason"])
-        self.assertIn("--auth --analytics --channel youtube-growth", snapshot["analytics"]["reason"])
+        self.assertIn(
+            "--auth --analytics-readonly --channel youtube-growth",
+            snapshot["analytics"]["reason"],
+        )
         self.assertEqual(snapshot["videos"][1]["data_api"]["views"], 1)
         self.assertEqual(snapshot["videos"][0]["topic"], "Topic 0")
         self.assertNotIn("topic_concepts", snapshot["videos"][0])
@@ -87,7 +91,7 @@ class PerformanceFeedbackTest(unittest.TestCase):
         )
         decision = performance.build_decision(self.spec, snapshot)
         self.assertIn(
-            "--auth --analytics --channel youtube-growth",
+            "--auth --analytics-readonly --channel youtube-growth",
             decision["reason"],
         )
         self.assertFalse(
@@ -129,6 +133,7 @@ class PerformanceFeedbackTest(unittest.TestCase):
         self.assertEqual(decision["guidance"], "")
 
     def test_analytics_failure_still_persists_data_api_snapshot(self) -> None:
+        self.spec.pipeline["performance_feedback"] = True
         self._history()
         details = [
             {
@@ -158,6 +163,13 @@ class PerformanceFeedbackTest(unittest.TestCase):
 
         self.assertFalse(snapshot["analytics"]["available"])
         self.assertIn("API is disabled", snapshot["analytics"]["reason"])
+        self.assertFalse(
+            snapshot["retention_by_subscribed_status"]["available"]
+        )
+        self.assertIn(
+            "API is disabled",
+            snapshot["retention_by_subscribed_status"]["reason"],
+        )
         self.assertEqual(snapshot["videos"][0]["data_api"]["views"], 3)
         self.assertTrue((self.root / "performance.jsonl").exists())
 
@@ -407,6 +419,322 @@ class PerformanceFeedbackTest(unittest.TestCase):
                 {"elapsed_ratio": 1.0, "watch_ratio": 0.30},
             ],
         )
+
+    def test_sync_records_latest_subscribed_status_retention_with_readonly_token(
+        self,
+    ) -> None:
+        """issue #128: performance feedback有効時だけ、最新動画の購読状態別
+        カーブをAnalytics専用tokenで取得して別フィールドへ保存する。"""
+        self.spec.pipeline["performance_feedback"] = True
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [
+            {
+                "video_id": "id-0",
+                "views": 100,
+                "engaged_views": 60,
+                "estimated_minutes_watched": 90.0,
+                "average_view_duration": 45.0,
+                "average_view_percentage": 72.4,
+                "likes": 5,
+                "comments": 2,
+            }
+        ]
+        base_curve = [
+            {"elapsed_ratio": index / 10, "watch_ratio": 0.9 - index / 20}
+            for index in range(1, 7)
+        ]
+        segmented = {
+            "id-0": {
+                "SUBSCRIBED": [
+                    {**point, "segment_impressions": 30} for point in base_curve
+                ],
+                "UNSUBSCRIBED": [
+                    {
+                        **point,
+                        "watch_ratio": point["watch_ratio"] - 0.1,
+                        "segment_impressions": 40,
+                    }
+                    for point in base_curve
+                ],
+            }
+        }
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(
+                performance.youtube, "_token_has_scopes", return_value=True
+            ) as token_scopes,
+            patch.object(
+                performance.youtube, "video_analytics", return_value=analytics_rows
+            ) as analytics,
+            patch.object(
+                performance.youtube, "video_traffic_sources", return_value={}
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=({"id-0": base_curve}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves_by_subscribed_status",
+                return_value=(segmented, {}),
+            ) as segmented_readback,
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        token_scopes.assert_called_once_with(
+            self.spec.publish.youtube.analytics_token,
+            performance.youtube.ANALYTICS_READONLY_SCOPES,
+            exact=True,
+        )
+        self.assertEqual(
+            analytics.call_args.kwargs["token_file"],
+            self.spec.publish.youtube.analytics_token,
+        )
+        self.assertEqual(
+            segmented_readback.call_args.kwargs["token_file"],
+            self.spec.publish.youtube.analytics_token,
+        )
+        self.assertTrue(snapshot["retention_by_subscribed_status"]["available"])
+        self.assertEqual(
+            snapshot["retention_by_subscribed_status"]["queried_video_ids"],
+            ["id-0"],
+        )
+        self.assertEqual(
+            snapshot["videos"][0]["analytics"][
+                "retention_by_subscribed_status"
+            ],
+            segmented["id-0"],
+        )
+
+    def test_latest_video_ids_per_corner_limits_each_corner(self) -> None:
+        history_rows = {}
+        details = []
+        for index in range(8):
+            video_id = f"video-{index}"
+            history_rows[video_id] = {
+                "corner": "video",
+                "ts": f"2026-07-{index + 1:02d}T00:00:00+00:00",
+            }
+            details.append(
+                {
+                    "video_id": video_id,
+                    "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                }
+            )
+        for index in range(2):
+            video_id = f"short-{index}"
+            history_rows[video_id] = {
+                "corner": "shorts",
+                "ts": f"2026-07-{index + 1:02d}T00:00:00+00:00",
+            }
+            details.append(
+                {
+                    "video_id": video_id,
+                    "published_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                }
+            )
+
+        selected = performance._latest_video_ids_per_corner(
+            history_rows,
+            details,
+            list(history_rows),
+        )
+
+        self.assertEqual(
+            [video_id for video_id in selected if video_id.startswith("video-")],
+            ["video-7", "video-6", "video-5", "video-4", "video-3"],
+        )
+        self.assertEqual(
+            [video_id for video_id in selected if video_id.startswith("short-")],
+            ["short-1", "short-0"],
+        )
+
+    def test_segmented_retention_failure_preserves_aggregate_curve(self) -> None:
+        self.spec.pipeline["performance_feedback"] = True
+        self._history(count=1)
+        details = [
+            {
+                "video_id": "id-0",
+                "title": "Title 0",
+                "published_at": "2026-07-01T00:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT1M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+        ]
+        analytics_rows = [{"video_id": "id-0", "views": 100}]
+        base_curve = [
+            {"elapsed_ratio": index / 10, "watch_ratio": 0.9 - index / 20}
+            for index in range(1, 7)
+        ]
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube, "video_analytics", return_value=analytics_rows
+            ),
+            patch.object(
+                performance.youtube, "video_traffic_sources", return_value={}
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=({"id-0": base_curve}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves_by_subscribed_status",
+                side_effect=RuntimeError("segment quota exhausted"),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(snapshot["retention_curve"]["available"])
+        self.assertEqual(
+            snapshot["videos"][0]["analytics"]["retention_curve"], base_curve
+        )
+        self.assertFalse(
+            snapshot["retention_by_subscribed_status"]["available"]
+        )
+        self.assertIn(
+            "segment quota exhausted",
+            snapshot["retention_by_subscribed_status"]["reason"],
+        )
+        self.assertNotIn(
+            "retention_by_subscribed_status",
+            snapshot["videos"][0]["analytics"],
+        )
+
+    def test_subscribed_status_retention_comparison_is_sample_gated_and_mapped(
+        self,
+    ) -> None:
+        subscribed = []
+        unsubscribed = []
+        for index in range(1, 7):
+            elapsed = index / 10
+            subscribed.append(
+                {
+                    "elapsed_ratio": elapsed,
+                    "watch_ratio": 0.9 - index * 0.02,
+                    "segment_impressions": 30,
+                }
+            )
+            unsubscribed.append(
+                {
+                    "elapsed_ratio": elapsed,
+                    "watch_ratio": 0.9 - index * 0.06,
+                    "segment_impressions": 40,
+                }
+            )
+        curves = {
+            "SUBSCRIBED": subscribed,
+            "UNSUBSCRIBED": unsubscribed,
+        }
+        result = performance.subscribed_status_retention_comparison(
+            curves,
+            "PT100S",
+            {"scenes": [{"caption": "導入"}, {"caption": "展開"}]},
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["actionable"])
+        self.assertEqual(result["higher_segment"], "SUBSCRIBED")
+        self.assertAlmostEqual(result["elapsed_seconds"], 60.0)
+        self.assertEqual(result["scene_caption"], "展開")
+        self.assertGreaterEqual(abs(result["gap_ratio"]), 0.08)
+
+        insufficient = performance.subscribed_status_retention_comparison(
+            {
+                status: [
+                    {**point, "segment_impressions": 19}
+                    for point in points
+                ]
+                for status, points in curves.items()
+            },
+            "PT100S",
+        )
+        self.assertEqual(insufficient["status"], "insufficient_data")
+        self.assertEqual(insufficient["reliable_point_count"], 0)
+
+    def test_subscribed_status_retention_comparison_threshold_is_inclusive(
+        self,
+    ) -> None:
+        def curves(gap: float) -> dict:
+            return {
+                "SUBSCRIBED": [
+                    {
+                        "elapsed_ratio": index / 10,
+                        "watch_ratio": 0.8,
+                        "segment_impressions": 30,
+                    }
+                    for index in range(1, 7)
+                ],
+                "UNSUBSCRIBED": [
+                    {
+                        "elapsed_ratio": index / 10,
+                        "watch_ratio": 0.8 - gap,
+                        "segment_impressions": 30,
+                    }
+                    for index in range(1, 7)
+                ],
+            }
+
+        exact = performance.subscribed_status_retention_comparison(
+            curves(0.08), "PT1M"
+        )
+        below = performance.subscribed_status_retention_comparison(
+            curves(0.079), "PT1M"
+        )
+
+        self.assertEqual(exact["status"], "ready")
+        self.assertTrue(exact["actionable"])
+        self.assertEqual(below["status"], "no_clear_difference")
+        self.assertFalse(below["actionable"])
+
+    def test_subscribed_status_retention_comparison_uses_official_point_range(
+        self,
+    ) -> None:
+        ratios = [0.0, 0.01, 0.25, 0.5, 0.75, 1.0, 1.01]
+        curves = {
+            status: [
+                {
+                    "elapsed_ratio": ratio,
+                    "watch_ratio": 0.8 if status == "SUBSCRIBED" else 0.7,
+                    "segment_impressions": 30,
+                }
+                for ratio in ratios
+            ]
+            for status in ("SUBSCRIBED", "UNSUBSCRIBED")
+        }
+
+        result = performance.subscribed_status_retention_comparison(
+            curves, "PT1M"
+        )
+
+        self.assertEqual(result["common_point_count"], 5)
+        self.assertEqual(result["reliable_point_count"], 5)
+        self.assertEqual(result["status"], "ready")
 
     def test_retention_queries_only_videos_with_analytics_rows(self) -> None:
         """issue #149 (Sol review指摘): Analytics実績が無い動画は維持率APIの

@@ -496,6 +496,66 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertIn("維持率カーブの山/谷", candidate["body"])
 
+    def test_build_cycle_candidate_includes_subscribed_status_difference(self) -> None:
+        """issue #128: 他の仮説が無くても、標本条件を満たす購読状態別の
+        明瞭な差があればレポート候補を生成する。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(
+            status="insufficient_data", reason="比較可能な動画が2本"
+        )
+        section = performance_report.build_corner_section(
+            spec, "video", decision, [], set()
+        )
+        subscribed = []
+        unsubscribed = []
+        for index in range(1, 7):
+            subscribed.append(
+                {
+                    "elapsed_ratio": index / 10,
+                    "watch_ratio": 0.9 - index * 0.02,
+                    "segment_impressions": 30,
+                }
+            )
+            unsubscribed.append(
+                {
+                    "elapsed_ratio": index / 10,
+                    "watch_ratio": 0.9 - index * 0.06,
+                    "segment_impressions": 40,
+                }
+            )
+        snapshot = {
+            "traffic_sources": {"available": True},
+            "retention_by_subscribed_status": {
+                "available": True,
+                "queried_video_ids": ["segmented-1"],
+            },
+            "videos": [
+                {
+                    "video_id": "segmented-1",
+                    "corner": "video",
+                    "data_api": {"duration": "PT100S"},
+                    "analytics": {
+                        "traffic_sources": {"YT_SEARCH": 40},
+                        "retention_by_subscribed_status": {
+                            "SUBSCRIBED": subscribed,
+                            "UNSUBSCRIBED": unsubscribed,
+                        },
+                    },
+                }
+            ],
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("購読状態別の維持率と流入元", candidate["body"])
+        self.assertIn("リピーター/新規視聴者ではありません", candidate["body"])
+
     def test_build_cycle_candidate_includes_monotonic_opening_drop(self) -> None:
         """issue #142: 山/谷が無い単調低下でも、冒頭シグナルから候補を作る。"""
         spec = SimpleNamespace(id="ideology")
@@ -1882,6 +1942,124 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         text = performance_report._retention_curve_text(snapshot, "video")
         self.assertIn("取得に失敗しました", text)
         self.assertIn("quota exceeded", text)
+
+    def test_subscribed_status_retention_text_separates_traffic_and_segments(
+        self,
+    ) -> None:
+        subscribed = []
+        unsubscribed = []
+        for index in range(1, 7):
+            subscribed.append(
+                {
+                    "elapsed_ratio": index / 10,
+                    "watch_ratio": 0.9 - index * 0.02,
+                    "segment_impressions": 30,
+                }
+            )
+            unsubscribed.append(
+                {
+                    "elapsed_ratio": index / 10,
+                    "watch_ratio": 0.9 - index * 0.06,
+                    "segment_impressions": 40,
+                }
+            )
+        snapshot = {
+            "traffic_sources": {"available": True},
+            "retention_by_subscribed_status": {
+                "available": True,
+                "queried_video_ids": ["v1"],
+            },
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "workdir": str(Path(self._workdir())),
+                    "data_api": {"duration": "PT100S"},
+                    "analytics": {
+                        "traffic_sources": {
+                            "YT_SEARCH": 40,
+                            "RELATED_VIDEO": 20,
+                        },
+                        "retention_by_subscribed_status": {
+                            "SUBSCRIBED": subscribed,
+                            "UNSUBSCRIBED": unsubscribed,
+                        },
+                    },
+                }
+            ],
+        }
+
+        text = performance_report._subscribed_status_retention_text(
+            snapshot, "video"
+        )
+
+        self.assertIn("流入元views（維持率とは結合しません）", text)
+        self.assertIn("購読者", text)
+        self.assertIn("非購読者", text)
+        self.assertIn("次の1本", text)
+        self.assertIn("リピーター/新規視聴者ではありません", text)
+        self.assertNotIn("新規視聴者 50", text)
+
+        snapshot["traffic_sources"] = {
+            "available": False,
+            "reason": "quota exceeded",
+        }
+        failed_traffic_text = (
+            performance_report._subscribed_status_retention_text(
+                snapshot, "video"
+            )
+        )
+        self.assertIn("流入元views: 取得に失敗しました", failed_traffic_text)
+        self.assertIn("quota exceeded", failed_traffic_text)
+        self.assertIn("購読者", failed_traffic_text)
+        self.assertNotIn("YT_SEARCH=40", failed_traffic_text)
+
+        snapshot["traffic_sources"] = {"available": True}
+        snapshot["videos"][0]["analytics"]["traffic_sources"] = {}
+        missing_traffic_text = (
+            performance_report._subscribed_status_retention_text(
+                snapshot, "video"
+            )
+        )
+        self.assertIn("内訳データが返らず未評価", missing_traffic_text)
+        self.assertIn("0とはみなしません", missing_traffic_text)
+
+    def test_subscribed_status_retention_text_withholds_low_sample(self) -> None:
+        low_sample = [
+            {
+                "elapsed_ratio": index / 10,
+                "watch_ratio": 0.8,
+                "segment_impressions": 19,
+            }
+            for index in range(1, 7)
+        ]
+        snapshot = {
+            "traffic_sources": {"available": True},
+            "retention_by_subscribed_status": {
+                "available": True,
+                "queried_video_ids": ["v1"],
+            },
+            "videos": [
+                {
+                    "video_id": "v1",
+                    "corner": "video",
+                    "data_api": {"duration": "PT100S"},
+                    "analytics": {
+                        "retention_by_subscribed_status": {
+                            "SUBSCRIBED": low_sample,
+                            "UNSUBSCRIBED": low_sample,
+                        }
+                    },
+                }
+            ],
+        }
+
+        text = performance_report._subscribed_status_retention_text(
+            snapshot, "video"
+        )
+
+        self.assertIn("判定材料不足", text)
+        self.assertNotIn("次の1本: 差が大きい", text)
 
     def _workdir(self) -> str:
         import tempfile

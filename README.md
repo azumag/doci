@@ -279,7 +279,8 @@ python -m doci.run_daily --recover-publishing <reservation-id> \
 read-only同期し、十分な比較標本がある場合だけ相対的な形式仮説を作る。
 retention等のAnalytics指標には、OAuthクライアントのGoogle Cloud projectで
 YouTube Analytics APIを有効化したうえで追加scopeが必要。明示的に許可する場合のみ
-`python -m doci.youtube --auth --analytics --channel <id>` で再認証する。APIやscopeが
+`python -m doci.youtube --auth --analytics-readonly --channel <id>` で分析専用tokenを
+認証する。upload権限を持つ投稿tokenとは別ファイルに保存する。APIやscopeが
 未設定でもData API snapshotを残し、指標を推測せず通常生成を継続する。
 `python -m doci.performance --sync --channel <id> --corner <key>` でreadbackと判断根拠を
 確認できる。仮説は同一corner・同一尺・同一tierの最低8本を比較して1回に1形式だけを提案する。
@@ -342,6 +343,15 @@ intervalタイマーの更新・GitHub issueの作成は一切行わない。
   再視聴・巻き戻し・スキップ・離脱の確認は運用者が動画内容と照合して行う。
   API全体の失敗は取得失敗と明記し、Shorts等でカーブが返らない場合と区別する
   （推測で補わない）。
+- **購読状態別の維持率と流入元**（issue #128）:
+  各cornerの最新5本までを対象に、Analytics APIの`subscribedStatus` filterで
+  `SUBSCRIBED`（購読者）と`UNSUBSCRIBED`（非購読者）の維持率カーブを分離取得する。
+  両segmentの`totalSegmentImpressions`が20以上の共通点が5点以上ある場合だけ
+  形状を比較し、最大差が8ポイント以上の位置を動画秒数・`script.json`のsceneと
+  照合して次の1本の手動仮説候補にする。8ポイントは報告対象を絞る検知閾値で、
+  原因や合否を示さない。購読状態は新規視聴者/リピーターとは異なるため読み替えず、
+  `traffic_sources`のviewsも別行に表示して維持率カーブへ直接結合しない。取得不可・
+  標本不足は推測で補わず、設定へ自動反映しない。
 - **共有率と共有される動画の構造**（issue #144）:
   shortsのみを対象に、太平洋時間基準の完了日から遡る30暦日（開始-終了が29日差）
   のAnalytics API `shares`（共有数）÷`views`（再生数）から共有率を算出し、1%を

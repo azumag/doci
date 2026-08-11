@@ -667,7 +667,8 @@ def video_analytics(
         interactive=False,
         token_file=token_file,
         client_secret_file=client_secret_file,
-        scopes=ANALYTICS_SCOPES,
+        scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
     # engagedViews(issue #97): 2025年3月末のShorts仕様変更で`views`は
@@ -753,7 +754,8 @@ def video_share_metrics(
         interactive=False,
         token_file=token_file,
         client_secret_file=client_secret_file,
-        scopes=ANALYTICS_SCOPES,
+        scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
     results: list[dict] = []
@@ -953,13 +955,20 @@ def video_retention_curves(
     end_date: str,
     token_file: Path | None = None,
     client_secret_file: Path | None = None,
+    subscribed_status: str | None = None,
+    include_segment_impressions: bool = False,
 ) -> tuple[dict[str, list[dict]], dict[str, str]]:
     """動画別の視聴者維持率カーブを読み取る（issue #149）。
 
     `audienceWatchRatio`（各時点の視聴維持率。0.9=90%）を
-    `elapsedVideoTimeRatio`（経過時間比率 0〜1）ディメンションで取得する。
+    `elapsedVideoTimeRatio`（経過時間比率 0.01〜1.0）ディメンションで取得する。
     Audience retention report の `video` filter は単一IDのみのため、動画ごとに
-    1リクエストを発行する。動画固有と確認済みの理由（プライバシー閾値等）だけ
+    1リクエストを発行する。`subscribed_status`を指定した場合は、公式reportが
+    対応する`SUBSCRIBED`/`UNSUBSCRIBED`だけをfilterへ追加する。これは閲覧時の
+    購読状態であり、新規視聴者/リピーターとは解釈しない。
+    `include_segment_impressions=True`では、比較点の標本確認用に
+    `totalSegmentImpressions`も各点へ保存する。動画固有と確認済みの理由
+    （プライバシー閾値等）だけ
     `failed_by_video` へ記録して継続する。`invalidFilters` 等のリクエスト構造
     不備や 401/403/429/5xx・ネットワーク障害は全体障害として即時 raise する。
     Shorts等でAPIがデータを返さない場合は空のまま（欠落を0や「なし」と断定
@@ -1002,16 +1011,29 @@ def video_retention_curves(
     ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
     if not ids:
         return {}, {}
+    if subscribed_status not in (None, "SUBSCRIBED", "UNSUBSCRIBED"):
+        raise ValueError(
+            "subscribed_status must be SUBSCRIBED, UNSUBSCRIBED, or None"
+        )
     creds = _load_credentials(
         interactive=False,
         token_file=token_file,
         client_secret_file=client_secret_file,
-        scopes=ANALYTICS_SCOPES,
+        scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
     by_video: dict[str, list[dict]] = {}
     failed_by_video: dict[str, str] = {}
+    metrics = (
+        "audienceWatchRatio,totalSegmentImpressions"
+        if include_segment_impressions
+        else "audienceWatchRatio"
+    )
     for video_id in ids:
+        filters = f"video=={video_id}"
+        if subscribed_status is not None:
+            filters += f";subscribedStatus=={subscribed_status}"
         try:
             data = (
                 service.reports()
@@ -1019,9 +1041,9 @@ def video_retention_curves(
                     ids="channel==MINE",
                     startDate=start_date,
                     endDate=end_date,
-                    metrics="audienceWatchRatio",
+                    metrics=metrics,
                     dimensions="elapsedVideoTimeRatio",
-                    filters=f"video=={video_id}",
+                    filters=filters,
                     maxResults=100,
                 )
                 .execute()
@@ -1046,14 +1068,64 @@ def video_retention_curves(
                 watch_value = float(watch_ratio)
             except (TypeError, ValueError):
                 continue
-            if not (0.0 <= ratio_value <= 1.0):
+            if not (0.0 < ratio_value <= 1.0):
                 continue
-            points.append(
-                {"elapsed_ratio": ratio_value, "watch_ratio": watch_value}
-            )
+            point = {
+                "elapsed_ratio": ratio_value,
+                "watch_ratio": watch_value,
+            }
+            if include_segment_impressions:
+                raw_impressions = row.get("totalSegmentImpressions")
+                if isinstance(raw_impressions, bool) or raw_impressions is None:
+                    continue
+                try:
+                    impressions = int(raw_impressions)
+                    numeric_impressions = float(raw_impressions)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if impressions < 0 or numeric_impressions != float(impressions):
+                    continue
+                point["segment_impressions"] = impressions
+            points.append(point)
         if points:
             points.sort(key=lambda item: item["elapsed_ratio"])
             by_video[video_id] = points
+    return by_video, failed_by_video
+
+
+def video_retention_curves_by_subscribed_status(
+    video_ids: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> tuple[dict[str, dict[str, list[dict]]], dict[str, dict[str, str]]]:
+    """購読者/非購読者の維持率カーブを動画ごとに分離して取得する（issue #128）。
+
+    購読状態はAPIの`subscribedStatus` filter値のまま保存し、
+    新規視聴者/リピーターへ読み替えない。各点には標本確認用の
+    `segment_impressions`を必ず含める。
+    """
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return {}, {}
+    by_video: dict[str, dict[str, list[dict]]] = {}
+    failed_by_video: dict[str, dict[str, str]] = {}
+    for status in ("SUBSCRIBED", "UNSUBSCRIBED"):
+        curves, failures = video_retention_curves(
+            ids,
+            start_date=start_date,
+            end_date=end_date,
+            token_file=token_file,
+            client_secret_file=client_secret_file,
+            subscribed_status=status,
+            include_segment_impressions=True,
+        )
+        for video_id, curve in curves.items():
+            by_video.setdefault(video_id, {})[status] = curve
+        for video_id, reason in failures.items():
+            failed_by_video.setdefault(video_id, {})[status] = reason
     return by_video, failed_by_video
 
 
@@ -1081,7 +1153,8 @@ def video_traffic_sources(
         interactive=False,
         token_file=token_file,
         client_secret_file=client_secret_file,
-        scopes=ANALYTICS_SCOPES,
+        scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
     by_video: dict[str, dict[str, int]] = {}
@@ -1188,7 +1261,8 @@ def video_search_terms(
         interactive=False,
         token_file=token_file,
         client_secret_file=client_secret_file,
-        scopes=ANALYTICS_SCOPES,
+        scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
     by_video: dict[str, list[dict]] = {}

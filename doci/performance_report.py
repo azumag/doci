@@ -783,6 +783,148 @@ def _retention_curve_text(snapshot: dict | None, corner: str) -> str:
     return "\n".join(lines)
 
 
+def _subscribed_status_comparison_for_row(row: dict) -> dict:
+    analytics = row.get("analytics")
+    analytics = analytics if isinstance(analytics, dict) else {}
+    data_api = row.get("data_api")
+    data_api = data_api if isinstance(data_api, dict) else {}
+    return performance.subscribed_status_retention_comparison(
+        analytics.get("retention_by_subscribed_status"),
+        str(data_api.get("duration") or ""),
+        _script_for_video(row),
+    )
+
+
+def _subscribed_status_retention_text(snapshot: dict | None, corner: str) -> str:
+    """購読者/非購読者の維持率差と流入元viewsを分離表示する（issue #128）。"""
+    if not isinstance(snapshot, dict):
+        return "- 購読状態別の維持率: snapshot未取得のため評価しません"
+    status = snapshot.get("retention_by_subscribed_status")
+    status = status if isinstance(status, dict) else {}
+    if not status.get("available"):
+        reason = str(status.get("reason") or "取得不可")
+        return (
+            "- 購読状態別の維持率: 取得に失敗しました"
+            f"（{reason}。推測で補いません）"
+        )
+    queried = set(status.get("queried_video_ids") or [])
+    rows = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+        and str(row.get("video_id") or "") in queried
+    ]
+    if not rows:
+        return (
+            "- 購読状態別の維持率: このcornerに比較対象の最新動画がありません"
+        )
+
+    def priority(row: dict) -> tuple[float, str]:
+        published = history._parse_ts(
+            row.get("published_at") or row.get("history_ts")
+        )
+        return (
+            published.timestamp() if published is not None else float("-inf"),
+            str(row.get("video_id") or ""),
+        )
+
+    rows.sort(key=priority, reverse=True)
+    failed = set(status.get("failed_video_ids") or [])
+    traffic_status = snapshot.get("traffic_sources")
+    traffic_status = traffic_status if isinstance(traffic_status, dict) else {}
+    traffic_available = bool(traffic_status.get("available"))
+    lines: list[str] = []
+    if not traffic_available:
+        reason = str(traffic_status.get("reason") or "取得不可")
+        lines.append(
+            "- 流入元views: 取得に失敗しました"
+            f"（{reason}。維持率とは結合せず、推測で補いません）"
+        )
+    actionable = 0
+    for row in rows:
+        video_id = str(row.get("video_id") or "")
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        traffic = analytics.get("traffic_sources")
+        traffic = traffic if isinstance(traffic, dict) else {}
+        if traffic_available:
+            sources = sorted(
+                (
+                    (str(source), int(views))
+                    for source, views in traffic.items()
+                    if isinstance(views, int)
+                    and not isinstance(views, bool)
+                    and views >= 0
+                ),
+                key=lambda item: (item[1], item[0]),
+                reverse=True,
+            )[:3]
+            if sources:
+                lines.append(
+                    f"- `{video_id}` 流入元views（維持率とは結合しません）: "
+                    + ", ".join(f"{source}={views}" for source, views in sources)
+                )
+            else:
+                lines.append(
+                    f"- `{video_id}` 流入元views: API取得は成功しましたが、"
+                    "この動画の内訳データが返らず未評価です"
+                    "（0とはみなしません）"
+                )
+        if video_id in failed:
+            lines.append(
+                f"- `{video_id}`: 購読状態別カーブを取得できませんでした"
+                "（動画またはsegment固有。推測で補いません）"
+            )
+            continue
+        comparison = _subscribed_status_comparison_for_row(row)
+        if comparison["status"] == "insufficient_data":
+            lines.append(
+                f"- `{video_id}`: 判定材料不足"
+                f"（信頼可能な共通点 {comparison['reliable_point_count']} / "
+                f"必要 {comparison['min_common_points']}、各segment "
+                f"{comparison['min_segment_impressions']} observations以上）"
+            )
+            continue
+        gap_points = abs(float(comparison["gap_ratio"])) * 100
+        subscribed_percent = float(comparison["subscribed_watch_ratio"]) * 100
+        unsubscribed_percent = float(comparison["unsubscribed_watch_ratio"]) * 100
+        second = comparison.get("elapsed_seconds")
+        scene = _clean_text(comparison.get("scene_caption"), limit=120)
+        location = (
+            f"約{float(second):.1f}秒付近" if second is not None else "位置不明"
+        )
+        if scene:
+            location += f"（シーン: {scene}）"
+        lines.append(
+            f"- `{video_id}` {location}: 購読者 {subscribed_percent:.1f}%"
+            f"（{comparison['subscribed_segment_impressions']} observations） / "
+            f"非購読者 {unsubscribed_percent:.1f}%"
+            f"（{comparison['unsubscribed_segment_impressions']} observations） / "
+            f"差 {gap_points:.1f}ポイント"
+        )
+        if comparison.get("actionable"):
+            actionable += 1
+
+    if actionable:
+        lines.append(
+            "- 次の1本: 差が大きい箇所の実際の内容を確認し、低い側に必要だった"
+            "前提・導入・説明順の仮説を1つだけ選ぶ。同じcorner・近い尺/tierで"
+            "他の中心変数を固定し、同じ購読状態別カーブで再確認する"
+            "（反映は運用者が手動で行う）。"
+        )
+    else:
+        lines.append(
+            "- 8ポイント以上の明瞭なsegment差を検出しなかったため、"
+            "このデータだけから次の変更を提案しません。"
+        )
+    lines.append(
+        "- SUBSCRIBED/UNSUBSCRIBEDは閲覧時の購読状態であり、"
+        "リピーター/新規視聴者ではありません。流入元viewsとも直接結合せず、"
+        "差を因果と断定しません。"
+    )
+    return "\n".join(lines)
+
+
 _SHARE_DISPLAY_LIMIT = 20
 
 
@@ -973,6 +1115,10 @@ def _cycle_body(
             "### 維持率カーブの山/谷とシーン照合（issue #149）",
             "",
             _retention_curve_text(snapshot, section["corner"]),
+            "",
+            "### 購読状態別の維持率と流入元（issue #128）",
+            "",
+            _subscribed_status_retention_text(snapshot, section["corner"]),
         ]
         if section["corner"] == "shorts":
             lines += [
@@ -1013,6 +1159,7 @@ def build_cycle_candidate(
     has_gap_discovery = False
     has_opening_content = False
     has_retention_content = False
+    has_subscribed_retention_content = False
     has_share_content = False
     if isinstance(snapshot, dict):
         section_corners = {section["corner"] for section in sections}
@@ -1047,6 +1194,23 @@ def build_cycle_candidate(
                     has_retention_content = True
                 if has_opening_content and has_retention_content:
                     break
+        subscribed_status = snapshot.get("retention_by_subscribed_status")
+        subscribed_status = (
+            subscribed_status if isinstance(subscribed_status, dict) else {}
+        )
+        queried = set(subscribed_status.get("queried_video_ids") or [])
+        failed_subscribed = set(subscribed_status.get("failed_video_ids") or [])
+        if subscribed_status.get("available"):
+            for row in snapshot.get("videos", []):
+                video_id = str(row.get("video_id") or "")
+                if str(row.get("corner") or "") not in section_corners:
+                    continue
+                if video_id not in queried or video_id in failed_subscribed:
+                    continue
+                comparison = _subscribed_status_comparison_for_row(row)
+                if comparison.get("actionable"):
+                    has_subscribed_retention_content = True
+                    break
         # issue #144: 共有率1%超の動画がmatching cornerにあれば報告候補とする。
         # 対象はshorts cornerのみ。1%超でも構造（format_traits）が未記録なら
         # 次の企画の材料にならないため候補にしない（Sol review指摘）。
@@ -1062,6 +1226,7 @@ def build_cycle_candidate(
         or has_gap_discovery
         or has_opening_content
         or has_retention_content
+        or has_subscribed_retention_content
         or has_share_content
     )
     if not has_content:
