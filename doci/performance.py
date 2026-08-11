@@ -24,6 +24,10 @@ MIN_EVAL_PEERS = 4  # 2 * MIN_GROUP_SIZE。medianとの相対比較に最低限�
 MAX_SUBSCRIBED_RETENTION_VIDEOS_PER_CORNER = 5
 MIN_SUBSCRIBED_RETENTION_SEGMENT_IMPRESSIONS = 20
 MIN_SUBSCRIBED_RETENTION_COMMON_POINTS = 5
+CHANNEL_PAGE_SHARE_WINDOW_DAYS = 7
+CHANNEL_PAGE_SHARE_MAX_PEERS = 5
+CHANNEL_PAGE_SHARE_MIN_VIEWS = 100
+CHANNEL_PAGE_SHARE_AVAILABILITY_PROBE_DAYS = 30
 _OPENING_TO_MIDPOINT_MIN_COVERAGE = 0.80
 _OPENING_TO_MIDPOINT_MAX_ENDPOINT_SECONDS = 10.0
 _OPENING_TO_MIDPOINT_MAX_GAP_SECONDS = 30.0
@@ -69,6 +73,7 @@ def _snapshot_signature(snapshot: dict) -> str:
         "retention_by_subscribed_status": snapshot.get(
             "retention_by_subscribed_status", {}
         ),
+        "channel_page_share": snapshot.get("channel_page_share", {}),
         # issue #144: 共有率(30日)readbackのavailable/reason変化も署名へ含める。
         "share_30d": snapshot.get("share_30d", {}),
         "videos": snapshot.get("videos", []),
@@ -186,6 +191,125 @@ def _latest_video_ids_per_corner(
         ranked = sorted(grouped[corner], key=lambda item: (item[0], item[1]), reverse=True)
         selected.extend(video_id for _timestamp, video_id in ranked[:limit])
     return selected
+
+
+def _channel_page_share_plan(
+    history_rows: dict[str, dict],
+    details: list[dict],
+    format_traits_by_id: dict[str, list[str]],
+) -> dict:
+    """履歴を起点にcorner最新動画・peerと公開後7日窓を固定する。"""
+    from zoneinfo import ZoneInfo
+
+    detail_by_id = {
+        str(row.get("video_id") or ""): row
+        for row in details
+        if str(row.get("video_id") or "")
+    }
+    grouped: dict[str, list[dict]] = {}
+    for video_id, recorded in history_rows.items():
+        if not isinstance(recorded, dict):
+            continue
+        detail = detail_by_id.get(video_id)
+        corner = str(recorded.get("corner") or "").strip()
+        published = history._parse_ts(
+            (detail or {}).get("published_at") or recorded.get("ts")
+        )
+        cohort = _format_cohort(
+            {"format_traits": format_traits_by_id.get(video_id, [])}
+        )
+        if not corner:
+            continue
+        grouped.setdefault(corner, []).append(
+            {
+                "video_id": video_id,
+                "published": published,
+                "cohort": cohort,
+                "detail_available": detail is not None,
+            }
+        )
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    windows: list[dict] = []
+    corners: dict[str, dict] = {}
+    for corner in sorted(grouped):
+        entries = grouped[corner]
+        if any(entry["published"] is None for entry in entries):
+            corners[corner] = {
+                "status": "unknown_timestamp",
+                "latest_video_id": "",
+                "cohort": "",
+                "peer_video_ids": [],
+                "missing_detail_video_ids": [],
+            }
+            continue
+        ranked = sorted(
+            entries,
+            key=lambda item: (
+                item["published"].timestamp(),
+                item["video_id"],
+            ),
+            reverse=True,
+        )
+        latest = ranked[0]
+        latest_id = latest["video_id"]
+        latest_cohort = latest["cohort"]
+        if not latest["detail_available"]:
+            corners[corner] = {
+                "status": "latest_detail_unavailable",
+                "latest_video_id": latest_id,
+                "cohort": latest_cohort,
+                "peer_video_ids": [],
+                "missing_detail_video_ids": [latest_id],
+            }
+            continue
+        if not latest_cohort:
+            corners[corner] = {
+                "status": "cohort_unavailable",
+                "latest_video_id": latest_id,
+                "cohort": "",
+                "peer_video_ids": [],
+                "missing_detail_video_ids": [],
+            }
+            continue
+        peers: list[dict] = []
+        for entry in ranked[1:]:
+            if entry["cohort"] != latest_cohort:
+                continue
+            peers.append(entry)
+            if len(peers) >= CHANNEL_PAGE_SHARE_MAX_PEERS:
+                break
+        selected = [latest, *peers]
+        missing_detail_ids = [
+            entry["video_id"]
+            for entry in selected
+            if not entry["detail_available"]
+        ]
+        corners[corner] = {
+            "status": "ready",
+            "latest_video_id": latest_id,
+            "cohort": latest_cohort,
+            "peer_video_ids": [entry["video_id"] for entry in peers],
+            "missing_detail_video_ids": missing_detail_ids,
+        }
+        for entry in selected:
+            if not entry["detail_available"]:
+                continue
+            published = entry["published"]
+            # 公開日そのものは時刻によって部分日になるため除外し、その翌日から
+            # 同じ7暦日を比較する。Analytics APIの日付境界は太平洋時間。
+            start_day = published.astimezone(pacific).date() + timedelta(days=1)
+            end_day = start_day + timedelta(
+                days=CHANNEL_PAGE_SHARE_WINDOW_DAYS - 1
+            )
+            windows.append(
+                {
+                    "video_id": entry["video_id"],
+                    "start_date": start_day.isoformat(),
+                    "end_date": end_day.isoformat(),
+                }
+            )
+    return {"windows": windows, "corners": corners}
 
 
 def _scene_time_windows(script: dict, total_seconds: float) -> list[dict]:
@@ -811,6 +935,20 @@ def sync(
         token_file=spec.publish.youtube.token,
         client_secret_file=spec.publish.youtube.client_secret,
     )
+    format_traits_by_id = {
+        video_id: _format_traits(spec, recorded)
+        for video_id, recorded in history_rows.items()
+    }
+    channel_page_plan = (
+        _channel_page_share_plan(
+            history_rows,
+            details,
+            format_traits_by_id,
+        )
+        if spec.pipeline_get("performance_feedback", False)
+        else {"windows": [], "corners": {}}
+    )
+    channel_page_windows = channel_page_plan["windows"]
     analytics_token = getattr(
         spec.publish.youtube,
         "analytics_token",
@@ -839,6 +977,13 @@ def sync(
         "available": False,
         "source": "youtube_analytics_api_v2",
     }
+    channel_page_share_status: dict = {
+        "available": False,
+        "source": "youtube_analytics_api_v2",
+        "window_days": CHANNEL_PAGE_SHARE_WINDOW_DAYS,
+        "min_total_views": CHANNEL_PAGE_SHARE_MIN_VIEWS,
+        "corners": channel_page_plan["corners"],
+    }
     traffic_by_id: dict[str, dict[str, int]] = {}
     search_by_id: dict[str, list[dict]] = {}
     retention_by_id: dict[str, list[dict]] = {}
@@ -847,6 +992,7 @@ def sync(
     subscribed_retention_failures: dict[str, dict[str, str]] = {}
     retention_ids: list[str] = []
     share_30d_by_id: dict[str, dict] = {}
+    channel_page_share_by_id: dict[str, dict] = {}
     if youtube._token_has_scopes(
         analytics_token,
         youtube.ANALYTICS_READONLY_SCOPES,
@@ -854,6 +1000,62 @@ def sync(
     ):
         start = (current.date() - timedelta(days=lookback_days)).isoformat()
         end = current.date().isoformat()
+        if channel_page_windows:
+            try:
+                from zoneinfo import ZoneInfo
+
+                pacific_today = current.astimezone(
+                    ZoneInfo("America/Los_Angeles")
+                ).date()
+                availability_start = (
+                    pacific_today
+                    - timedelta(
+                        days=CHANNEL_PAGE_SHARE_AVAILABILITY_PROBE_DAYS - 1
+                    )
+                ).isoformat()
+                channel_page_result = youtube.video_channel_page_share_metrics(
+                    channel_page_windows,
+                    availability_start_date=availability_start,
+                    availability_end_date=pacific_today.isoformat(),
+                    token_file=analytics_token,
+                    client_secret_file=spec.publish.youtube.client_secret,
+                )
+                data_through_date = channel_page_result.get(
+                    "data_through_date"
+                )
+                channel_page_share_status.update(
+                    {
+                        "available": bool(data_through_date),
+                        "availability_start_date": availability_start,
+                        "availability_probe_end_date": pacific_today.isoformat(),
+                        "data_through_date": data_through_date,
+                        "queried_video_ids": [
+                            str(window.get("video_id") or "")
+                            for window in channel_page_windows
+                        ],
+                    }
+                )
+                if not data_through_date:
+                    channel_page_share_status["reason"] = (
+                        "traffic-sourceの日次データ利用可能最終日を確認できません"
+                    )
+                for row in channel_page_result.get("videos", []):
+                    if not isinstance(row, dict):
+                        continue
+                    video_id = str(row.get("video_id") or "")
+                    if video_id:
+                        channel_page_share_by_id[video_id] = row
+            except Exception as exc:
+                channel_page_share_status["reason"] = (
+                    "公開後7日YT_CHANNEL割合readback失敗: "
+                    f"{str(exc)[:400]}"
+                )
+        else:
+            # 最新動画のcohortを確定できないcornerはreport側で理由を表示する。
+            # API照会対象がないこと自体はreadback障害ではない。
+            channel_page_share_status.update(
+                {"available": True, "queried_video_ids": []}
+            )
         try:
             analytics_rows = youtube.video_analytics(
                 video_ids,
@@ -1066,6 +1268,7 @@ def sync(
             f"--channel {spec.id}` で再認証してください"
         )
         subscribed_retention_status["reason"] = analytics_status["reason"]
+        channel_page_share_status["reason"] = analytics_status["reason"]
     if (
         not subscribed_retention_status.get("reason")
         and not subscribed_retention_status.get("available")
@@ -1107,7 +1310,7 @@ def sync(
                 "topic": topic,
                 "topic_metadata": history._row_topic_metadata(recorded),
                 "workdir": workdir,
-                "format_traits": _format_traits(spec, recorded),
+                "format_traits": format_traits_by_id.get(video_id, []),
                 "history_ts": str(recorded.get("ts") or ""),
                 "published_at": str(detail.get("published_at") or ""),
                 "privacy_status": str(detail.get("privacy_status") or ""),
@@ -1122,6 +1325,9 @@ def sync(
         )
         if share_30d is not None:
             videos[-1]["share_30d"] = share_30d
+        channel_page_share = channel_page_share_by_id.get(video_id)
+        if channel_page_share is not None:
+            videos[-1]["channel_page_share"] = channel_page_share
     videos.sort(key=lambda row: (row["history_ts"], row["video_id"]))
     snapshot = {
         "schema_version": SCHEMA_VERSION,
@@ -1134,6 +1340,7 @@ def sync(
         "retention_curve": retention_status,
         "retention_by_subscribed_status": subscribed_retention_status,
         "share_30d": share_30d_status,
+        "channel_page_share": channel_page_share_status,
         "videos": videos,
     }
     path = _snapshot_path(spec)

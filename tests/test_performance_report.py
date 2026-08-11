@@ -15,7 +15,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from doci import channel, config, feedback_issues, performance, performance_report
+from doci import (
+    channel,
+    config,
+    feedback_issues,
+    history,
+    performance,
+    performance_report,
+)
 
 
 def _video(video_id: str, avg: float, *, corner: str = "video") -> dict:
@@ -400,6 +407,23 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIsNotNone(section["proposal"])
         self.assertEqual(section["proposal"]["trait"], "chart:present")
         self.assertEqual(section["proposal"]["direction"], "positive")
+
+    def test_empty_channel_page_signal_preserves_legacy_fingerprint(self) -> None:
+        spec = SimpleNamespace(id="youtube-growth")
+        section = performance_report.build_corner_section(
+            spec, "video", self._decision(), [], set()
+        )
+
+        self.assertEqual(
+            performance_report.fingerprint(spec.id, [section]),
+            "ebb25a910ce9bc88",
+        )
+        self.assertEqual(
+            performance_report.fingerprint(
+                spec.id, [section], channel_page_signals={}
+            ),
+            "ebb25a910ce9bc88",
+        )
 
     def test_cooldown_suppresses_proposal_but_keeps_investigation(self) -> None:
         spec = SimpleNamespace(id="youtube-growth")
@@ -1312,6 +1336,616 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIn("「ネタ切れ 解消」(25回)", text)
         self.assertIn("狙った検索語「ネタ切れ 解消」と完全一致", text)
         self.assertNotIn("流入を取得できませんでした", text)
+
+
+class ChannelPageShareTest(unittest.TestCase):
+    """issue #122: YT_CHANNEL割合を最新動画の次施策へ接続する。"""
+
+    def _row(
+        self,
+        video_id: str,
+        published_at: str,
+        channel_views: object,
+        *,
+        total_views: object = 100,
+        corner: str = "capitalism",
+        traits: list[str] | None = None,
+    ) -> dict:
+        published_day = datetime.fromisoformat(published_at).date()
+        start_day = published_day + timedelta(days=1)
+        end_day = start_day + timedelta(
+            days=performance.CHANNEL_PAGE_SHARE_WINDOW_DAYS - 1
+        )
+        channel_page_share = {
+            "status": (
+                "channel_page_unavailable"
+                if channel_views is None
+                else "available"
+            ),
+            "start_date": start_day.isoformat(),
+            "end_date": end_day.isoformat(),
+            "window_days": performance.CHANNEL_PAGE_SHARE_WINDOW_DAYS,
+            "data_through_date": "2026-07-31",
+            "views": total_views,
+            "channel_page_views": channel_views,
+        }
+        return {
+            "video_id": video_id,
+            "corner": corner,
+            "published_at": published_at,
+            "history_ts": published_at,
+            "format_traits": traits
+            or ["tier:longform", "duration:180s_or_more"],
+            "channel_page_share": channel_page_share,
+        }
+
+    def _snapshot(self, videos: list[dict]) -> dict:
+        grouped: dict[str, list[dict]] = {}
+        for row in videos:
+            grouped.setdefault(str(row.get("corner") or ""), []).append(row)
+        corner_plans: dict[str, dict] = {}
+        for corner, corner_rows in grouped.items():
+            ranked: list[tuple[float, str, dict]] = []
+            unknown = False
+            for row in corner_rows:
+                published = history._parse_ts(
+                    row.get("published_at") or row.get("history_ts")
+                )
+                video_id = str(row.get("video_id") or "")
+                if published is None or not video_id:
+                    unknown = True
+                    break
+                ranked.append((published.timestamp(), video_id, row))
+            if unknown:
+                corner_plans[corner] = {
+                    "status": "unknown_timestamp",
+                    "latest_video_id": "",
+                    "cohort": "",
+                    "peer_video_ids": [],
+                    "missing_detail_video_ids": [],
+                }
+                continue
+            ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            latest = ranked[0][2]
+            latest_id = str(latest.get("video_id") or "")
+            cohort = performance._format_cohort(latest)
+            if not cohort:
+                corner_plans[corner] = {
+                    "status": "cohort_unavailable",
+                    "latest_video_id": latest_id,
+                    "cohort": "",
+                    "peer_video_ids": [],
+                    "missing_detail_video_ids": [],
+                }
+                continue
+            peers = [
+                video_id
+                for _published, video_id, row in ranked[1:]
+                if performance._format_cohort(row) == cohort
+            ][: performance.CHANNEL_PAGE_SHARE_MAX_PEERS]
+            corner_plans[corner] = {
+                "status": "ready",
+                "latest_video_id": latest_id,
+                "cohort": cohort,
+                "peer_video_ids": peers,
+                "missing_detail_video_ids": [],
+            }
+        return {
+            "channel_page_share": {
+                "available": True,
+                "window_days": performance.CHANNEL_PAGE_SHARE_WINDOW_DAYS,
+                "min_total_views": performance.CHANNEL_PAGE_SHARE_MIN_VIEWS,
+                "data_through_date": "2026-07-31",
+                "corners": corner_plans,
+            },
+            "videos": videos,
+        }
+
+    def _comparison_rows(
+        self,
+        *,
+        latest_views: int = 10,
+        corner: str = "capitalism",
+    ) -> list[dict]:
+        return [
+            self._row(
+                "peer-20",
+                "2026-07-20T00:00:00+00:00",
+                20,
+                corner=corner,
+            ),
+            self._row(
+                "peer-30",
+                "2026-07-21T00:00:00+00:00",
+                30,
+                corner=corner,
+            ),
+            self._row(
+                "peer-40",
+                "2026-07-22T00:00:00+00:00",
+                40,
+                corner=corner,
+            ),
+            self._row(
+                "latest",
+                "2026-07-25T00:00:00+00:00",
+                latest_views,
+                corner=corner,
+            ),
+        ]
+
+    def _section(self, spec: SimpleNamespace, corner: str) -> dict:
+        decision = {
+            "decision_id": "dec-channel-page",
+            "status": "insufficient_data",
+            "reason": "比較可能な動画が2本",
+            "metric": "youtube_analytics_api_v2.average_view_percentage",
+            "format_cohort": "",
+            "eligible_video_ids": [],
+            "top_video_ids": [],
+            "bottom_video_ids": [],
+            "positive_traits": [],
+            "negative_traits": [],
+        }
+        return performance_report.build_corner_section(
+            spec, corner, decision, [], set()
+        )
+
+    def test_latest_share_uses_same_cohort_peers_and_proposes_one_change(
+        self,
+    ) -> None:
+        rows = self._comparison_rows()
+        rows.extend(
+            [
+                self._row(
+                    "different-cohort",
+                    "2026-07-23T00:00:00+00:00",
+                    90,
+                    traits=["tier:short", "duration:under_60s"],
+                ),
+                self._row(
+                    "different-corner",
+                    "2026-07-24T00:00:00+00:00",
+                    95,
+                    corner="communism",
+                ),
+            ]
+        )
+        snapshot = self._snapshot(rows)
+
+        analysis = performance_report._channel_page_share_analysis(
+            snapshot, "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "compared")
+        self.assertTrue(analysis["actionable"])
+        self.assertEqual(analysis["video_id"], "latest")
+        self.assertEqual(analysis["peer_count"], 3)
+        self.assertAlmostEqual(analysis["peer_median_ratio"], 0.30)
+        self.assertAlmostEqual(analysis["difference_points"], -20.0)
+        self.assertEqual(analysis["top_peer"]["video_id"], "peer-40")
+        self.assertIn("チャンネルページ流入割合: 10.0%", text)
+        self.assertIn("直近peer 3本の中央値 30.0%", text)
+        self.assertIn("差 -20.0ポイント", text)
+        self.assertIn("peer上位 `peer-40`（40.0%）", text)
+        self.assertIn("StudioのYT_CHANNEL詳細", text)
+        self.assertIn("比較条件を揃えられない場合は変更しない", text)
+        self.assertIn("タイトルまたはサムネイルの一方だけ", text)
+        self.assertNotIn("different-cohort", text)
+        self.assertNotIn("different-corner", text)
+
+    def test_higher_latest_preserves_packaging(self) -> None:
+        snapshot = self._snapshot(self._comparison_rows(latest_views=50))
+
+        analysis = performance_report._channel_page_share_analysis(
+            snapshot, "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertTrue(analysis["actionable"])
+        self.assertAlmostEqual(analysis["difference_points"], 20.0)
+        self.assertIn("組み合わせをこの指標だけでは変更せず", text)
+        self.assertNotIn("タイトルまたはサムネイルの一方だけを手動で変えて", text)
+
+    def test_exact_five_point_boundary_is_actionable(self) -> None:
+        rows = [
+            self._row(
+                f"peer-{index}",
+                f"2026-07-{20 + index:02d}T00:00:00+00:00",
+                30,
+            )
+            for index in range(3)
+        ]
+        rows.append(
+            self._row("latest", "2026-07-25T00:00:00+00:00", 25)
+        )
+
+        analysis = performance_report._channel_page_share_analysis(
+            self._snapshot(rows), "capitalism"
+        )
+
+        self.assertAlmostEqual(analysis["difference_points"], -5.0)
+        self.assertTrue(analysis["actionable"])
+
+    def test_twenty_views_one_count_boundary_is_held(self) -> None:
+        rows = [
+            self._row(
+                f"peer-{index}",
+                f"2026-07-{20 + index:02d}T00:00:00+00:00",
+                6,
+                total_views=20,
+            )
+            for index in range(3)
+        ]
+        rows.append(
+            self._row(
+                "latest",
+                "2026-07-25T00:00:00+00:00",
+                5,
+                total_views=20,
+            )
+        )
+
+        analysis = performance_report._channel_page_share_analysis(
+            self._snapshot(rows), "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            self._snapshot(rows), "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "latest_metric_unavailable")
+        self.assertFalse(analysis["actionable"])
+        self.assertIn("全viewsが100未満", text)
+
+    def test_latest_incomplete_seven_day_window_is_held(self) -> None:
+        rows = self._comparison_rows()
+        rows[-1]["channel_page_share"].update(
+            {
+                "status": "window_incomplete",
+                "views": None,
+                "channel_page_views": None,
+                "data_through_date": "2026-07-29",
+            }
+        )
+
+        analysis = performance_report._channel_page_share_analysis(
+            self._snapshot(rows), "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            self._snapshot(rows), "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "latest_window_incomplete")
+        self.assertFalse(analysis["actionable"])
+        self.assertIn("期間が揃うまで評価しません", text)
+        self.assertIn("`2026-07-29`", text)
+
+    def test_subthreshold_difference_does_not_change_or_create_candidate(
+        self,
+    ) -> None:
+        spec = SimpleNamespace(id="ideology")
+        rows = self._comparison_rows(latest_views=33)
+        snapshot = self._snapshot(rows)
+        analysis = performance_report._channel_page_share_analysis(
+            snapshot, "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            snapshot, "capitalism"
+        )
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [self._section(spec, "capitalism")],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+
+        self.assertFalse(analysis["actionable"])
+        self.assertIn("5.0ポイント未満", text)
+        self.assertIn("この指標からは変更しません", text)
+        self.assertIsNone(candidate)
+
+    def test_latest_missing_metric_does_not_fallback_to_old_video(self) -> None:
+        rows = self._comparison_rows()
+        rows[-1] = self._row(
+            "latest",
+            "2026-07-25T00:00:00+00:00",
+            None,
+        )
+        snapshot = self._snapshot(rows)
+
+        analysis = performance_report._channel_page_share_analysis(
+            snapshot, "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "latest_metric_unavailable")
+        self.assertFalse(analysis["actionable"])
+        self.assertIn("`latest`（このcornerの最新動画）", text)
+        self.assertIn("旧動画へfallbackせず", text)
+        self.assertIn("欠落を0とみなしません", text)
+        self.assertNotIn("`peer-40`", text)
+
+    def test_latest_missing_data_api_detail_does_not_promote_old_video(
+        self,
+    ) -> None:
+        snapshot = self._snapshot(self._comparison_rows())
+        snapshot["channel_page_share"]["corners"]["capitalism"] = {
+            "status": "latest_detail_unavailable",
+            "latest_video_id": "history-latest-missing",
+            "cohort": "duration:180s_or_more|tier:longform",
+            "peer_video_ids": [],
+            "missing_detail_video_ids": ["history-latest-missing"],
+        }
+
+        analysis = performance_report._channel_page_share_analysis(
+            snapshot, "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "latest_detail_unavailable")
+        self.assertFalse(analysis["actionable"])
+        self.assertIn("`history-latest-missing`", text)
+        self.assertIn("旧動画を最新へ繰り上げず", text)
+        self.assertNotIn("10.0%", text)
+
+    def test_unknown_timestamp_does_not_guess_latest(self) -> None:
+        rows = self._comparison_rows()
+        rows[0]["published_at"] = ""
+        rows[0]["history_ts"] = ""
+
+        analysis = performance_report._channel_page_share_analysis(
+            self._snapshot(rows), "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            self._snapshot(rows), "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "unknown_latest")
+        self.assertIn("最新動画を推測せず", text)
+
+    def test_insufficient_peer_and_missing_cohort_are_fail_closed(self) -> None:
+        rows = self._comparison_rows()[-2:]
+        analysis = performance_report._channel_page_share_analysis(
+            self._snapshot(rows), "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            self._snapshot(rows), "capitalism"
+        )
+        self.assertEqual(analysis["status"], "insufficient_peers")
+        self.assertIn("有効peer 1本 / 必要 3本", text)
+
+        rows[-1]["format_traits"] = ["tier:longform"]
+        no_cohort = performance_report._channel_page_share_analysis(
+            self._snapshot(rows), "capitalism"
+        )
+        no_cohort_text = performance_report._channel_page_share_text(
+            self._snapshot(rows), "capitalism"
+        )
+        self.assertEqual(no_cohort["status"], "cohort_unavailable")
+        self.assertIn("尺/tierを確認できない", no_cohort_text)
+
+    def test_missing_recent_peer_does_not_fallback_to_older_valid_peer(
+        self,
+    ) -> None:
+        rows = [
+            self._row(
+                "older-valid",
+                "2026-07-16T00:00:00+00:00",
+                90,
+            ),
+            self._row(
+                "window-valid-0",
+                "2026-07-17T00:00:00+00:00",
+                20,
+            ),
+            self._row(
+                "recent-missing",
+                "2026-07-18T00:00:00+00:00",
+                None,
+            ),
+            self._row(
+                "recent-valid-1",
+                "2026-07-19T00:00:00+00:00",
+                30,
+            ),
+            self._row(
+                "recent-valid-2",
+                "2026-07-20T00:00:00+00:00",
+                40,
+            ),
+            self._row(
+                "recent-valid-3",
+                "2026-07-21T00:00:00+00:00",
+                50,
+            ),
+            self._row(
+                "latest",
+                "2026-07-25T00:00:00+00:00",
+                10,
+            ),
+        ]
+        snapshot = self._snapshot(rows)
+
+        analysis = performance_report._channel_page_share_analysis(
+            snapshot, "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "peer_metric_unavailable")
+        self.assertFalse(analysis["actionable"])
+        self.assertEqual(analysis["peer_count"], 5)
+        self.assertEqual(analysis["missing_peer_count"], 1)
+        self.assertIn("欠落peerを除外したり", text)
+        self.assertIn("古い動画へ置換したりせず", text)
+        self.assertIn("selection bias", text)
+        self.assertNotIn("peer上位", text)
+        self.assertNotIn("90.0%", text)
+
+    def test_missing_peer_data_api_detail_keeps_fixed_peer_id(self) -> None:
+        rows = self._comparison_rows()
+        rows.insert(
+            0,
+            self._row(
+                "older-valid",
+                "2026-07-19T00:00:00+00:00",
+                90,
+            ),
+        )
+        snapshot = self._snapshot(rows)
+        snapshot["channel_page_share"]["corners"]["capitalism"][
+            "peer_video_ids"
+        ] = ["peer-40", "peer-30", "missing-detail"]
+
+        analysis = performance_report._channel_page_share_analysis(
+            snapshot, "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "peer_metric_unavailable")
+        self.assertFalse(analysis["actionable"])
+        self.assertEqual(analysis["peer_count"], 3)
+        self.assertEqual(analysis["missing_peer_count"], 1)
+        self.assertIn("selection bias", text)
+        self.assertNotIn("90.0%", text)
+
+    def test_invalid_counts_are_rejected_but_explicit_zero_is_valid(self) -> None:
+        base = self._row(
+            "v", "2026-07-25T00:00:00+00:00", 0, total_views=100
+        )
+        metrics = performance_report._channel_page_share_metrics(base)
+        self.assertIsNotNone(metrics)
+        self.assertEqual(metrics["share_ratio"], 0.0)
+
+        cases = [
+            self._row("v", "2026-07-25T00:00:00+00:00", None),
+            self._row("v", "2026-07-25T00:00:00+00:00", 21, total_views=20),
+            self._row("v", "2026-07-25T00:00:00+00:00", True),
+            self._row("v", "2026-07-25T00:00:00+00:00", 2.5),
+            self._row("v", "2026-07-25T00:00:00+00:00", 2, total_views=19),
+            self._row("v", "2026-07-25T00:00:00+00:00", 2, total_views=float("nan")),
+        ]
+        for row in cases:
+            with self.subTest(row=row):
+                self.assertIsNone(
+                    performance_report._channel_page_share_metrics(row)
+                )
+
+    def test_dedicated_readback_failure_is_reported_without_using_row_data(
+        self,
+    ) -> None:
+        snapshot = self._snapshot(self._comparison_rows())
+        snapshot["channel_page_share"].update(
+            {"available": False, "reason": "quota exceeded"}
+        )
+
+        analysis = performance_report._channel_page_share_analysis(
+            snapshot, "capitalism"
+        )
+        text = performance_report._channel_page_share_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertEqual(analysis["status"], "channel_page_unavailable")
+        self.assertIn("quota exceeded", text)
+        self.assertIn("推測で補いません", text)
+        self.assertNotIn("10.0%", text)
+
+    def test_actionable_signal_creates_candidate_for_non_source_corner(
+        self,
+    ) -> None:
+        spec = SimpleNamespace(id="ideology")
+        snapshot = self._snapshot(self._comparison_rows())
+
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [self._section(spec, "capitalism")],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("チャンネルページ流入割合と次の1本", candidate["body"])
+        self.assertIn("`latest`（このcornerの最新動画）", candidate["body"])
+        self.assertIn("自分または他チャンネルのページ", candidate["body"])
+        self.assertIn("CTR・維持率とも別指標", candidate["body"])
+
+    def test_actionable_signal_changes_fingerprint_with_latest_video(self) -> None:
+        spec = SimpleNamespace(id="ideology")
+        section = self._section(spec, "capitalism")
+        first = self._snapshot(self._comparison_rows())
+        second_rows = self._comparison_rows()
+        second_rows[-1]["video_id"] = "latest-next"
+        second = self._snapshot(second_rows)
+        corrected_counts = self._snapshot(
+            self._comparison_rows(latest_views=11)
+        )
+        changed_peer_rows = self._comparison_rows()
+        changed_peer_rows[0]["video_id"] = "peer-replaced"
+        changed_peer = self._snapshot(changed_peer_rows)
+
+        first_candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            first,
+        )
+        same_candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 29, tzinfo=timezone.utc),
+            first,
+        )
+        second_candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 29, tzinfo=timezone.utc),
+            second,
+        )
+        corrected_candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 29, tzinfo=timezone.utc),
+            corrected_counts,
+        )
+        changed_peer_candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 29, tzinfo=timezone.utc),
+            changed_peer,
+        )
+
+        self.assertIsNotNone(first_candidate)
+        self.assertIsNotNone(same_candidate)
+        self.assertIsNotNone(second_candidate)
+        self.assertIsNotNone(corrected_candidate)
+        self.assertIsNotNone(changed_peer_candidate)
+        self.assertEqual(
+            first_candidate["fingerprint"], same_candidate["fingerprint"]
+        )
+        self.assertNotEqual(
+            first_candidate["fingerprint"], second_candidate["fingerprint"]
+        )
+        self.assertEqual(
+            first_candidate["fingerprint"],
+            corrected_candidate["fingerprint"],
+        )
+        self.assertNotEqual(
+            first_candidate["fingerprint"],
+            changed_peer_candidate["fingerprint"],
+        )
 
 
 class RunChannelTest(unittest.TestCase):

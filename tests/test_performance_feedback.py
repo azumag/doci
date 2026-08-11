@@ -1341,6 +1341,162 @@ class PerformanceFeedbackTest(unittest.TestCase):
         )
         self.assertNotIn("retention", " ".join(traits))
 
+    def test_channel_page_plan_holds_missing_latest_and_keeps_other_corner(
+        self,
+    ) -> None:
+        history_rows = {
+            "old": {
+                "ts": "2026-07-17T12:00:00+00:00",
+                "corner": "capitalism",
+            },
+            "latest-missing": {
+                "ts": "2026-07-20T12:00:00+00:00",
+                "corner": "capitalism",
+            },
+            "other-latest": {
+                "ts": "2026-07-19T12:00:00+00:00",
+                "corner": "communism",
+            },
+        }
+        details = [
+            {
+                "video_id": "old",
+                "published_at": "2026-07-17T12:00:00Z",
+            },
+            {
+                "video_id": "other-latest",
+                "published_at": "2026-07-19T12:00:00Z",
+            },
+        ]
+        traits = {
+            video_id: ["tier:longform", "duration:180s_or_more"]
+            for video_id in history_rows
+        }
+
+        plan = performance._channel_page_share_plan(
+            history_rows, details, traits
+        )
+
+        self.assertEqual(
+            plan["corners"]["capitalism"]["status"],
+            "latest_detail_unavailable",
+        )
+        self.assertEqual(
+            plan["corners"]["capitalism"]["latest_video_id"],
+            "latest-missing",
+        )
+        self.assertNotIn(
+            "old", [window["video_id"] for window in plan["windows"]]
+        )
+        self.assertIn(
+            "other-latest", [window["video_id"] for window in plan["windows"]]
+        )
+
+    def test_sync_records_aligned_channel_page_share_windows(self) -> None:
+        """issue #122: 最新+同一cohort peerを公開翌日から同じ7日で取得する。"""
+        self.spec.pipeline["performance_feedback"] = True
+        history_rows = [
+            {
+                "ts": f"2026-07-{17 + index:02d}T12:00:00+00:00",
+                "channel": self.spec.id,
+                "corner": "capitalism",
+                "title": f"Title {index}",
+                "topic": f"Topic {index}",
+                "video_id": f"id-{index}",
+                "status": "published",
+                "tier": "longform",
+                "duration_sec": 240,
+            }
+            for index in range(4)
+        ]
+        self.spec.history_file.write_text(
+            "\n".join(json.dumps(row) for row in history_rows) + "\n",
+            encoding="utf-8",
+        )
+        details = [
+            {
+                "video_id": f"id-{index}",
+                "title": f"Title {index}",
+                "published_at": f"2026-07-{17 + index:02d}T12:00:00Z",
+                "privacy_status": "public",
+                "duration": "PT4M",
+                "views": 100,
+                "likes": 0,
+                "comments": 0,
+            }
+            for index in range(4)
+        ]
+
+        def channel_page_result(windows: list[dict], **_kwargs) -> dict:
+            return {
+                "source": "youtube_analytics_api_v2",
+                "data_through_date": "2026-08-10",
+                "videos": [
+                    {
+                        **window,
+                        "window_days": 7,
+                        "data_through_date": "2026-08-10",
+                        "status": "available",
+                        "views": 100,
+                        "channel_page_views": 10,
+                    }
+                    for window in windows
+                ],
+            }
+
+        with (
+            patch.object(performance.youtube, "video_details", return_value=details),
+            patch.object(performance.youtube, "_token_has_scopes", return_value=True),
+            patch.object(
+                performance.youtube,
+                "video_channel_page_share_metrics",
+                side_effect=channel_page_result,
+            ) as channel_page_mock,
+            patch.object(performance.youtube, "video_analytics", return_value=[]),
+            patch.object(performance.youtube, "video_share_metrics", return_value=[]),
+            patch.object(performance.youtube, "video_traffic_sources", return_value={}),
+            patch.object(
+                performance.youtube,
+                "video_search_terms",
+                return_value=({}, {}),
+            ),
+            patch.object(
+                performance.youtube,
+                "video_retention_curves",
+                return_value=({}, {}),
+            ),
+        ):
+            snapshot = performance.sync(
+                self.spec,
+                now=datetime(2026, 8, 12, tzinfo=timezone.utc),
+            )
+
+        windows = channel_page_mock.call_args.args[0]
+        self.assertEqual(
+            [window["video_id"] for window in windows],
+            ["id-3", "id-2", "id-1", "id-0"],
+        )
+        self.assertEqual(windows[0]["start_date"], "2026-07-21")
+        self.assertEqual(windows[0]["end_date"], "2026-07-27")
+        self.assertEqual(
+            channel_page_mock.call_args.kwargs["availability_start_date"],
+            "2026-07-13",
+        )
+        self.assertEqual(
+            channel_page_mock.call_args.kwargs["availability_end_date"],
+            "2026-08-11",
+        )
+        self.assertEqual(
+            channel_page_mock.call_args.kwargs["token_file"],
+            self.spec.publish.youtube.analytics_token,
+        )
+        self.assertTrue(snapshot["channel_page_share"]["available"])
+        latest = next(
+            row for row in snapshot["videos"] if row["video_id"] == "id-3"
+        )
+        self.assertEqual(latest["channel_page_share"]["window_days"], 7)
+        self.assertEqual(latest["channel_page_share"]["views"], 100)
+
     def test_sync_records_share_30d_separately(self) -> None:
         """issue #144 (Sol review指摘): 共有率は90日集計とは別に、過去30日
         集計を `share_30d` として保存する。30暦日（開始-終了が29日差）を

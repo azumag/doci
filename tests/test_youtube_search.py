@@ -43,8 +43,16 @@ def _analytics_headers(*names: str) -> list[dict[str, str]]:
     return [
         {
             "name": name,
-            "columnType": "DIMENSION" if name in {"day", "video"} else "METRIC",
-            "dataType": "STRING" if name in {"day", "video"} else "INTEGER",
+            "columnType": (
+                "DIMENSION"
+                if name in {"day", "video", "insightTrafficSourceType"}
+                else "METRIC"
+            ),
+            "dataType": (
+                "STRING"
+                if name in {"day", "video", "insightTrafficSourceType"}
+                else "INTEGER"
+            ),
         }
         for name in names
     ]
@@ -550,6 +558,228 @@ class YouTubeSearchTest(unittest.TestCase):
         self.assertEqual(reports.query.call_args_list[0].kwargs["startIndex"], 1)
         self.assertEqual(reports.query.call_args_list[1].kwargs["startIndex"], 201)
         self.assertEqual(reports.query.call_args_list[2].kwargs["dimensions"], "video")
+
+    def test_channel_page_share_metrics_uses_complete_fixed_windows(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [
+            {
+                "columnHeaders": _analytics_headers(
+                    "day", "insightTrafficSourceType", "views"
+                ),
+                "rows": [["2026-07-31", "YT_CHANNEL", 20]],
+            },
+            {
+                "columnHeaders": _analytics_headers("video", "views"),
+                "rows": [["complete123", 100]],
+            },
+            {
+                "columnHeaders": _analytics_headers(
+                    "video", "insightTrafficSourceType", "views"
+                ),
+                "rows": [
+                    ["complete123", "YT_CHANNEL", 10],
+                    ["complete123", "YT_SEARCH", 40],
+                ],
+            },
+        ]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(
+                youtube, "_load_credentials", return_value=object()
+            ) as credentials,
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            result = youtube.video_channel_page_share_metrics(
+                [
+                    {
+                        "video_id": "complete123",
+                        "start_date": "2026-07-20",
+                        "end_date": "2026-07-26",
+                    },
+                    {
+                        "video_id": "incomplete456",
+                        "start_date": "2026-07-29",
+                        "end_date": "2026-08-04",
+                    },
+                ],
+                availability_start_date="2026-07-01",
+                availability_end_date="2026-08-01",
+            )
+
+        self.assertEqual(result["data_through_date"], "2026-07-31")
+        self.assertEqual(
+            result["videos"][0],
+            {
+                "video_id": "complete123",
+                "start_date": "2026-07-20",
+                "end_date": "2026-07-26",
+                "window_days": 7,
+                "data_through_date": "2026-07-31",
+                "status": "available",
+                "views": 100,
+                "channel_page_views": 10,
+            },
+        )
+        self.assertEqual(result["videos"][1]["status"], "window_incomplete")
+        self.assertIsNone(result["videos"][1]["views"])
+        self.assertEqual(len(reports.query.call_args_list), 3)
+        self.assertEqual(
+            reports.query.call_args_list[0].kwargs["dimensions"],
+            "day,insightTrafficSourceType",
+        )
+        self.assertEqual(
+            reports.query.call_args_list[0].kwargs["sort"],
+            "day,insightTrafficSourceType",
+        )
+        self.assertEqual(
+            reports.query.call_args_list[1].kwargs["dimensions"], "video"
+        )
+        self.assertEqual(
+            reports.query.call_args_list[2].kwargs["dimensions"],
+            "video,insightTrafficSourceType",
+        )
+        self.assertTrue(credentials.call_args.kwargs["exact_scopes"])
+
+    def test_channel_page_share_metrics_isolates_wrong_video_provenance(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [
+            {
+                "columnHeaders": _analytics_headers(
+                    "day", "insightTrafficSourceType", "views"
+                ),
+                "rows": [["2026-07-31", "YT_CHANNEL", 20]],
+            },
+            {
+                "columnHeaders": _analytics_headers("video", "views"),
+                "rows": [["wrongVideo", 100]],
+            },
+        ]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            result = youtube.video_channel_page_share_metrics(
+                [
+                    {
+                        "video_id": "requested123",
+                        "start_date": "2026-07-20",
+                        "end_date": "2026-07-26",
+                    }
+                ],
+                availability_start_date="2026-07-01",
+                availability_end_date="2026-08-01",
+            )
+
+        self.assertEqual(result["videos"][0]["status"], "invalid_response")
+        self.assertIn("provenance", result["videos"][0]["reason"])
+
+    def test_channel_page_share_metrics_keeps_good_video_on_specific_400(
+        self,
+    ) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [
+            {
+                "columnHeaders": _analytics_headers(
+                    "day", "insightTrafficSourceType", "views"
+                ),
+                "rows": [["2026-07-31", "YT_CHANNEL", 20]],
+            },
+            {
+                "columnHeaders": _analytics_headers("video", "views"),
+                "rows": [["good123", 100]],
+            },
+            {
+                "columnHeaders": _analytics_headers(
+                    "video", "insightTrafficSourceType", "views"
+                ),
+                "rows": [["good123", "YT_CHANNEL", 10]],
+            },
+            _google_http_error(400, "videoNotFound"),
+        ]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            result = youtube.video_channel_page_share_metrics(
+                [
+                    {
+                        "video_id": video_id,
+                        "start_date": "2026-07-20",
+                        "end_date": "2026-07-26",
+                    }
+                    for video_id in ("good123", "missing456")
+                ],
+                availability_start_date="2026-07-01",
+                availability_end_date="2026-08-01",
+            )
+
+        self.assertEqual(result["videos"][0]["status"], "available")
+        self.assertEqual(result["videos"][1]["status"], "query_failed")
+        self.assertIn("videonotfound", result["videos"][1]["reason"])
+
+    def test_channel_page_share_metrics_reraises_global_invalid_filters(
+        self,
+    ) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [
+            {
+                "columnHeaders": _analytics_headers(
+                    "day", "insightTrafficSourceType", "views"
+                ),
+                "rows": [["2026-07-31", "YT_CHANNEL", 20]],
+            },
+            _google_http_error(400, "invalidFilters"),
+        ]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaises(HttpError):
+                youtube.video_channel_page_share_metrics(
+                    [
+                        {
+                            "video_id": "requested123",
+                            "start_date": "2026-07-20",
+                            "end_date": "2026-07-26",
+                        }
+                    ],
+                    availability_start_date="2026-07-01",
+                    availability_end_date="2026-08-01",
+                )
+
+    def test_channel_page_share_metrics_rejects_fractional_views(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": _analytics_headers(
+                "day", "insightTrafficSourceType", "views"
+            ),
+            "rows": [["2026-07-31", "YT_CHANNEL", 10.5]],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "non-negative integer"):
+                youtube.video_channel_page_share_metrics(
+                    [
+                        {
+                            "video_id": "requested123",
+                            "start_date": "2026-07-20",
+                            "end_date": "2026-07-26",
+                        }
+                    ],
+                    availability_start_date="2026-07-01",
+                    availability_end_date="2026-08-01",
+                )
 
     def test_video_analytics_maps_column_headers(self) -> None:
         reports = mock.Mock()

@@ -25,6 +25,7 @@ import html
 import json
 import math
 import os
+import statistics
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,11 @@ _THUMBNAIL_MIDPOINT_RATIO = 0.5
 _THUMBNAIL_SLOPE_THRESHOLD = 0.08
 _THUMBNAIL_SLOPE_REPORT_LIMIT = 5
 _THUMBNAIL_OPENING_EXCERPT_LIMIT = 400
+_CHANNEL_PAGE_SHARE_WINDOW_DAYS = performance.CHANNEL_PAGE_SHARE_WINDOW_DAYS
+_CHANNEL_PAGE_SHARE_MIN_TOTAL_VIEWS = performance.CHANNEL_PAGE_SHARE_MIN_VIEWS
+_CHANNEL_PAGE_SHARE_MIN_PEERS = 3
+_CHANNEL_PAGE_SHARE_PEER_LIMIT = performance.CHANNEL_PAGE_SHARE_MAX_PEERS
+_CHANNEL_PAGE_SHARE_DIFF_THRESHOLD_POINTS = 5.0
 _CYCLE_BODY_MAX_CHARS = 60_000
 
 
@@ -393,7 +399,12 @@ def _evaluation_text(evaluations: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def fingerprint(channel_id: str, sections: list[dict]) -> str:
+def fingerprint(
+    channel_id: str,
+    sections: list[dict],
+    *,
+    channel_page_signals: dict[str, dict] | None = None,
+) -> str:
     seed = {
         "channel": channel_id,
         "corners": [
@@ -412,6 +423,8 @@ def fingerprint(channel_id: str, sections: list[dict]) -> str:
             for s in sections
         ],
     }
+    if channel_page_signals:
+        seed["channel_page_signals"] = channel_page_signals
     return hashlib.sha256(
         json.dumps(seed, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]
@@ -563,6 +576,333 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
         + "\n\n### 視聴後評価（Satisfaction）\n\n"
         + "\n".join(satisfaction_lines)
     )
+
+
+def _channel_page_share_metrics(row: dict) -> dict | None:
+    """公開翌日から固定7日間の全viewsに占めるYT_CHANNEL viewsを返す。"""
+    metric = row.get("channel_page_share")
+    if not isinstance(metric, dict) or metric.get("status") != "available":
+        return None
+    if metric.get("window_days") != _CHANNEL_PAGE_SHARE_WINDOW_DAYS:
+        return None
+    try:
+        start_day = datetime.fromisoformat(str(metric.get("start_date"))).date()
+        end_day = datetime.fromisoformat(str(metric.get("end_date"))).date()
+    except (TypeError, ValueError):
+        return None
+    if (end_day - start_day).days + 1 != _CHANNEL_PAGE_SHARE_WINDOW_DAYS:
+        return None
+
+    total_views = metric.get("views")
+    channel_page_views = metric.get("channel_page_views")
+    if (
+        isinstance(total_views, bool)
+        or isinstance(channel_page_views, bool)
+        or not isinstance(total_views, (int, float))
+        or not isinstance(channel_page_views, (int, float))
+    ):
+        return None
+    try:
+        total_float = float(total_views)
+        channel_float = float(channel_page_views)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(total_float)
+        or not math.isfinite(channel_float)
+        or not total_float.is_integer()
+        or not channel_float.is_integer()
+    ):
+        return None
+    total = int(total_float)
+    channel_views = int(channel_float)
+    if (
+        total < _CHANNEL_PAGE_SHARE_MIN_TOTAL_VIEWS
+        or channel_views < 0
+        or channel_views > total
+    ):
+        return None
+    return {
+        "total_views": total,
+        "channel_page_views": channel_views,
+        "share_ratio": channel_views / total,
+        "start_date": start_day.isoformat(),
+        "end_date": end_day.isoformat(),
+        "window_days": _CHANNEL_PAGE_SHARE_WINDOW_DAYS,
+    }
+
+
+def _channel_page_share_analysis(snapshot: dict | None, corner: str) -> dict:
+    """cornerの最新動画を同じ尺/tierの過去動画と比較する（issue #122）。"""
+    if not isinstance(snapshot, dict):
+        return {"status": "snapshot_unavailable", "actionable": False}
+    readback_status = snapshot.get("channel_page_share")
+    readback_status = (
+        readback_status if isinstance(readback_status, dict) else {}
+    )
+    corner_plans = readback_status.get("corners")
+    corner_plans = corner_plans if isinstance(corner_plans, dict) else {}
+    plan = corner_plans.get(corner)
+    rows = {
+        str(row.get("video_id") or ""): row
+        for row in snapshot.get("videos", [])
+        if isinstance(row, dict)
+        and str(row.get("video_id") or "")
+        and str(row.get("corner") or "") == corner
+    }
+    if not isinstance(plan, dict):
+        if not rows:
+            return {"status": "no_videos", "actionable": False}
+        return {"status": "selection_unavailable", "actionable": False}
+    plan_status = str(plan.get("status") or "")
+    latest_id = str(plan.get("latest_video_id") or "")
+    if plan_status == "unknown_timestamp":
+        return {"status": "unknown_latest", "actionable": False}
+    if plan_status == "latest_detail_unavailable":
+        return {
+            "status": "latest_detail_unavailable",
+            "actionable": False,
+            "video_id": latest_id,
+        }
+    if plan_status == "cohort_unavailable":
+        return {
+            "status": "cohort_unavailable",
+            "actionable": False,
+            "video_id": latest_id,
+        }
+    if plan_status != "ready" or not latest_id:
+        return {"status": "selection_unavailable", "actionable": False}
+    cohort = str(plan.get("cohort") or "")
+    raw_peer_ids = plan.get("peer_video_ids")
+    if not cohort or not isinstance(raw_peer_ids, list):
+        return {"status": "selection_unavailable", "actionable": False}
+    peer_ids = [str(video_id or "") for video_id in raw_peer_ids]
+    if (
+        any(not video_id for video_id in peer_ids)
+        or latest_id in peer_ids
+        or len(peer_ids) != len(set(peer_ids))
+        or len(peer_ids) > _CHANNEL_PAGE_SHARE_PEER_LIMIT
+    ):
+        return {"status": "selection_unavailable", "actionable": False}
+    latest = rows.get(latest_id)
+    if (
+        not isinstance(latest, dict)
+        or performance._format_cohort(latest) != cohort
+    ):
+        return {
+            "status": "latest_detail_unavailable",
+            "actionable": False,
+            "video_id": latest_id,
+        }
+    if not readback_status.get("available"):
+        return {
+            "status": "channel_page_unavailable",
+            "actionable": False,
+            "video_id": latest_id,
+            "reason": str(readback_status.get("reason") or "取得不可"),
+        }
+    latest_raw = latest.get("channel_page_share")
+    latest_raw = latest_raw if isinstance(latest_raw, dict) else {}
+    if latest_raw.get("status") == "window_incomplete":
+        return {
+            "status": "latest_window_incomplete",
+            "actionable": False,
+            "video_id": latest_id,
+            "end_date": str(latest_raw.get("end_date") or ""),
+            "data_through_date": str(
+                latest_raw.get("data_through_date") or ""
+            ),
+        }
+    latest_metrics = _channel_page_share_metrics(latest)
+    if latest_metrics is None:
+        return {
+            "status": "latest_metric_unavailable",
+            "actionable": False,
+            "video_id": latest_id,
+        }
+
+    if len(peer_ids) < _CHANNEL_PAGE_SHARE_MIN_PEERS:
+        return {
+            "status": "insufficient_peers",
+            "actionable": False,
+            "video_id": latest_id,
+            "cohort": cohort,
+            "latest": latest_metrics,
+            "peer_count": len(peer_ids),
+        }
+    peers: list[dict] = []
+    missing_peer_ids: list[str] = []
+    for video_id in peer_ids:
+        row = rows.get(video_id)
+        if (
+            not isinstance(row, dict)
+            or performance._format_cohort(row) != cohort
+        ):
+            missing_peer_ids.append(video_id)
+            continue
+        metrics = _channel_page_share_metrics(row)
+        if metrics is None:
+            missing_peer_ids.append(video_id)
+        else:
+            peers.append({"video_id": video_id, **metrics})
+    # 欠落peerを飛ばしてさらに古い有効動画へfallbackすると、
+    # YT_CHANNELが返る動画だけを選ぶselection biasになる。
+    if missing_peer_ids:
+        return {
+            "status": "peer_metric_unavailable",
+            "actionable": False,
+            "video_id": latest_id,
+            "cohort": cohort,
+            "latest": latest_metrics,
+            "peer_count": len(peer_ids),
+            "missing_peer_count": len(missing_peer_ids),
+        }
+
+    peer_median = statistics.median(peer["share_ratio"] for peer in peers)
+    difference_points = (
+        latest_metrics["share_ratio"] - peer_median
+    ) * 100.0
+    threshold_met = (
+        abs(difference_points) + 1e-9
+        >= _CHANNEL_PAGE_SHARE_DIFF_THRESHOLD_POINTS
+    )
+    top_peer = max(
+        peers,
+        key=lambda peer: (peer["share_ratio"], peer["video_id"]),
+    )
+    return {
+        "status": "compared",
+        "actionable": threshold_met,
+        "video_id": latest_id,
+        "cohort": cohort,
+        "latest": latest_metrics,
+        "peer_count": len(peers),
+        "peers": peers,
+        "peer_median_ratio": peer_median,
+        "difference_points": difference_points,
+        "top_peer": top_peer,
+    }
+
+
+def _channel_page_share_text(snapshot: dict | None, corner: str) -> str:
+    """チャンネルページ流入割合を次の1本の手動判断へ接続する。"""
+    analysis = _channel_page_share_analysis(snapshot, corner)
+    status = analysis["status"]
+    if status == "snapshot_unavailable":
+        return "- チャンネルページ流入割合: snapshot未取得のため評価しません"
+    if status == "channel_page_unavailable":
+        reason = _safe_markdown_inline(analysis.get("reason"), limit=300)
+        return (
+            "- チャンネルページ流入割合: 公開後7日専用readbackを"
+            "取得できませんでした"
+            f"（{reason}。推測で補いません）"
+        )
+    if status == "no_videos":
+        return "- チャンネルページ流入割合: このcornerの動画がありません"
+    if status == "selection_unavailable":
+        return (
+            "- チャンネルページ流入割合: 履歴起点の最新動画・peer固定結果を"
+            "確認できないため、snapshot上の旧動画へfallbackせず評価しません"
+        )
+    if status == "unknown_latest":
+        return (
+            "- チャンネルページ流入割合: 公開時刻またはvideo_idを確認できない"
+            "動画があるため、最新動画を推測せず評価しません"
+        )
+
+    video_id = _safe_markdown_inline(analysis.get("video_id"), limit=100)
+    if status == "latest_detail_unavailable":
+        return (
+            f"- 対象動画: `{video_id}`（履歴上のこのcorner最新動画）\n"
+            "- チャンネルページ流入割合: Data APIで最新動画を確認できないため、"
+            "旧動画を最新へ繰り上げず評価しません"
+        )
+    if status == "cohort_unavailable":
+        return (
+            f"- 対象動画: `{video_id}`（このcornerの最新動画）\n"
+            "- 比較: 最新動画の尺/tierを確認できないため、異なる形式と混ぜず"
+            "判定材料不足とします"
+        )
+    if status == "latest_window_incomplete":
+        end_date = _safe_markdown_inline(analysis.get("end_date"), limit=20)
+        data_through = _safe_markdown_inline(
+            analysis.get("data_through_date"), limit=20
+        )
+        return (
+            f"- 対象動画: `{video_id}`（このcornerの最新動画）\n"
+            f"- チャンネルページ流入割合: 公開翌日から{_CHANNEL_PAGE_SHARE_WINDOW_DAYS}日間"
+            f"の終了日 `{end_date}` に対し、traffic-sourceデータは "
+            f"`{data_through or '未確認'}` までのため、期間が揃うまで評価しません"
+        )
+    if status == "latest_metric_unavailable":
+        return (
+            f"- 対象動画: `{video_id}`（このcornerの最新動画）\n"
+            "- チャンネルページ流入割合: 最新動画のYT_CHANNEL viewsまたは"
+            f"公開翌日から{_CHANNEL_PAGE_SHARE_WINDOW_DAYS}日間の全viewsを確認できない、"
+            f"または全viewsが{_CHANNEL_PAGE_SHARE_MIN_TOTAL_VIEWS}未満のため、"
+            "旧動画へfallbackせず評価しません（欠落を0とみなしません）"
+        )
+
+    latest = analysis["latest"]
+    latest_share = float(latest["share_ratio"]) * 100.0
+    lines = [
+        f"- 対象動画: `{video_id}`（このcornerの最新動画）",
+        f"- チャンネルページ流入割合: {latest_share:.1f}%"
+        f"（YT_CHANNEL {latest['channel_page_views']} / "
+        f"公開翌日から{_CHANNEL_PAGE_SHARE_WINDOW_DAYS}日間の全views "
+        f"{latest['total_views']}）",
+    ]
+    if status == "insufficient_peers":
+        lines.append(
+            f"- 比較: 同一corner・同一尺/tierの有効peer "
+            f"{analysis['peer_count']}本 / 必要 {_CHANNEL_PAGE_SHARE_MIN_PEERS}本。"
+            "旧動画の欠落を0とせず判定材料不足とします"
+        )
+    elif status == "peer_metric_unavailable":
+        lines.append(
+            f"- 比較: 同一corner・同一尺/tierの直近peer "
+            f"{analysis['peer_count']}本中 {analysis['missing_peer_count']}本で"
+            f"公開翌日から{_CHANNEL_PAGE_SHARE_WINDOW_DAYS}日間のYT_CHANNEL views・"
+            f"全views（{_CHANNEL_PAGE_SHARE_MIN_TOTAL_VIEWS}以上）を確認できません。"
+            "欠落peerを除外したり古い動画へ置換したりせず、selection biasを"
+            "避けて判定を保留します"
+        )
+    else:
+        median = float(analysis["peer_median_ratio"]) * 100.0
+        difference = float(analysis["difference_points"])
+        lines.append(
+            f"- 比較: 同一corner・同一尺/tierの直近peer "
+            f"{analysis['peer_count']}本の中央値 {median:.1f}% / "
+            f"差 {difference:+.1f}ポイント"
+        )
+        if not analysis["actionable"]:
+            lines.append(
+                f"- 次の1本: 差が検知閾値 "
+                f"{_CHANNEL_PAGE_SHARE_DIFF_THRESHOLD_POINTS:.1f}ポイント未満のため、"
+                "この指標からは変更しません"
+            )
+        elif difference < 0:
+            top_peer = analysis["top_peer"]
+            lines.append(
+                f"- 次の1本: peer上位 `"
+                f"{_safe_markdown_inline(top_peer['video_id'], limit=100)}`"
+                f"（{float(top_peer['share_ratio']) * 100.0:.1f}%）と最新動画を"
+                "StudioのYT_CHANNEL詳細で確認する。流入元channel pageを識別できず"
+                "比較条件を揃えられない場合は変更しない。比較可能なら実表示も確認し、"
+                "題材は再利用せず、タイトルまたはサムネイルの一方だけを手動で変えて"
+                "同じ割合を比較します"
+            )
+        else:
+            lines.append(
+                "- 次の1本: 最新動画はpeer中央値を上回るため、タイトルとサムネイルの"
+                "組み合わせをこの指標だけでは変更せず、他の分析で選ぶ1変数を優先します"
+            )
+    lines.append(
+        "- YT_CHANNELは自分または他チャンネルのページで生じたviewsの集計で、"
+        "既存視聴者・信頼・満足や流入原因を示しません。CTR・維持率とも別指標として"
+        "扱い、相関を因果と断定しません"
+    )
+    return "\n".join(lines)
 
 
 def _opening_signal_for_row(
@@ -1814,6 +2154,10 @@ def _cycle_body(
             "",
             _discovery_satisfaction_text(snapshot, section["corner"]),
             "",
+            "### チャンネルページ流入割合と次の1本（issue #122）",
+            "",
+            _channel_page_share_text(snapshot, section["corner"]),
+            "",
             "### Shorts冒頭3秒の維持率と削る情報（issue #127）",
             "",
             _shorts_first_three_retention_text(snapshot, section["corner"]),
@@ -1881,6 +2225,8 @@ def build_cycle_candidate(
     has_retention_content = False
     has_subscribed_retention_content = False
     has_share_content = False
+    has_channel_page_share_content = False
+    channel_page_signals: dict[str, dict] = {}
     if isinstance(snapshot, dict):
         section_corners = {section["corner"] for section in sections}
         has_gap_discovery = any(
@@ -1957,6 +2303,26 @@ def build_cycle_candidate(
             and bool(row.get("format_traits"))
             for row in snapshot.get("videos", [])
         )
+        # issue #122: 最新動画と同一corner・同一尺/tierのpeer中央値に
+        # 5ポイント以上の差があるときだけ、この分析単独でも報告候補にする。
+        # 最新動画の欠落時に古い成功動画へfallbackしない。
+        for corner in sorted(section_corners):
+            analysis = _channel_page_share_analysis(snapshot, corner)
+            if not analysis.get("actionable"):
+                continue
+            channel_page_signals[corner] = {
+                "video_id": analysis["video_id"],
+                "cohort": analysis["cohort"],
+                "direction": (
+                    "below"
+                    if analysis["difference_points"] < 0
+                    else "above"
+                ),
+                "peer_video_ids": [
+                    peer["video_id"] for peer in analysis["peers"]
+                ],
+            }
+        has_channel_page_share_content = bool(channel_page_signals)
     has_content = (
         has_section_content
         or has_gap_discovery
@@ -1966,10 +2332,15 @@ def build_cycle_candidate(
         or has_retention_content
         or has_subscribed_retention_content
         or has_share_content
+        or has_channel_page_share_content
     )
     if not has_content:
         return None
-    fp = fingerprint(spec.id, sections)
+    fp = fingerprint(
+        spec.id,
+        sections,
+        channel_page_signals=channel_page_signals,
+    )
     hypothesis_keys = [
         section["proposal"]["hypothesis_key"]
         for section in sections
