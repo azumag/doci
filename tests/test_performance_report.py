@@ -2985,5 +2985,288 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         return tmp.name
 
 
+class CommentIntentManualReviewTest(unittest.TestCase):
+    """issue #123: 最新動画の実測離脱をStudioでの手動確認へ接続する。"""
+
+    def _workdir(
+        self,
+        *,
+        topic: str = "制度の誤解",
+        angle: str = "原因と結果を分ける",
+    ) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        Path(tmp.name, "script.json").write_text(
+            json.dumps(
+                {
+                    "title": "制度の誤解をほどく",
+                    "_research": {"topic": topic, "angle": angle},
+                    "scenes": [
+                        {"caption": "導入"},
+                        {"caption": "原因"},
+                        {"caption": "結果"},
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return tmp.name
+
+    def _row(
+        self,
+        video_id: str,
+        *,
+        corner: str = "capitalism",
+        published_at: str = "2026-07-25T00:00:00+00:00",
+        history_ts: str | None = None,
+        duration: str = "PT100S",
+        curve: list[dict] | None = None,
+        include_intent: bool = True,
+    ) -> dict:
+        if curve is None:
+            curve = [
+                {"elapsed_ratio": 0.0, "watch_ratio": 0.95},
+                {"elapsed_ratio": 0.1, "watch_ratio": 0.91},
+                {"elapsed_ratio": 0.2, "watch_ratio": 0.86},
+                {"elapsed_ratio": 0.3, "watch_ratio": 0.70},
+                {"elapsed_ratio": 0.5, "watch_ratio": 0.62},
+                {"elapsed_ratio": 1.0, "watch_ratio": 0.50},
+            ]
+        return {
+            "video_id": video_id,
+            "corner": corner,
+            "history_ts": published_at if history_ts is None else history_ts,
+            "published_at": published_at,
+            "workdir": self._workdir(topic=f"題材-{video_id}") if include_intent else "",
+            "format_traits": ["tier:longform"],
+            "data_api": {"duration": duration},
+            "analytics": {"retention_curve": curve},
+        }
+
+    def test_manual_review_uses_latest_video_and_does_not_emit_comment_data(self) -> None:
+        old = self._row("old", published_at="2026-07-20T00:00:00+00:00")
+        latest = self._row("latest", published_at="2026-07-25T00:00:00+00:00")
+        # 旧schema等に生コメントが紛れた入力でも、この節は参照・転載しない。
+        latest["comment_sample"] = {
+            "comments": [
+                {"text": "氏名 山田太郎 mail@example.com @viewer 090-1234-5678"}
+            ]
+        }
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [old, latest],
+        }
+
+        text = performance_report._comment_intent_retention_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertIn("`latest`（このcornerの最新動画）", text)
+        self.assertNotIn("`old`", text)
+        self.assertIn("Studioでの確認", text)
+        self.assertIn("コメント本文・件数・投稿者情報はdociへ入力・保存しない", text)
+        self.assertIn("除外後の分類対象が3件未満", text)
+        self.assertIn("分母は運営自身を除外した後の有効標本数", text)
+        self.assertIn("どちらにも該当しなければ変更しない", text)
+        for secret in ("山田太郎", "mail@example.com", "@viewer", "090-1234-5678"):
+            self.assertNotIn(secret, text)
+
+    def test_latest_video_without_curve_does_not_fallback_to_old_video(self) -> None:
+        old = self._row("old", published_at="2026-07-20T00:00:00+00:00")
+        latest = self._row(
+            "latest",
+            published_at="2026-07-25T00:00:00+00:00",
+            curve=[],
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [old, latest],
+        }
+
+        text = performance_report._comment_intent_retention_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertIn("`latest`（このcornerの最新動画）", text)
+        self.assertIn("旧動画へfallbackせず評価しません", text)
+        self.assertNotIn("Studioでの確認", text)
+        self.assertNotIn("`old`", text)
+
+    def test_youtube_published_at_wins_when_history_order_is_reversed(self) -> None:
+        youtube_older = self._row(
+            "youtube-older",
+            published_at="2026-07-20T00:00:00+00:00",
+            history_ts="2026-07-26T00:00:00+00:00",
+        )
+        youtube_latest = self._row(
+            "youtube-latest",
+            published_at="2026-07-25T00:00:00+00:00",
+            history_ts="2026-07-21T00:00:00+00:00",
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [youtube_latest, youtube_older],
+        }
+
+        text = performance_report._comment_intent_retention_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertIn("`youtube-latest`（このcornerの最新動画）", text)
+        self.assertNotIn("`youtube-older`", text)
+
+    def test_unknown_publication_time_does_not_guess_latest_video(self) -> None:
+        known = self._row("known")
+        unknown = self._row("unknown")
+        unknown["history_ts"] = ""
+        unknown["published_at"] = ""
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [known, unknown],
+        }
+
+        text = performance_report._comment_intent_retention_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertIn("公開時刻またはvideo_idを確認できない", text)
+        self.assertIn("最新動画を推測せず", text)
+        self.assertNotIn("Studioでの確認", text)
+
+    def test_latest_video_failure_reason_is_shown_without_fallback(self) -> None:
+        old = self._row("old", published_at="2026-07-20T00:00:00+00:00")
+        latest = self._row(
+            "latest",
+            published_at="2026-07-25T00:00:00+00:00",
+            curve=[],
+        )
+        snapshot = {
+            "retention_curve": {
+                "available": True,
+                "failed_video_ids": ["latest"],
+                "failures": {"latest": "privacy threshold"},
+            },
+            "videos": [old, latest],
+        }
+
+        text = performance_report._comment_intent_retention_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertIn("privacy threshold", text)
+        self.assertIn("旧動画へfallbackせず評価しません", text)
+
+    def test_missing_saved_intent_is_not_inferred_from_current_title(self) -> None:
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [self._row("latest", include_intent=False)],
+        }
+
+        text = performance_report._comment_intent_retention_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertIn("topic/angleが揃わない", text)
+        self.assertIn("現在のタイトルから意図を推測せず", text)
+        self.assertNotIn("Studioでの確認", text)
+
+    def test_end_only_dip_is_not_an_early_or_midpoint_signal(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.1, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.8, "watch_ratio": 0.60},
+            {"elapsed_ratio": 0.9, "watch_ratio": 0.89},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.88},
+        ]
+
+        context = performance_report._comment_retention_context(
+            self._row("end-dip", curve=curve)
+        )
+
+        self.assertFalse(context["actionable"])
+
+    def test_exact_midpoint_dip_is_allowed_when_seconds_are_known(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.62},
+            {"elapsed_ratio": 0.1, "watch_ratio": 0.62},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.62},
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.61},
+            {"elapsed_ratio": 0.4, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.60},
+            {"elapsed_ratio": 0.6, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.8, "watch_ratio": 0.88},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.86},
+        ]
+
+        context = performance_report._comment_retention_context(
+            self._row("mid-dip", curve=curve)
+        )
+
+        self.assertTrue(context["actionable"])
+        self.assertEqual(context["kind"], "retention_dip")
+        self.assertEqual(context["location"], "約50.0秒")
+
+    def test_midpoint_dip_without_duration_fails_closed(self) -> None:
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.62},
+            {"elapsed_ratio": 0.1, "watch_ratio": 0.62},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.62},
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.61},
+            {"elapsed_ratio": 0.4, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.60},
+            {"elapsed_ratio": 0.6, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.8, "watch_ratio": 0.88},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.86},
+        ]
+
+        context = performance_report._comment_retention_context(
+            self._row("unknown-duration", duration="", curve=curve)
+        )
+
+        self.assertFalse(context["actionable"])
+
+    def test_cycle_body_applies_manual_review_to_non_source_corner(self) -> None:
+        spec = SimpleNamespace(id="ideology")
+        decision = {
+            "decision_id": "dec-1",
+            "status": "insufficient_data",
+            "reason": "比較可能な動画が2本",
+            "metric": "youtube_analytics_api_v2.average_view_percentage",
+            "format_cohort": "",
+            "eligible_video_ids": [],
+            "top_video_ids": [],
+            "bottom_video_ids": [],
+            "positive_traits": [],
+            "negative_traits": [],
+        }
+        section = performance_report.build_corner_section(
+            spec, "capitalism", decision, [], set()
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [self._row("ideology-latest")],
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn(
+            "制作意図・視聴者コメントと序盤/中盤離脱", candidate["body"]
+        )
+        self.assertIn("`ideology-latest`（このcornerの最新動画）", candidate["body"])
+        self.assertIn("Studioでの確認", candidate["body"])
+        self.assertNotIn("commentThreads.list", candidate["body"])
+
+
 if __name__ == "__main__":
     unittest.main()
