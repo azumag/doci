@@ -601,6 +601,95 @@ class CornerSectionAndCandidateTest(unittest.TestCase):
         self.assertIn("冒頭30秒の維持率と次の1本", candidate["body"])
         self.assertIn("冒頭フックだけを変更", candidate["body"])
 
+    def test_build_cycle_candidate_includes_first_three_drop_for_short_tier(self) -> None:
+        """issue #127: corner名に依存せず、実際のShort tierの冒頭3秒低下だけで
+        レポート候補を生成する。"""
+        spec = SimpleNamespace(id="ideology")
+        decision = self._decision(
+            status="insufficient_data", reason="比較可能な動画が2本"
+        )
+        section = performance_report.build_corner_section(
+            spec, "capitalism", decision, [], set()
+        )
+        curve = [
+            {"elapsed_ratio": 0.01, "watch_ratio": 0.95},  # 0.6秒
+            {"elapsed_ratio": 0.03, "watch_ratio": 0.91},  # 1.8秒
+            {"elapsed_ratio": 0.05, "watch_ratio": 0.87},  # 3.0秒
+            {"elapsed_ratio": 0.10, "watch_ratio": 0.91},
+            {"elapsed_ratio": 0.20, "watch_ratio": 0.93},
+            {"elapsed_ratio": 0.50, "watch_ratio": 0.95},
+            {"elapsed_ratio": 1.00, "watch_ratio": 0.90},
+        ]
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "ideology-short",
+                    "corner": "capitalism",
+                    "format_traits": ["tier:short", "duration:60_to_179s"],
+                    "data_api": {"duration": "PT60S"},
+                    "analytics": {"retention_curve": curve},
+                }
+            ],
+        }
+
+        opening = performance_report._opening_signal_for_row(snapshot["videos"][0])
+        self.assertIsNotNone(opening)
+        self.assertFalse(opening["actionable"])
+        self.assertEqual(performance.retention_moments(curve), [])
+
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("Shorts冒頭3秒の維持率と削る情報", candidate["body"])
+        self.assertIn("不要な情報を1つだけ削る", candidate["body"])
+
+    def test_build_cycle_candidate_ignores_first_three_drop_for_longform(self) -> None:
+        """issue #127: 同じ短い低下でも、履歴tierがlongformなら対象外。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision(
+            status="insufficient_data", reason="比較可能な動画が2本"
+        )
+        section = performance_report.build_corner_section(
+            spec, "video", decision, [], set()
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "regular-video",
+                    "corner": "video",
+                    "format_traits": ["tier:longform"],
+                    "data_api": {"duration": "PT60S"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.01, "watch_ratio": 0.95},
+                            {"elapsed_ratio": 0.03, "watch_ratio": 0.91},
+                            {"elapsed_ratio": 0.05, "watch_ratio": 0.87},
+                            {"elapsed_ratio": 0.10, "watch_ratio": 0.91},
+                            {"elapsed_ratio": 0.20, "watch_ratio": 0.93},
+                            {"elapsed_ratio": 0.50, "watch_ratio": 0.95},
+                            {"elapsed_ratio": 1.00, "watch_ratio": 0.90},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec,
+            [section],
+            datetime(2026, 7, 26, tzinfo=timezone.utc),
+            snapshot,
+        )
+
+        self.assertIsNone(candidate)
+
     def test_build_cycle_candidate_ignores_flat_retention_curve(self) -> None:
         """issue #149: 山/谷の無い平坦なカーブでは無内容issueを作らない。"""
         spec = SimpleNamespace(id="youtube-growth")
@@ -1470,7 +1559,7 @@ class ShareRateTest(unittest.TestCase):
 
 
 class RetentionCurveAnalysisTest(unittest.TestCase):
-    """issue #142/#149: 冒頭低下と山/谷の分析・レポート表示。"""
+    """issue #127/#142/#149: 冒頭低下と山/谷の分析・レポート表示。"""
 
     def test_opening_retention_signal_detects_monotonic_drop_and_scene(self) -> None:
         """山/谷のない単調低下でも、冒頭30秒の累計・最大区間低下を返す。"""
@@ -1596,6 +1685,184 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         self.assertIsNone(
             performance.opening_retention_signal(curve, "PT1M", window_seconds=0)
         )
+
+    def test_short_tier_detection_is_fail_closed(self) -> None:
+        self.assertEqual(
+            performance_report._youtube_short_tier(
+                {"format_traits": ["tier:short", "duration:60_to_179s"]}
+            ),
+            "short",
+        )
+        self.assertEqual(
+            performance_report._youtube_short_tier(
+                {"format_traits": ["tier:long_short"]}
+            ),
+            "long_short",
+        )
+        self.assertEqual(
+            performance_report._youtube_short_tier(
+                {"format_traits": ["tier:longform"]}
+            ),
+            "",
+        )
+        self.assertEqual(
+            performance_report._youtube_short_tier(
+                {"format_traits": ("tier:short",)}
+            ),
+            "",
+        )
+
+    def test_shorts_first_three_signal_uses_only_observed_points_within_window(
+        self,
+    ) -> None:
+        row = {
+            "format_traits": ["tier:long_short"],
+            "data_api": {"duration": "PT60S"},
+            "analytics": {
+                "retention_curve": [
+                    {"elapsed_ratio": 0.01, "watch_ratio": 0.95},  # 0.6秒
+                    {"elapsed_ratio": 0.03, "watch_ratio": 0.91},  # 1.8秒
+                    {"elapsed_ratio": 0.05, "watch_ratio": 0.87},  # 3.0秒
+                    {"elapsed_ratio": 0.10, "watch_ratio": 0.40},  # 対象外
+                ]
+            },
+        }
+
+        signal = performance_report._shorts_first_three_signal_for_row(row)
+
+        self.assertIsNotNone(signal)
+        self.assertTrue(signal["actionable"])
+        self.assertEqual(signal["window_seconds"], 3.0)
+        self.assertEqual(signal["start_seconds"], 0.6)
+        self.assertEqual(signal["end_seconds"], 3.0)
+        self.assertAlmostEqual(signal["cumulative_drop_ratio"], 0.08)
+        self.assertAlmostEqual(signal["largest_step_drop_ratio"], 0.04)
+
+    def test_shorts_first_three_text_proposes_one_manual_information_removal(
+        self,
+    ) -> None:
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "short-opening",
+                    "corner": "capitalism",
+                    "format_traits": ["tier:short", "duration:60_to_179s"],
+                    "workdir": str(Path(self._workdir())),
+                    "history_ts": "2026-08-11T00:00:00+00:00",
+                    "data_api": {"duration": "PT60S"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.01, "watch_ratio": 0.96},
+                            {"elapsed_ratio": 0.03, "watch_ratio": 0.91},
+                            {"elapsed_ratio": 0.05, "watch_ratio": 0.84},
+                            {"elapsed_ratio": 0.10, "watch_ratio": 0.80},
+                        ]
+                    },
+                },
+                {
+                    "video_id": "not-queried",
+                    "corner": "capitalism",
+                    "format_traits": ["tier:long_short"],
+                    "data_api": {"duration": "PT90S"},
+                    "analytics": {"views": 100},
+                },
+                {
+                    "video_id": "regular-video",
+                    "corner": "capitalism",
+                    "format_traits": ["tier:longform"],
+                    "data_api": {"duration": "PT4M"},
+                    "analytics": {},
+                },
+            ],
+        }
+
+        text = performance_report._shorts_first_three_retention_text(
+            snapshot, "capitalism"
+        )
+
+        self.assertIn("Shorts対象 2本", text)
+        self.assertIn("冒頭3秒低下シグナル 1本", text)
+        self.assertIn("Analytics未評価 1本", text)
+        self.assertIn("`short-opening`（tier=short）", text)
+        self.assertIn("シーン・均等割近似: 導入", text)
+        self.assertIn("上記一覧の先頭", text)
+        self.assertIn("検証対象に固定", text)
+        self.assertIn("不要な情報を1つだけ削る", text)
+        self.assertIn("他の中心変数を固定", text)
+        self.assertIn("運用者が手動", text)
+        self.assertIn("スワイプアウト率", text)
+        self.assertIn("離脱人数そのものではありません", text)
+        self.assertIn("シーン位置は動画長をscene数で均等割した近似", text)
+        self.assertNotIn("`regular-video`", text)
+
+    def test_shorts_first_three_text_withholds_when_points_are_insufficient(
+        self,
+    ) -> None:
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "sparse-short",
+                    "corner": "analytics",
+                    "format_traits": ["tier:long_short"],
+                    "data_api": {"duration": "PT180S"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.01, "watch_ratio": 0.90},
+                            {"elapsed_ratio": 0.02, "watch_ratio": 0.60},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        text = performance_report._shorts_first_three_retention_text(
+            snapshot, "analytics"
+        )
+
+        self.assertIn("分析可能な維持率カーブがありません", text)
+        self.assertIn("有効な観測点が2点未満", text)
+        self.assertNotIn("次の1本:", text)
+
+    def test_shorts_first_three_text_prioritises_recent_then_larger_drop(
+        self,
+    ) -> None:
+        def row(video_id: str, timestamp: str, end_ratio: float) -> dict:
+            return {
+                "video_id": video_id,
+                "corner": "communism",
+                "format_traits": ["tier:short", "duration:60_to_179s"],
+                "history_ts": timestamp,
+                "data_api": {"duration": "PT60S"},
+                "analytics": {
+                    "retention_curve": [
+                        {"elapsed_ratio": 0.01, "watch_ratio": 0.95},
+                        {
+                            "elapsed_ratio": 0.03,
+                            "watch_ratio": (0.95 + end_ratio) / 2,
+                        },
+                        {"elapsed_ratio": 0.05, "watch_ratio": end_ratio},
+                    ]
+                },
+            }
+
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                row("older-strongest", "2026-08-09T00:00:00+00:00", 0.50),
+                row("latest-mild", "2026-08-10T00:00:00+00:00", 0.87),
+                row("latest-strong", "2026-08-10T00:00:00+00:00", 0.70),
+            ],
+        }
+
+        text = performance_report._shorts_first_three_retention_text(
+            snapshot, "communism"
+        )
+
+        self.assertLess(text.index("`latest-strong`"), text.index("`latest-mild`"))
+        self.assertLess(text.index("`latest-mild`"), text.index("`older-strongest`"))
+        self.assertIn("上記一覧の先頭（最新優先、同時刻なら低下が大きい動画）", text)
 
     def test_opening_retention_text_proposes_one_manual_hook_change(self) -> None:
         snapshot = {
