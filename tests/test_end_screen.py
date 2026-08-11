@@ -616,6 +616,21 @@ class EndScreenTest(unittest.TestCase):
         self.assertEqual(stats["profiles"][0]["distinct_source_video_count"], 1)
         self.assertEqual(group["status"], "insufficient_comparable_experiments")
 
+    def test_summary_rejects_corrupt_completed_result(self) -> None:
+        self._plan()
+        self._start()
+        self._complete_observed()
+        path = self._manifest_file("esc-0000000000000001")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["result"]["click_rate"] = 101.0
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(end_screen.EndScreenError, "between 0 and 100"):
+            end_screen.summary_experiments(self.spec)
+
     def test_summary_holds_when_multi_setup_profiles_differ(self) -> None:
         for index, element_type in enumerate(("subscribe", "playlist")):
             source_id = f"MixedMulti{index:02d}"

@@ -745,10 +745,12 @@ def _load_manifest(path: Path, *, expected_channel: str | None = None) -> dict:
         raise EndScreenError(
             f"channel mismatch: expected {expected_channel}, got {data.get('channel')!r}"
         )
-    _validate_manifest_plan(data, path)
-    _validate_manifest_status(data)
     if data.get("status") in ("completed", "invalidated"):
+        # show/summary must never receive terminal records with unvalidated metrics.
         _validate_manifest_result(data, path)
+    else:
+        _validate_manifest_plan(data, path)
+        _validate_manifest_status(data)
     return data
 
 
