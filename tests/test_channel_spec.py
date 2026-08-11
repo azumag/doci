@@ -844,6 +844,36 @@ token = "secrets/ideology/youtube_token.json"
         )
         self.assertTrue(any("migrate_channels.py" in str(item.message) for item in caught))
 
+    def test_rejects_analytics_token_matching_legacy_publish_fallback(self) -> None:
+        self._write_channel(
+            "ideology",
+            toml='''\
+[channel]
+id = "ideology"
+name = "Ideology"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube]
+token = "secrets/ideology/youtube_token.json"
+analytics_token = "youtube_token.json"
+''',
+        )
+        legacy_token = self.root / "youtube_token.json"
+        legacy_token.write_text("{}", encoding="utf-8")
+
+        with (
+            patch.object(config, "ROOT", self.root),
+            warnings.catch_warnings(),
+            self.assertRaisesRegex(
+                channel.ChannelConfigError, "analytics_token must differ"
+            ),
+        ):
+            warnings.simplefilter("ignore")
+            channel.load("ideology", channels_dir=self.channels_dir)
+
     def test_discover_and_default_channel(self) -> None:
         self.assertEqual(channel.discover(channels_dir=self.channels_dir), [])
         with self.assertRaisesRegex(channel.ChannelConfigError, "no channels"):

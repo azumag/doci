@@ -512,11 +512,6 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
         "analytics_token",
         config.YOUTUBE_ANALYTICS_TOKEN_FILE,
     )
-    if youtube_analytics_token == youtube_token:
-        raise ChannelConfigError(
-            "publish.youtube.analytics_token must differ from "
-            "publish.youtube.token"
-        )
     youtube_client_secret = _ideology_credential_fallback(
         channel_id,
         youtube_client_secret,
@@ -529,6 +524,11 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
         config.YOUTUBE_TOKEN_FILE,
         "YouTube token",
     )
+    if youtube_analytics_token == youtube_token:
+        raise ChannelConfigError(
+            "publish.youtube.analytics_token must differ from "
+            "publish.youtube.token"
+        )
     youtube_privacy = _string(
         youtube,
         "privacy",
