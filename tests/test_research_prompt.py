@@ -1858,6 +1858,25 @@ class ResearchPromptTest(unittest.TestCase):
             "反映は運用者が手動で行い",
         ):
             self.assertIn(rule, prompt)
+        for other_key in ("shorts", "analytics"):
+            other_corner = spec.corners[other_key]
+            with (
+                mock.patch.object(config, "SCRIPT_RESEARCH_RETRIES", 1),
+                mock.patch.object(
+                    research.llm, "run_claude", return_value=raw
+                ) as other_mock,
+            ):
+                research.web_research(
+                    other_corner,
+                    [],
+                    spec,
+                    backend_override="claude",
+                    require_youtube_examples=False,
+                )
+            self.assertNotIn(
+                "視覚的な進捗指標",
+                other_mock.call_args.args[0],
+            )
 
     def test_unknown_backend_fails_closed_without_claude(self) -> None:
         with (
