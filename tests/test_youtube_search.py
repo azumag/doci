@@ -39,6 +39,17 @@ def _google_http_error(status: int, reason: str) -> HttpError:
     )
 
 
+def _analytics_headers(*names: str) -> list[dict[str, str]]:
+    return [
+        {
+            "name": name,
+            "columnType": "DIMENSION" if name in {"day", "video"} else "METRIC",
+            "dataType": "STRING" if name in {"day", "video"} else "INTEGER",
+        }
+        for name in names
+    ]
+
+
 class _Request:
     def execute(self) -> dict:
         return {
@@ -213,6 +224,332 @@ class YouTubeSearchTest(unittest.TestCase):
             service.videos_resource.kwargs["part"],
             "snippet,contentDetails,statistics,status",
         )
+
+    def test_owned_video_details_readonly_filters_to_authenticated_channel(self) -> None:
+        channels = mock.Mock()
+        channels.list.return_value.execute.return_value = {
+            "items": [{"id": "owned-channel"}]
+        }
+        videos = mock.Mock()
+        videos.list.return_value.execute.return_value = {
+            "items": [
+                {
+                    "id": "owned123456",
+                    "snippet": {
+                        "channelId": "owned-channel",
+                        "title": "アプリ投稿Short",
+                        "publishedAt": "2026-08-10T18:00:00Z",
+                    },
+                    "contentDetails": {"duration": "PT58S"},
+                    "statistics": {"viewCount": "100", "commentCount": "3"},
+                    "status": {"privacyStatus": "public"},
+                },
+                {
+                    "id": "foreign12345",
+                    "snippet": {
+                        "channelId": "foreign-channel",
+                        "title": "他チャンネル",
+                        "publishedAt": "2026-08-10T18:00:00Z",
+                    },
+                    "contentDetails": {"duration": "PT30S"},
+                    "statistics": {},
+                    "status": {"privacyStatus": "public"},
+                },
+            ]
+        }
+        service = mock.Mock()
+        service.channels.return_value = channels
+        service.videos.return_value = videos
+        with (
+            mock.patch.object(
+                youtube, "_load_credentials", return_value=object()
+            ) as credentials,
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            result = youtube.owned_video_details_readonly(
+                ["owned123456", "foreign12345"]
+            )
+
+        self.assertEqual(result["channel_id"], "owned-channel")
+        self.assertEqual(
+            [item["video_id"] for item in result["videos"]], ["owned123456"]
+        )
+        self.assertEqual(result["videos"][0]["duration"], "PT58S")
+        self.assertEqual(result["videos"][0]["comments"], 3)
+        self.assertEqual(
+            credentials.call_args.kwargs["scopes"],
+            youtube.ANALYTICS_READONLY_SCOPES,
+        )
+        self.assertTrue(credentials.call_args.kwargs["exact_scopes"])
+        self.assertEqual(channels.list.call_args.kwargs, {"part": "id", "mine": True})
+
+    def test_owned_video_details_readonly_requires_one_authenticated_channel(self) -> None:
+        channels = mock.Mock()
+        channels.list.return_value.execute.return_value = {"items": []}
+        service = mock.Mock()
+        service.channels.return_value = channels
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                youtube.owned_video_details_readonly(["owned123456"])
+
+    def test_comment_reply_short_metrics_reads_availability_and_video_windows(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [
+            {
+                "columnHeaders": _analytics_headers(
+                    "day",
+                    "views",
+                    "comments",
+                    "subscribersGained",
+                    "subscribersLost",
+                ),
+                "rows": [
+                    ["2026-08-16", 100, 2, 1, 0],
+                    ["2026-08-17", 120, 3, 2, 1],
+                ],
+            },
+            {
+                "columnHeaders": _analytics_headers(
+                    "video",
+                    "views",
+                    "comments",
+                    "subscribersGained",
+                    "subscribersLost",
+                ),
+                "rows": [["reply12345", 1000, 20, 8, 2]],
+            },
+            {
+                "columnHeaders": _analytics_headers(
+                    "video",
+                    "views",
+                    "comments",
+                    "subscribersGained",
+                    "subscribersLost",
+                ),
+                "rows": [["base123456", 800, 8, 4, 2]],
+            },
+        ]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        windows = [
+            {
+                "video_id": "reply12345",
+                "start_date": "2026-08-11",
+                "end_date": "2026-08-17",
+            },
+            {
+                "video_id": "base123456",
+                "start_date": "2026-08-08",
+                "end_date": "2026-08-14",
+            },
+        ]
+        with (
+            mock.patch.object(
+                youtube, "_load_credentials", return_value=object()
+            ) as credentials,
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            result = youtube.comment_reply_short_metrics(
+                windows,
+                availability_start_date="2026-08-11",
+                availability_end_date="2026-08-18",
+            )
+
+        self.assertEqual(result["data_through_date"], "2026-08-17")
+        self.assertEqual(result["videos"][0]["comments"], 20)
+        self.assertEqual(result["videos"][0]["net_subscribers"], 6)
+        self.assertEqual(result["videos"][1]["net_subscribers"], 2)
+        calls = reports.query.call_args_list
+        self.assertEqual(calls[0].kwargs["dimensions"], "day")
+        self.assertNotIn("filters", calls[0].kwargs)
+        self.assertEqual(calls[1].kwargs["filters"], "video==reply12345")
+        self.assertEqual(calls[1].kwargs["sort"], "-views")
+        self.assertEqual(calls[2].kwargs["startDate"], "2026-08-08")
+        self.assertEqual(calls[0].kwargs["startIndex"], 1)
+        self.assertEqual(
+            calls[0].kwargs["metrics"],
+            "views,comments,subscribersGained,subscribersLost",
+        )
+        self.assertTrue(credentials.call_args.kwargs["exact_scopes"])
+
+    def test_comment_reply_short_metrics_keeps_absent_columns_as_none(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [
+            {"columnHeaders": _analytics_headers("day"), "rows": []},
+            {
+                "columnHeaders": _analytics_headers("video", "views"),
+                "rows": [["reply12345", 50]],
+            },
+        ]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            result = youtube.comment_reply_short_metrics(
+                [
+                    {
+                        "video_id": "reply12345",
+                        "start_date": "2026-08-11",
+                        "end_date": "2026-08-17",
+                    }
+                ],
+                availability_start_date="2026-08-11",
+                availability_end_date="2026-08-18",
+            )
+
+        self.assertIsNone(result["data_through_date"])
+        self.assertIsNone(result["videos"][0]["comments"])
+        self.assertIsNone(result["videos"][0]["subscribers_gained"])
+        self.assertIsNone(result["videos"][0]["net_subscribers"])
+
+    def test_comment_reply_short_metrics_rejects_wrong_video_provenance(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [
+            {
+                "columnHeaders": _analytics_headers("day"),
+                "rows": [["2026-08-17"]],
+            },
+            {
+                "columnHeaders": _analytics_headers(
+                    "video", "views", "comments"
+                ),
+                "rows": [["wrongVideo123", 10, 3]],
+            },
+        ]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "provenance"):
+                youtube.comment_reply_short_metrics(
+                    [
+                        {
+                            "video_id": "reply12345",
+                            "start_date": "2026-08-11",
+                            "end_date": "2026-08-17",
+                        }
+                    ],
+                    availability_start_date="2026-08-11",
+                    availability_end_date="2026-08-18",
+                )
+
+    def test_comment_reply_short_metrics_rejects_invalid_count_values(self) -> None:
+        for value in (10.9, True, -1, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                reports = mock.Mock()
+                reports.query.return_value.execute.side_effect = [
+                    {
+                        "columnHeaders": _analytics_headers("day"),
+                        "rows": [["2026-08-17"]],
+                    },
+                    {
+                        "columnHeaders": _analytics_headers("video", "views"),
+                        "rows": [["reply12345", value]],
+                    },
+                ]
+                service = mock.Mock()
+                service.reports.return_value = reports
+                with (
+                    mock.patch.object(
+                        youtube, "_load_credentials", return_value=object()
+                    ),
+                    mock.patch(
+                        "googleapiclient.discovery.build", return_value=service
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "non-negative integer"
+                    ):
+                        youtube.comment_reply_short_metrics(
+                            [
+                                {
+                                    "video_id": "reply12345",
+                                    "start_date": "2026-08-11",
+                                    "end_date": "2026-08-17",
+                                }
+                            ],
+                            availability_start_date="2026-08-11",
+                            availability_end_date="2026-08-18",
+                        )
+
+    def test_comment_reply_short_metrics_rejects_invalid_header_type(self) -> None:
+        headers = _analytics_headers("day", "views")
+        headers[1]["dataType"] = "FLOAT"
+        reports = mock.Mock()
+        reports.query.return_value.execute.return_value = {
+            "columnHeaders": headers,
+            "rows": [["2026-08-17", 10]],
+        }
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "column type"):
+                youtube.comment_reply_short_metrics(
+                    [
+                        {
+                            "video_id": "reply12345",
+                            "start_date": "2026-08-11",
+                            "end_date": "2026-08-17",
+                        }
+                    ],
+                    availability_start_date="2026-08-11",
+                    availability_end_date="2026-08-18",
+                )
+
+    def test_comment_reply_short_metrics_paginates_availability_days(self) -> None:
+        reports = mock.Mock()
+        reports.query.return_value.execute.side_effect = [
+            {
+                "columnHeaders": _analytics_headers("day"),
+                "rows": [["2026-08-16"]] * 200,
+            },
+            {
+                "columnHeaders": _analytics_headers("day"),
+                "rows": [["2026-08-17"]],
+            },
+            {
+                "columnHeaders": _analytics_headers(
+                    "video",
+                    "views",
+                    "comments",
+                    "subscribersGained",
+                    "subscribersLost",
+                ),
+                "rows": [["reply12345", 50, 1, 1, 0]],
+            },
+        ]
+        service = mock.Mock()
+        service.reports.return_value = reports
+        with (
+            mock.patch.object(youtube, "_load_credentials", return_value=object()),
+            mock.patch("googleapiclient.discovery.build", return_value=service),
+        ):
+            result = youtube.comment_reply_short_metrics(
+                [
+                    {
+                        "video_id": "reply12345",
+                        "start_date": "2026-08-11",
+                        "end_date": "2026-08-17",
+                    }
+                ],
+                availability_start_date="2026-08-11",
+                availability_end_date="2026-08-18",
+            )
+
+        self.assertEqual(result["data_through_date"], "2026-08-17")
+        self.assertEqual(reports.query.call_args_list[0].kwargs["startIndex"], 1)
+        self.assertEqual(reports.query.call_args_list[1].kwargs["startIndex"], 201)
+        self.assertEqual(reports.query.call_args_list[2].kwargs["dimensions"], "video")
 
     def test_video_analytics_maps_column_headers(self) -> None:
         reports = mock.Mock()

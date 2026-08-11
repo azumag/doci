@@ -110,10 +110,53 @@ class LoadCredentialsTest(unittest.TestCase):
             False,
             token_file=self.token_file,
             scopes=youtube.ANALYTICS_READONLY_SCOPES,
+            exact_scopes=True,
         )
 
         self.assertIsNotNone(creds)
         self.assertTrue(creds.has_scopes(youtube.ANALYTICS_READONLY_SCOPES))
+
+    def test_analytics_readonly_rejects_token_with_write_scope(self) -> None:
+        _write_token_file(
+            self.token_file,
+            [*youtube.ANALYTICS_READONLY_SCOPES, youtube.SCOPES[0]],
+            expired=False,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "scopeが要求と一致"):
+            youtube._load_credentials(
+                False,
+                token_file=self.token_file,
+                scopes=youtube.ANALYTICS_READONLY_SCOPES,
+                exact_scopes=True,
+            )
+
+    def test_analytics_readonly_rejects_scope_expansion_after_refresh(self) -> None:
+        _write_token_file(
+            self.token_file,
+            youtube.ANALYTICS_READONLY_SCOPES,
+            expired=True,
+        )
+        before = self.token_file.read_text(encoding="utf-8")
+        from google.oauth2.credentials import Credentials
+
+        with (
+            mock.patch.object(Credentials, "refresh", return_value=None),
+            mock.patch.object(
+                youtube,
+                "_credentials_have_scopes",
+                side_effect=[True, False],
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "更新後.*scope"):
+                youtube._load_credentials(
+                    False,
+                    token_file=self.token_file,
+                    scopes=youtube.ANALYTICS_READONLY_SCOPES,
+                    exact_scopes=True,
+                )
+
+        self.assertEqual(self.token_file.read_text(encoding="utf-8"), before)
 
     def test_analytics_readonly_scope_error_uses_readonly_auth_hint(self) -> None:
         _write_token_file(self.token_file, youtube.SCOPES, expired=False)

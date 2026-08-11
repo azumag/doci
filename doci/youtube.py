@@ -4,6 +4,7 @@
     python -m doci.youtube --auth
     python -m doci.youtube --auth --channel <id>
 これで refresh token を YOUTUBE_TOKEN_FILE に保存。以降は無人で更新される。
+Analytics専用read-only tokenは --auth --analytics-readonly で別ファイルへ保存する。
 
 依存: google-api-python-client, google-auth-oauthlib, google-auth-httplib2
 """
@@ -75,16 +76,50 @@ def _build_service(credentials):
     return build("youtube", "v3", http=http)
 
 
-def _token_has_scopes(token_file: Path, required_scopes: list[str]) -> bool:
-    """保存済みtoken JSONに実際に記録されたscopeを比較する。"""
+def _token_scopes(token_file: Path) -> set[str] | None:
+    """保存済みtoken JSONに記録されたscopeを返す。"""
     try:
         raw = json.loads(token_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
+        return None
     stored = raw.get("scopes") or []
     if isinstance(stored, str):
         stored = stored.split()
-    return set(required_scopes).issubset(set(stored))
+    if not isinstance(stored, list) or not all(
+        isinstance(scope, str) for scope in stored
+    ):
+        return None
+    return set(stored)
+
+
+def _token_has_scopes(
+    token_file: Path,
+    required_scopes: list[str],
+    *,
+    exact: bool = False,
+) -> bool:
+    """保存済みtoken JSONに実際に記録されたscopeを比較する。"""
+    stored = _token_scopes(token_file)
+    if stored is None:
+        return False
+    required = set(required_scopes)
+    return stored == required if exact else required.issubset(stored)
+
+
+def _credentials_have_scopes(
+    credentials,
+    required_scopes: list[str],
+    *,
+    exact: bool,
+) -> bool:
+    """OAuth応答または保存tokenのscopeが要求境界内か確認する。"""
+    granted = getattr(credentials, "granted_scopes", None)
+    stored = granted if granted is not None else getattr(credentials, "scopes", None)
+    if stored is None:
+        return False
+    actual = set(stored)
+    required = set(required_scopes)
+    return actual == required if exact else required.issubset(actual)
 
 
 def _load_credentials(
@@ -93,6 +128,7 @@ def _load_credentials(
     token_file: Path | None = None,
     client_secret_file: Path | None = None,
     scopes: list[str] | None = None,
+    exact_scopes: bool = False,
 ):
     from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
@@ -120,7 +156,9 @@ def _load_credentials(
     )
     creds = None
     token_scopes_ok = token_file.exists() and _token_has_scopes(
-        token_file, required_scopes
+        token_file,
+        required_scopes,
+        exact=exact_scopes,
     )
     if token_scopes_ok:
         # scopes引数を渡さずに読み込む: JSON内の保存scopesがそのまま
@@ -129,14 +167,18 @@ def _load_credentials(
         # 保存トークンのscopeが縮小されてしまう(issue #103)。
         creds = Credentials.from_authorized_user_file(str(token_file))
     elif token_file.exists() and not interactive:
+        scope_problem = "要求と一致しません" if exact_scopes else "不足しています"
         raise RuntimeError(
-            "YouTube token のscopeが不足しています。"
+            f"YouTube token のscopeが{scope_problem}。"
             f"`{auth_hint}` で再認証してください。"
         )
-    if creds and not creds.has_scopes(required_scopes):
+    if creds and not _credentials_have_scopes(
+        creds, required_scopes, exact=exact_scopes
+    ):
         if not interactive:
+            scope_problem = "要求と一致しません" if exact_scopes else "不足しています"
             raise RuntimeError(
-                "YouTube token のscopeが不足しています。"
+                f"YouTube token のscopeが{scope_problem}。"
                 f"`{auth_hint}` で再認証してください。"
             )
         creds = None
@@ -145,6 +187,13 @@ def _load_credentials(
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
+            if not _credentials_have_scopes(
+                creds, required_scopes, exact=exact_scopes
+            ):
+                raise RuntimeError(
+                    "更新後のYouTube tokenのscopeが要求と一致しません。"
+                    f"`{auth_hint}` で再認証してください。"
+                )
             token_file.write_text(creds.to_json(), encoding="utf-8")
             return creds
         except RefreshError:
@@ -171,9 +220,16 @@ def _load_credentials(
     creds = flow.run_local_server(
         port=0,
         access_type="offline",
-        include_granted_scopes="true",
+        include_granted_scopes="false" if exact_scopes else "true",
         prompt="consent",
     )
+    if not _credentials_have_scopes(
+        creds, required_scopes, exact=exact_scopes
+    ):
+        raise RuntimeError(
+            "OAuthで取得したYouTube tokenのscopeが要求と一致しません。"
+            "別アカウントまたはOAuth同意を確認してください。"
+        )
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(creds.to_json(), encoding="utf-8")
     return creds
@@ -322,6 +378,275 @@ def video_details(
                 }
             )
     return results
+
+
+def owned_video_details_readonly(
+    video_ids: list[str],
+    *,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict:
+    """認証チャンネル所有動画の公開情報をread-onlyで取得する。
+
+    YouTubeアプリから投稿した動画はdoci履歴に存在しないため、コメント返信Short
+    実験ではData APIの所有チャンネルIDと各動画のchannelIdを照合する。更新scopeは
+    要求しない。
+    """
+    from googleapiclient.discovery import build
+
+    ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    if not ids:
+        return {"channel_id": None, "videos": []}
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
+    )
+    service = build("youtube", "v3", credentials=creds)
+    channels = service.channels().list(part="id", mine=True).execute()
+    channel_ids = [
+        str(item.get("id") or "")
+        for item in channels.get("items", [])
+        if item.get("id")
+    ]
+    if len(channel_ids) != 1:
+        raise RuntimeError(
+            "YouTube readback could not identify exactly one authenticated channel"
+        )
+    channel_id = channel_ids[0]
+    results: list[dict] = []
+    for offset in range(0, len(ids), 50):
+        data = (
+            service.videos()
+            .list(
+                part="snippet,contentDetails,statistics,status",
+                id=",".join(ids[offset : offset + 50]),
+            )
+            .execute()
+        )
+        for item in data.get("items", []):
+            snippet = item.get("snippet", {})
+            if str(snippet.get("channelId") or "") != channel_id:
+                continue
+            statistics = item.get("statistics", {})
+            status = item.get("status", {})
+            results.append(
+                {
+                    "video_id": str(item.get("id") or ""),
+                    "channel_id": channel_id,
+                    "title": str(snippet.get("title") or ""),
+                    "published_at": str(snippet.get("publishedAt") or ""),
+                    "duration": str(
+                        item.get("contentDetails", {}).get("duration") or ""
+                    ),
+                    "privacy_status": str(status.get("privacyStatus") or ""),
+                    "views": int(statistics.get("viewCount", 0) or 0),
+                    "comments": int(statistics.get("commentCount", 0) or 0),
+                }
+            )
+    by_id = {item["video_id"]: item for item in results}
+    return {
+        "channel_id": channel_id,
+        "videos": [by_id[video_id] for video_id in ids if video_id in by_id],
+    }
+
+
+_COMMENT_REPLY_COUNT_COLUMNS = {
+    "views",
+    "comments",
+    "subscribersGained",
+    "subscribersLost",
+}
+
+
+def _validated_comment_reply_rows(data: object, *, dimension: str) -> list[dict]:
+    """Analytics応答の列型、行幅、count型を検証してdictへ変換する。"""
+    if not isinstance(data, dict):
+        raise RuntimeError("YouTube Analytics returned an invalid report")
+    headers = data.get("columnHeaders")
+    if not isinstance(headers, list) or not headers:
+        raise RuntimeError("YouTube Analytics report lacks column headers")
+    allowed = {dimension, *_COMMENT_REPLY_COUNT_COLUMNS}
+    names: list[str] = []
+    for header in headers:
+        if not isinstance(header, dict):
+            raise RuntimeError("YouTube Analytics column header is invalid")
+        name = header.get("name")
+        if not isinstance(name, str) or name not in allowed or name in names:
+            raise RuntimeError("YouTube Analytics column names are invalid")
+        expected_column_type = "DIMENSION" if name == dimension else "METRIC"
+        expected_data_type = "STRING" if name == dimension else "INTEGER"
+        if (
+            header.get("columnType") != expected_column_type
+            or header.get("dataType") != expected_data_type
+        ):
+            raise RuntimeError(
+                f"YouTube Analytics column type is invalid for {name}"
+            )
+        names.append(name)
+    if dimension not in names:
+        raise RuntimeError(
+            f"YouTube Analytics report lacks {dimension} provenance"
+        )
+    raw_rows = data.get("rows", [])
+    if raw_rows is None:
+        raw_rows = []
+    if not isinstance(raw_rows, list):
+        raise RuntimeError("YouTube Analytics rows are invalid")
+    rows: list[dict] = []
+    for values in raw_rows:
+        if not isinstance(values, list) or len(values) != len(names):
+            raise RuntimeError("YouTube Analytics row width is invalid")
+        row = dict(zip(names, values))
+        if not isinstance(row[dimension], str) or not row[dimension]:
+            raise RuntimeError(
+                f"YouTube Analytics {dimension} value is invalid"
+            )
+        for name in _COMMENT_REPLY_COUNT_COLUMNS.intersection(row):
+            value = row[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RuntimeError(
+                    f"YouTube Analytics {name} must be a non-negative integer"
+                )
+        rows.append(row)
+    return rows
+
+
+def comment_reply_short_metrics(
+    video_windows: list[dict],
+    *,
+    availability_start_date: str,
+    availability_end_date: str,
+    token_file: Path | None = None,
+    client_secret_file: Path | None = None,
+) -> dict:
+    """返信Shortと比較Shortの同じ公開後日数の指標をread-only取得する。
+
+    `comments`は期間中のコメント操作数、登録者は動画watch pageへ帰属した
+    `subscribersGained - subscribersLost`を保存する。最新日の欠落を0と誤認しない
+    よう、同じメトリクス群の日次channel reportで利用可能最終日も確認する。
+    """
+    from googleapiclient.discovery import build
+
+    if not video_windows:
+        return {
+            "source": "youtube_analytics_api_v2",
+            "availability_start_date": availability_start_date,
+            "availability_probe_end_date": availability_end_date,
+            "data_through_date": None,
+            "videos": [],
+        }
+    creds = _load_credentials(
+        interactive=False,
+        token_file=token_file,
+        client_secret_file=client_secret_file,
+        scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
+    )
+    service = build("youtubeAnalytics", "v2", credentials=creds)
+    metrics = "views,comments,subscribersGained,subscribersLost"
+    available_days: list[str] = []
+    start_index = 1
+    while True:
+        availability = (
+            service.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=availability_start_date,
+                endDate=availability_end_date,
+                metrics=metrics,
+                dimensions="day",
+                sort="day",
+                maxResults=200,
+                startIndex=start_index,
+            )
+            .execute()
+        )
+        page = _validated_comment_reply_rows(availability, dimension="day")
+        for row in page:
+            day = row["day"]
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                raise RuntimeError("YouTube Analytics day value is invalid")
+            try:
+                date.fromisoformat(day)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "YouTube Analytics day value is invalid"
+                ) from exc
+            available_days.append(day)
+        if len(page) < 200:
+            break
+        start_index += len(page)
+
+    rows: list[dict] = []
+    for window in video_windows:
+        video_id = str(window.get("video_id") or "")
+        start_date = str(window.get("start_date") or "")
+        end_date = str(window.get("end_date") or "")
+        data = (
+            service.reports()
+            .query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics=metrics,
+                dimensions="video",
+                filters=f"video=={video_id}",
+                sort="-views",
+                maxResults=1,
+            )
+            .execute()
+        )
+        report_rows = _validated_comment_reply_rows(data, dimension="video")
+        if len(report_rows) > 1:
+            raise RuntimeError(
+                "YouTube Analytics returned multiple rows for one video"
+            )
+        row = report_rows[0] if report_rows else {}
+        if row and row["video"] != video_id:
+            raise RuntimeError(
+                "YouTube Analytics video provenance does not match the request"
+            )
+
+        def optional_count(name: str) -> int | None:
+            value = row.get(name)
+            return (
+                value
+                if isinstance(value, int) and not isinstance(value, bool)
+                else None
+            )
+
+        gained = optional_count("subscribersGained")
+        lost = optional_count("subscribersLost")
+        rows.append(
+            {
+                "video_id": video_id,
+                "start_date": start_date,
+                "end_date": end_date,
+                "views": optional_count("views"),
+                "comments": optional_count("comments"),
+                "subscribers_gained": gained,
+                "subscribers_lost": lost,
+                "net_subscribers": (
+                    gained - lost if gained is not None and lost is not None else None
+                ),
+            }
+        )
+    return {
+        "source": "youtube_analytics_api_v2",
+        "metrics": [
+            "views",
+            "comments",
+            "subscribersGained",
+            "subscribersLost",
+        ],
+        "availability_start_date": availability_start_date,
+        "availability_probe_end_date": availability_end_date,
+        "data_through_date": max(available_days) if available_days else None,
+        "videos": rows,
+    }
 
 
 def video_analytics(
@@ -509,6 +834,7 @@ def shorts_bridge_metrics(
         token_file=token_file,
         client_secret_file=client_secret_file,
         scopes=ANALYTICS_READONLY_SCOPES,
+        exact_scopes=True,
     )
     service = build("youtubeAnalytics", "v2", credentials=creds)
 
@@ -1488,7 +1814,10 @@ def main() -> None:
     analytics_mode.add_argument(
         "--analytics-readonly",
         action="store_true",
-        help="--auth時にAnalytics用read-only scopeだけを要求（upload権限なし）",
+        help=(
+            "--auth時にAnalytics用read-only scopeだけを要求し、"
+            "分析専用tokenへ保存（upload権限なし）"
+        ),
     )
     ap.add_argument(
         "--manage",
@@ -1543,6 +1872,7 @@ def main() -> None:
     args = ap.parse_args()
     privacy = config.YOUTUBE_PRIVACY
     token_file = Path(config.YOUTUBE_TOKEN_FILE)
+    analytics_token_file = Path(config.YOUTUBE_ANALYTICS_TOKEN_FILE)
     client_secret_file = Path(config.YOUTUBE_CLIENT_SECRET_FILE)
     if args.channel:
         from . import channel
@@ -1550,12 +1880,19 @@ def main() -> None:
         spec = channel.load(args.channel)
         privacy = spec.publish.youtube.privacy
         token_file = spec.publish.youtube.token
+        analytics_token_file = spec.publish.youtube.analytics_token
         client_secret_file = spec.publish.youtube.client_secret
     if args.auth:
         if args.analytics_readonly and args.manage:
             ap.error("--analytics-readonly cannot be combined with --manage")
         if args.analytics_readonly:
+            if analytics_token_file.resolve() == token_file.resolve():
+                ap.error(
+                    "Analytics read-only token path must differ from "
+                    "the publish token path"
+                )
             auth_scopes = list(ANALYTICS_READONLY_SCOPES)
+            token_file = analytics_token_file
         else:
             auth_scopes = list(
                 ANALYTICS_SCOPES if args.analytics else ACCOUNT_SCOPES
@@ -1567,6 +1904,7 @@ def main() -> None:
             token_file=token_file,
             client_secret_file=client_secret_file,
             scopes=auth_scopes,
+            exact_scopes=args.analytics_readonly,
         )
         print(f"認証完了: {token_file}")
         return

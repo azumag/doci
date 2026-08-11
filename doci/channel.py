@@ -108,6 +108,9 @@ class YouTubePublishSpec:
         default_factory=lambda: _repo_path(config.YOUTUBE_CLIENT_SECRET_FILE)
     )
     token: Path = field(default_factory=lambda: _repo_path(config.YOUTUBE_TOKEN_FILE))
+    analytics_token: Path = field(
+        default_factory=lambda: _repo_path(config.YOUTUBE_ANALYTICS_TOKEN_FILE)
+    )
     review: YouTubeReviewSpec = field(default_factory=YouTubeReviewSpec)
 
 
@@ -220,7 +223,13 @@ _VIDEO_STYLE_KEYS = {"pad_color", "filter"}
 _BGM_STYLE_KEYS = {"dir", "volume", "rotation"}
 _CREDITS_STYLE_KEYS = {"template"}
 _PUBLISH_KEYS = {"platforms", "youtube", "tiktok", "instagram"}
-_YOUTUBE_PUBLISH_KEYS = {"privacy", "client_secret", "token", "review"}
+_YOUTUBE_PUBLISH_KEYS = {
+    "privacy",
+    "client_secret",
+    "token",
+    "analytics_token",
+    "review",
+}
 _YOUTUBE_REVIEW_KEYS = {"enabled"}
 _TIKTOK_PUBLISH_KEYS = {"token", "privacy"}
 _INSTAGRAM_PUBLISH_KEYS = {"user_id", "access_token_env"}
@@ -498,6 +507,11 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
         youtube, "client_secret", config.YOUTUBE_CLIENT_SECRET_FILE
     )
     youtube_token = _publish_path(youtube, "token", config.YOUTUBE_TOKEN_FILE)
+    youtube_analytics_token = _publish_path(
+        youtube,
+        "analytics_token",
+        config.YOUTUBE_ANALYTICS_TOKEN_FILE,
+    )
     youtube_client_secret = _ideology_credential_fallback(
         channel_id,
         youtube_client_secret,
@@ -510,6 +524,11 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
         config.YOUTUBE_TOKEN_FILE,
         "YouTube token",
     )
+    if youtube_analytics_token == youtube_token:
+        raise ChannelConfigError(
+            "publish.youtube.analytics_token must differ from "
+            "publish.youtube.token"
+        )
     youtube_privacy = _string(
         youtube,
         "privacy",
@@ -523,6 +542,7 @@ def _load_publish(data: dict[str, Any], channel_id: str) -> PublishSpec:
             privacy=youtube_privacy,
             client_secret=youtube_client_secret,
             token=youtube_token,
+            analytics_token=youtube_analytics_token,
             review=YouTubeReviewSpec(enabled=review_enabled),
         ),
         tiktok=TikTokPublishSpec(

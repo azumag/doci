@@ -84,6 +84,7 @@ platforms = ["youtube"]
 privacy = "unlisted"
 client_secret = "secrets/ideology/client_secret.json"
 token = "secrets/ideology/youtube_token.json"
+analytics_token = "secrets/ideology/youtube_analytics_token.json"
 
 [publish.youtube.review]
 enabled = false
@@ -184,6 +185,7 @@ platforms = ["youtube"]
 [publish.youtube]
 client_secret = "secrets/sample/client_secret.json"
 token = "secrets/sample/youtube_token.json"
+analytics_token = "secrets/sample/youtube_analytics_token.json"
 ```
 
 主な設定:
@@ -521,6 +523,66 @@ Analyticsの`RELATED_VIDEO`へ必ず分類されるとは明記していない�
 みなし、届いていなければ実験を`running`のまま残して同じコマンドを再実行する。観測終了後
 7完了日を待っても行が無い場合は、無再生を0と推測せず`insufficient_data`（取得不可）で
 終了し、比較対象に含めない。要求期間を実取得期間として推測保存しない。
+
+### コメントステッカー返信Shortの検証（issue #105）
+
+視聴者の質問・要望コメントを次のShortへ変える施策は、特定チャネルやshortsコーナーの
+出典に限定せず、dociに定義された全チャネル・全コーナーで使える手動実験として扱う。
+コメント選択、ステッカー付与、Short作成、公開はYouTubeアプリで人が行い、dociから
+YouTubeへ書き込まない。アプリ投稿はdoci履歴に無いため、開始時にData APIをread-onlyで
+照会し、返信Short、コメント元動画、比較baselineが認証中の同一チャンネルにあることを
+確認する。APIだけではShorts分類や内容の同系統性を確定できないため、180秒以内の動画で
+あることに加え、運用者の明示確認を必須にする。記録先は
+`output/<channel>/comment_reply_short_tests/<experiment-id>/`。
+
+```bash
+# 投稿tokenを置換せず、2つのread-only scopeだけを持つ分析tokenを作る
+python -m doci.youtube --auth --analytics-readonly --channel youtube-growth
+
+# 質問・要望の要約だけを計画へ固定する。投稿者名とコメント原文は保存しない
+python -m doci.comment_reply_short plan \
+  --channel youtube-growth \
+  --source-video-id <commented-video-id> \
+  --source-comment-id <comment-id> \
+  --request-summary "視聴者が知りたい内容の安全な要約" \
+  --reply-corner shorts --comparison-key "同じ題材・回答形式" \
+  --observation-days 7 --confirm-question-or-request
+
+# YouTubeアプリでコメントステッカー付きShortを公開した後に開始する
+# baselineは返信Shortより前に公開した直近同系統Shortを1〜5本明示する
+python -m doci.comment_reply_short start \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --reply-video-id <reply-short-id> \
+  --baseline-video-id <baseline-1> \
+  --baseline-video-id <baseline-2> \
+  --baseline-video-id <baseline-3> \
+  --confirm-comment-sticker --confirm-youtube-app-published \
+  --confirm-recent-same-type
+
+# 返信Shortの観測期間終了後にread-only取得する
+python -m doci.comment_reply_short complete \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --confirm-setup-unchanged --notes "次の1本で変える中心変数"
+
+# 同じcorner・comparison key・観測日数の実験を記述集計する
+python -m doci.comment_reply_short summary --channel youtube-growth
+```
+
+各動画について、公開日の次の太平洋時間完了日から同じ日数の`views`、`comments`、
+`subscribersGained`、`subscribersLost`を取得する。登録者増減は動画dimension/filterを
+使うため、指定動画のwatch pageへ帰属した値であり、チャンネル全体の登録者増減ではない。
+生のコメント数・登録者純増減に加え、再生数差を確認するため1,000再生当たりの参考値も
+保存する。比較baselineの有効指標が3本未満ならmedianと差分を表示せず、3本以上でも
+勝者・因果・万能な合格ラインは決めない。
+
+`complete`は同じメトリクス群の日次channel reportで利用可能最終日を先に確認する。
+返信Shortの観測終了日まで届いていなければ`running`のまま再試行し、終了後7完了日を
+待っても確認できなければ0にせず`insufficient_data`で閉じる。指標列や動画行が欠落した
+場合も`null`と理由を残す。投稿や比較条件を途中で変えた場合は
+`complete --setup-changed`で`invalidated`にする。Analytics専用tokenには
+`youtube.readonly`と`yt-analytics.readonly`だけを使い、`youtube.upload`を要求しない。
+このtokenは`publish.youtube.analytics_token`へ保存し、投稿用の
+`publish.youtube.token`を読み書きしない。保存scopeが2つと完全一致しないtokenは拒否する。
 
 ### YouTube攻略Ch の公開判定
 

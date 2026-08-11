@@ -32,6 +32,7 @@ platforms = ["youtube"]
 privacy = "public"
 client_secret = "secrets/ideology/client_secret.json"
 token = "secrets/ideology/youtube_token.json"
+analytics_token = "secrets/ideology/youtube_analytics_token.json"
 
 [pipeline]
 performance_feedback = true

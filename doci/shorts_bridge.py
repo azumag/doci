@@ -1033,7 +1033,7 @@ def complete_experiment(
                 start_date=query["start_date"],
                 end_date=query["end_date"],
                 availability_end_date=query["availability_probe_end_date"],
-                token_file=spec.publish.youtube.token,
+                token_file=spec.publish.youtube.analytics_token,
                 client_secret_file=spec.publish.youtube.client_secret,
             ),
             query,

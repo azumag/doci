@@ -441,6 +441,9 @@ PUBLISH_INSTAGRAM = get_bool("PUBLISH_INSTAGRAM", False)  # 後回し（公開�
 # --- youtube ---
 YOUTUBE_CLIENT_SECRET_FILE = get("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json")
 YOUTUBE_TOKEN_FILE = get("YOUTUBE_TOKEN_FILE", "youtube_token.json")
+YOUTUBE_ANALYTICS_TOKEN_FILE = get(
+    "YOUTUBE_ANALYTICS_TOKEN_FILE", "youtube_analytics_token.json"
+)
 YOUTUBE_PRIVACY = get("YOUTUBE_PRIVACY", "unlisted")
 
 # --- tiktok (Content Posting API) ---

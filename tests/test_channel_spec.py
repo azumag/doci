@@ -85,6 +85,13 @@ voice = "narrator"
             spec.publish.youtube.token,
             (config.ROOT / "secrets/ideology/youtube_token.json").resolve(),
         )
+        self.assertEqual(
+            spec.publish.youtube.analytics_token,
+            (
+                config.ROOT
+                / "secrets/ideology/youtube_analytics_token.json"
+            ).resolve(),
+        )
         self.assertEqual(spec.publish.youtube.privacy, "public")
         self.assertTrue(spec.pipeline_get("performance_feedback"))
         self.assertEqual(spec.pipeline_get("feedback_repository"), "azumag/doci")
@@ -118,6 +125,13 @@ voice = "narrator"
         self.assertEqual(
             spec.publish.youtube.token,
             (config.ROOT / "secrets/youtube-growth/youtube_token.json").resolve(),
+        )
+        self.assertEqual(
+            spec.publish.youtube.analytics_token,
+            (
+                config.ROOT
+                / "secrets/youtube-growth/youtube_analytics_token.json"
+            ).resolve(),
         )
         self.assertTrue(spec.pipeline_get("research"))
         self.assertTrue(spec.pipeline_get("factcheck"))
@@ -683,6 +697,7 @@ platforms = ["youtube", "tiktok", "instagram"]
 privacy = "private"
 client_secret = "secrets/sample/client_secret.json"
 token = "secrets/sample/youtube_token.json"
+analytics_token = "secrets/sample/youtube_analytics_token.json"
 [publish.tiktok]
 token = "secrets/sample/tiktok_token.json"
 privacy = "SELF_ONLY"
@@ -704,6 +719,12 @@ access_token_env = "IG_TOKEN_SAMPLE"
             (config.ROOT / "secrets/sample/youtube_token.json").resolve(),
         )
         self.assertEqual(
+            spec.publish.youtube.analytics_token,
+            (
+                config.ROOT / "secrets/sample/youtube_analytics_token.json"
+            ).resolve(),
+        )
+        self.assertEqual(
             spec.publish.tiktok.token,
             (config.ROOT / "secrets/sample/tiktok_token.json").resolve(),
         )
@@ -721,6 +742,30 @@ access_token_env = "IG_TOKEN_SAMPLE"
             spec.publish.youtube.token,
             (config.ROOT / config.YOUTUBE_TOKEN_FILE).resolve(),
         )
+        self.assertEqual(
+            spec.publish.youtube.analytics_token,
+            (config.ROOT / config.YOUTUBE_ANALYTICS_TOKEN_FILE).resolve(),
+        )
+
+    def test_rejects_shared_publish_and_analytics_token_path(self) -> None:
+        self._write_channel(toml='''\
+[channel]
+id = "sample"
+name = "Sample"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube]
+token = "secrets/sample/youtube_token.json"
+analytics_token = "secrets/sample/youtube_token.json"
+''')
+
+        with self.assertRaisesRegex(
+            channel.ChannelConfigError, "analytics_token must differ"
+        ):
+            channel.load("sample", channels_dir=self.channels_dir)
 
     def test_rejects_secret_value_in_instagram_env_name(self) -> None:
         self._write_channel(toml='''\
@@ -793,7 +838,41 @@ token = "secrets/ideology/youtube_token.json"
 
         self.assertEqual(spec.publish.youtube.client_secret, legacy_secret)
         self.assertEqual(spec.publish.youtube.token, legacy_token)
+        self.assertEqual(
+            spec.publish.youtube.analytics_token,
+            (self.root / config.YOUTUBE_ANALYTICS_TOKEN_FILE).resolve(),
+        )
         self.assertTrue(any("migrate_channels.py" in str(item.message) for item in caught))
+
+    def test_rejects_analytics_token_matching_legacy_publish_fallback(self) -> None:
+        self._write_channel(
+            "ideology",
+            toml='''\
+[channel]
+id = "ideology"
+name = "Ideology"
+[corners.main]
+label = "Main"
+persona = "prompts/persona.md"
+corner = "prompts/corner.md"
+voice = "narrator"
+[publish.youtube]
+token = "secrets/ideology/youtube_token.json"
+analytics_token = "youtube_token.json"
+''',
+        )
+        legacy_token = self.root / "youtube_token.json"
+        legacy_token.write_text("{}", encoding="utf-8")
+
+        with (
+            patch.object(config, "ROOT", self.root),
+            warnings.catch_warnings(),
+            self.assertRaisesRegex(
+                channel.ChannelConfigError, "analytics_token must differ"
+            ),
+        ):
+            warnings.simplefilter("ignore")
+            channel.load("ideology", channels_dir=self.channels_dir)
 
     def test_discover_and_default_channel(self) -> None:
         self.assertEqual(channel.discover(channels_dir=self.channels_dir), [])
