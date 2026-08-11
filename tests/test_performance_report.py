@@ -2545,6 +2545,49 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         self.assertEqual(len(regions), 1)
         self.assertAlmostEqual(regions[0]["span_ratio"], 1.0)
 
+    def test_retention_flat_regions_exact_min_span_ratio(self) -> None:
+        """issue #117: 幅がちょうどmin_span_ratio（0.25）の区間は検出する。"""
+        curve = [
+            {"elapsed_ratio": 0.00, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.25, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.50, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.75, "watch_ratio": 0.87},
+            {"elapsed_ratio": 0.90, "watch_ratio": 0.30},
+            {"elapsed_ratio": 1.00, "watch_ratio": 0.29},
+        ]
+
+        regions = performance.retention_flat_regions(curve)
+
+        self.assertEqual(len(regions), 1)
+        self.assertAlmostEqual(regions[0]["start_ratio"], 0.0)
+        self.assertAlmostEqual(regions[0]["end_ratio"], 0.75)
+        self.assertAlmostEqual(regions[0]["span_ratio"], 0.75)
+
+    def test_retention_flat_region_text_separates_insufficient_points(self) -> None:
+        """issue #117: 観測点が3点未満の動画は「変化量の大きい曲線」と
+        断定せず、判定材料不足として分離表示する。"""
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "v-sparse",
+                    "corner": "video",
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.9},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.5},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        text = performance_report._retention_flat_region_text(snapshot, "video")
+
+        self.assertIn("判定材料不足（観測点が3点未満）", text)
+        self.assertIn("`v-sparse`", text)
+        self.assertNotIn("変化量の大きい曲線", text)
+
     def test_retention_flat_regions_is_fail_closed(self) -> None:
         """issue #117: 無効データ・矛盾重複・点不足は空を返す。"""
         self.assertEqual(performance.retention_flat_regions([]), [])

@@ -1607,6 +1607,7 @@ def _retention_flat_region_text(snapshot: dict | None, corner: str) -> str:
     lines: list[str] = []
     reported = 0
     truncated = False
+    point_insufficient: list[str] = []
     for row in corner_videos:
         video_id = str(row.get("video_id") or "")
         if video_id in failed:
@@ -1627,22 +1628,25 @@ def _retention_flat_region_text(snapshot: dict | None, corner: str) -> str:
                 "（Shorts等ではAPIが返さない場合があります。推測で補いません）"
             )
             continue
+        if len(curve) < 3:
+            point_insufficient.append(video_id)
+            continue
         regions = performance.retention_flat_regions(curve)
         if not regions:
             lines.append(
                 f"- `{video_id}`: 明瞭な平坦区間を検出しませんでした"
-                "（変化量の大きい曲線。このデータだけから削る要素は提案しません）"
+                "（平坦区間の候補がない曲線。このデータだけから削る要素は提案しません）"
             )
             continue
-        if reported >= 10:
-            truncated = True
-            break
         script = _script_for_video(row)
         data_api = row.get("data_api")
         data_api = data_api if isinstance(data_api, dict) else {}
         annotated = performance.retention_flat_region_scenes(
             regions, script, str(data_api.get("duration") or "")
         )
+        if reported >= 10:
+            truncated = True
+            break
         if not annotated or annotated[0].get("start_seconds") is None:
             lines.append(
                 f"- `{video_id}`: 平坦区間を検出しましたが位置不明"
@@ -1663,8 +1667,14 @@ def _retention_flat_region_text(snapshot: dict | None, corner: str) -> str:
             f"- `{video_id}`: 維持率カーブの最長の平坦区間 {location}"
             f"（動画の{region['span_ratio'] * 100:.0f}%）。"
             "平坦区間の長さだけで良し悪しは判定せず、該当箇所の内容を確認し、"
-            "「核心ではない要素」を1つだけ削った前後を同じcorner・近い尺で"
+            "「核心ではない要素」を1つだけ削った前後を同じcorner・近い尺/tierで"
             "比較してください（反映は運用者が手動で行う）"
+        )
+    if point_insufficient:
+        lines.append(
+            "- 判定材料不足（観測点が3点未満）: "
+            + "、".join(f"`{video_id}`" for video_id in point_insufficient)
+            + "。平坦区間を推測で補いません"
         )
     if truncated:
         lines.append("- 他にも平坦区間がありますが、レポートは先頭10件まで表示します")
