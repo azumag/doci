@@ -3974,6 +3974,12 @@ class FormatRetentionCrossTabTest(unittest.TestCase):
                 "a6", corner="video",
                 traits=["tier:long_short", "duration:60_to_179s"], avg=True,
             ),
+            {
+                "video_id": "a7",
+                "corner": "video",
+                "format_traits": ["tier:long_short", "duration:60_to_179s"],
+                "analytics": {"average_view_percentage": "70.5"},
+            },
         ]
 
         self.assertEqual(performance.format_retention_cross_tab(rows), [])

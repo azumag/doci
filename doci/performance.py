@@ -1506,8 +1506,9 @@ def format_retention_cross_tab(rows: list[dict]) -> list[dict]:
     各動画行の`format_traits`から`duration:`と`tier:`を取り出し、組み合わせ
     （cohort）ごとに`analytics.average_view_percentage`（%）の平均を集計する。
     cohort内の動画が`MIN_FORMAT_RETENTION_GROUP_SIZE`本以上あり、全動画の
-    維持率が有効な場合だけ返す（判定材料不足は推測で補わない）。尺またはtierが
-    記録されていない動画・維持率が無効な動画は対象外とする。
+    維持率が正の有効値（0.0は無データ扱い）の場合だけ返す（判定材料不足は
+    推測で補わない）。尺またはtierが記録されていない動画・維持率が無効な
+    動画は対象外とする。
     返り値は平均維持率の降順で `{cohort, duration, tier, count,
     mean_retention_percent}` のリスト。尺/フォーマットと維持率の関係は相関で
     あり、題材・公開条件などの別要因が混ざるため、因果を証明しない。
@@ -1540,7 +1541,11 @@ def format_retention_cross_tab(rows: list[dict]) -> list[dict]:
         analytics = row.get("analytics")
         analytics = analytics if isinstance(analytics, dict) else {}
         value = analytics.get("average_view_percentage")
-        if value is None or isinstance(value, bool):
+        if (
+            value is None
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
             continue
         try:
             numeric = float(value)
