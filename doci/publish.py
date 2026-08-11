@@ -31,6 +31,8 @@ class PublishResult:
     url: str | None = None
     id: str | None = None
     detail: str = ""
+    thumbnail_status: str = ""  # "set" | "failed" | "not_requested"
+    thumbnail_detail: str = ""
 
 
 def _canonical_platforms(route) -> list[str]:
@@ -106,6 +108,8 @@ def _do_upload(
             token_file=settings.token,
             client_secret_file=settings.client_secret,
         )
+        thumbnail_status = "not_requested"
+        thumbnail_detail = ""
         if thumbnail is not None:
             # サムネイル設定はおまけ機能。失敗しても動画投稿自体の成功は損なわない。
             try:
@@ -115,9 +119,19 @@ def _do_upload(
                     token_file=settings.token,
                     client_secret_file=settings.client_secret,
                 )
+                thumbnail_status = "set"
             except Exception as e:  # noqa: BLE001
+                thumbnail_status = "failed"
+                thumbnail_detail = type(e).__name__
                 print(f"[doci] サムネイル設定失敗（動画投稿は成功のまま継続）: {e}")
-        return PublishResult("youtube", "ok", url=f"https://youtu.be/{vid}", id=vid)
+        return PublishResult(
+            "youtube",
+            "ok",
+            url=f"https://youtu.be/{vid}",
+            id=vid,
+            thumbnail_status=thumbnail_status,
+            thumbnail_detail=thumbnail_detail,
+        )
     if platform == "tiktok":
         from . import tiktok
 

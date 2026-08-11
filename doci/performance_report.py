@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import html
 import json
+import math
 import os
 import time
 from contextlib import contextmanager
@@ -38,6 +40,12 @@ _SHORTS_FIRST_THREE_SECONDS = 3.0
 _SHORTS_FIRST_THREE_THRESHOLD = 0.08
 _SHORTS_FIRST_THREE_REPORT_LIMIT = 10
 _YOUTUBE_SHORT_TIERS = frozenset({"tier:short", "tier:long_short"})
+_THUMBNAIL_OPENING_SECONDS = 30.0
+_THUMBNAIL_MIDPOINT_RATIO = 0.5
+_THUMBNAIL_SLOPE_THRESHOLD = 0.08
+_THUMBNAIL_SLOPE_REPORT_LIMIT = 5
+_THUMBNAIL_OPENING_EXCERPT_LIMIT = 400
+_CYCLE_BODY_MAX_CHARS = 60_000
 
 
 def _lock_path(spec: ChannelSpec) -> Path:
@@ -439,6 +447,17 @@ def _clean_text(value: object, limit: int = 200) -> str:
     return " ".join(value.split())[:limit]
 
 
+def _safe_markdown_inline(value: object, limit: int = 200) -> str:
+    """外部由来テキストをGitHub通知・Markdown構造へ作用しない一行にする。"""
+    text = _clean_text(value, limit=limit)
+    if not text:
+        return ""
+    text = html.escape(text, quote=False).replace("\\", "\\\\")
+    for marker in "`*_[]()":
+        text = text.replace(marker, f"\\{marker}")
+    return text.replace("@", "@\u200b")
+
+
 def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
     """検索発見（Discovery）と視聴後評価（Satisfaction）を分離して表示する。
 
@@ -685,6 +704,276 @@ def _opening_retention_text(snapshot: dict | None, corner: str) -> str:
     lines.append(
         "- 8ポイントはレポート対象を絞る検知閾値であり、万能な合格ラインではありません。"
         "低下の原因は動画内容と照合し、相関を因果と断定しません。"
+    )
+    return "\n".join(lines)
+
+
+def _thumbnail_opening_signal_for_row(row: dict) -> dict | None:
+    """30秒後から動画中間点までの実測維持率シグナルを返す。"""
+    analytics = row.get("analytics")
+    analytics = analytics if isinstance(analytics, dict) else {}
+    curve = analytics.get("retention_curve")
+    if not isinstance(curve, list) or not curve:
+        return None
+    data_api = row.get("data_api")
+    data_api = data_api if isinstance(data_api, dict) else {}
+    return performance.opening_to_midpoint_retention_signal(
+        curve,
+        str(data_api.get("duration") or ""),
+        opening_seconds=_THUMBNAIL_OPENING_SECONDS,
+        midpoint_ratio=_THUMBNAIL_MIDPOINT_RATIO,
+        threshold=_THUMBNAIL_SLOPE_THRESHOLD,
+    )
+
+
+def _tts_opening_excerpt(
+    script: dict,
+    *,
+    window_seconds: float = _THUMBNAIL_OPENING_SECONDS,
+) -> dict | None:
+    """保存済み合成WAV時刻から冒頭のVOICEVOX入力文を返す。"""
+    timing = script.get("_tts_timing") if isinstance(script, dict) else None
+    if not isinstance(timing, dict):
+        return None
+    raw_segments = timing.get("segments")
+    try:
+        duration = float(timing.get("duration_seconds"))
+        window = float(window_seconds)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not isinstance(raw_segments, list)
+        or not raw_segments
+        or not math.isfinite(duration)
+        or duration <= 0
+        or not math.isfinite(window)
+        or window <= 0
+    ):
+        return None
+
+    segments: list[dict] = []
+    previous_end = 0.0
+    for raw in raw_segments:
+        if not isinstance(raw, dict):
+            return None
+        raw_text = raw.get("text")
+        if not isinstance(raw_text, str):
+            return None
+        text = " ".join(raw_text.split())
+        try:
+            start = float(raw.get("start_seconds"))
+            end = float(raw.get("end_seconds"))
+        except (TypeError, ValueError):
+            return None
+        if (
+            not text
+            or len(text) > 2000
+            or not math.isfinite(start)
+            or not math.isfinite(end)
+            or start < 0
+            or start < previous_end - 1e-6
+            or end <= start
+            or end > duration + 1e-6
+        ):
+            return None
+        segments.append({"text": text, "start": start, "end": end})
+        previous_end = end
+
+    opening = [segment for segment in segments if segment["start"] < window]
+    if not opening:
+        return None
+    combined = " ".join(str(segment["text"]) for segment in opening)
+    if not combined:
+        return None
+    return {
+        "text": combined[:_THUMBNAIL_OPENING_EXCERPT_LIMIT],
+        "truncated": len(combined) > _THUMBNAIL_OPENING_EXCERPT_LIMIT,
+        "crosses_boundary": any(
+            segment["start"] < window < segment["end"] for segment in opening
+        ),
+    }
+
+
+def _thumbnail_opening_evidence_for_row(row: dict) -> dict:
+    """#125の変更提案に必要な生成・設定provenanceをfail-closedで返す。"""
+    script = _script_for_video(row)
+    title = _clean_text(script.get("title"), limit=200)
+    if not title:
+        return {"available": False, "reason": "生成時タイトルを確認できません"}
+    provenance = script.get("_thumbnail_provenance")
+    if not isinstance(provenance, dict):
+        return {"available": False, "reason": "サムネ生成記録がありません"}
+    display_text = _clean_text(provenance.get("display_text"), limit=100)
+    if provenance.get("render_status") != "rendered" or not display_text:
+        return {"available": False, "reason": "サムネ描画成功を確認できません"}
+    if provenance.get("youtube_set_status") != "set":
+        return {"available": False, "reason": "YouTubeサムネ設定成功を確認できません"}
+    excerpt = _tts_opening_excerpt(script)
+    if excerpt is None:
+        return {"available": False, "reason": "TTS合成入力文の時刻を確認できません"}
+    return {
+        "available": True,
+        "title": title,
+        "display_text": display_text,
+        "excerpt": excerpt,
+    }
+
+
+def _thumbnail_opening_slope_text(snapshot: dict | None, corner: str) -> str:
+    """サムネ描画文字・合成入力文と30秒後から中盤の傾きを並べる。"""
+    if not isinstance(snapshot, dict):
+        return "- サムネ約束/合成入力文: snapshot未取得のため評価しません"
+    retention_status = snapshot.get("retention_curve")
+    retention_status = (
+        retention_status if isinstance(retention_status, dict) else {}
+    )
+    if not retention_status.get("available"):
+        reason = str(retention_status.get("reason") or "取得不可")
+        return (
+            "- サムネ約束/合成入力文: 維持率カーブの取得に失敗しました"
+            f"（{reason}。推測で補いません）"
+        )
+
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not corner_videos:
+        return "- サムネ約束/合成入力文: このcornerの動画がsnapshotにありません"
+
+    failed = set(retention_status.get("failed_video_ids") or [])
+    analysed = 0
+    unavailable = 0
+    slope_signals = 0
+    evidence_unavailable: list[tuple[dict, dict, dict]] = []
+    actionable: list[tuple[dict, dict, dict]] = []
+    for row in corner_videos:
+        video_id = str(row.get("video_id") or "")
+        if video_id in failed:
+            unavailable += 1
+            continue
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        if "retention_curve" not in analytics:
+            continue
+        signal = _thumbnail_opening_signal_for_row(row)
+        if signal is None:
+            unavailable += 1
+            continue
+        analysed += 1
+        if signal.get("actionable"):
+            slope_signals += 1
+            evidence = _thumbnail_opening_evidence_for_row(row)
+            if evidence.get("available"):
+                actionable.append((row, signal, evidence))
+            else:
+                evidence_unavailable.append((row, signal, evidence))
+
+    if analysed == 0:
+        suffix = f"（判定材料不足 {unavailable}本）" if unavailable else ""
+        return (
+            "- サムネ約束/合成入力文: 30秒後から中盤まで分析可能な"
+            f"維持率カーブがありません{suffix}。動画長や観測点を推測で補いません"
+        )
+
+    def priority(item: tuple[dict, dict, dict]) -> tuple[float, float, str]:
+        row, signal, _evidence = item
+        published = history._parse_ts(
+            row.get("history_ts") or row.get("published_at")
+        )
+        timestamp = published.timestamp() if published is not None else float("-inf")
+        return (
+            timestamp,
+            float(signal.get("decline_ratio") or 0.0),
+            str(row.get("video_id") or ""),
+        )
+
+    actionable.sort(key=priority, reverse=True)
+    evidence_unavailable.sort(key=priority, reverse=True)
+    lines = [
+        f"- 分析対象 {analysed}本 / 30秒→中盤低下シグナル {slope_signals}本"
+        f" / 比較証拠あり {len(actionable)}本"
+        + (
+            f" / 比較証拠不足 {len(evidence_unavailable)}本"
+            if evidence_unavailable
+            else ""
+        )
+        + (f" / 判定材料不足 {unavailable}本" if unavailable else "")
+    ]
+    for row, _signal, evidence in evidence_unavailable[:3]:
+        video_id = str(row.get("video_id") or "")
+        reason = str(evidence.get("reason") or "比較証拠を確認できません")
+        lines.append(
+            f"- `{video_id}`: 低下は検出しましたが、{reason}。"
+            "#125の変更提案には使いません"
+        )
+    for index, (row, signal, evidence) in enumerate(
+        actionable[:_THUMBNAIL_SLOPE_REPORT_LIMIT]
+    ):
+        video_id = str(row.get("video_id") or "")
+        decline_points = signal["decline_ratio"] * 100
+        slope_points = signal["slope_ratio_per_10_seconds"] * 100
+        lines.append(
+            f"- `{video_id}`: 約{signal['start_seconds']:.1f}秒 "
+            f"{signal['start_watch_ratio'] * 100:.1f}% → "
+            f"動画中間側の実測点 約{signal['end_seconds']:.1f}秒 "
+            f"{signal['end_watch_ratio'] * 100:.1f}%"
+            f"（{decline_points:.1f}ポイント低下、傾き {slope_points:.1f}ポイント/10秒、"
+            f"観測{signal['observed_points']}点）"
+        )
+        title = _safe_markdown_inline(evidence.get("title"), limit=200)
+        display_text = _safe_markdown_inline(
+            evidence.get("display_text"), limit=100
+        )
+        lines.append(f"  - 生成・投稿時タイトル: 「{title}」")
+        lines.append(
+            f"  - 生成時サムネ描画文字: 「{display_text}」"
+            "（描画・YouTube設定成功を記録）"
+        )
+        if index == 0:
+            excerpt = evidence["excerpt"]
+            notes: list[str] = []
+            if excerpt["crosses_boundary"]:
+                notes.append("30秒境界をまたぐ文を含む")
+            if excerpt["truncated"]:
+                notes.append(f"先頭{_THUMBNAIL_OPENING_EXCERPT_LIMIT}字の抜粋")
+            note = f"（{'、'.join(notes)}）" if notes else ""
+            safe_excerpt = _safe_markdown_inline(
+                excerpt["text"], limit=_THUMBNAIL_OPENING_EXCERPT_LIMIT
+            )
+            lines.append(
+                "  - 冒頭30秒のVOICEVOX合成入力文"
+                f"（合成WAV時刻）{note}: 「{safe_excerpt}」"
+            )
+    if len(actionable) > _THUMBNAIL_SLOPE_REPORT_LIMIT:
+        lines.append(
+            f"- 他にも{len(actionable) - _THUMBNAIL_SLOPE_REPORT_LIMIT}本ありますが、"
+            f"詳細は先頭{_THUMBNAIL_SLOPE_REPORT_LIMIT}本まで表示します"
+        )
+    if actionable:
+        lines.append(
+            "- 次の1本: 先頭の最新動画について生成時サムネ描画文字と冒頭30秒の"
+            "合成入力文を実映像で照合し、同じcorner・近い尺/tierで「サムネ描画文字"
+            "（タイトル）」か「冒頭の発話内容」の一方だけを手動変更する。"
+            "他の中心変数を固定し、公開後に同じ30秒→中盤の低下幅と傾きを比較する。"
+        )
+    elif slope_signals:
+        lines.append(
+            "- 8ポイント以上の低下はありますが、サムネ描画・YouTube設定成功・"
+            "TTS合成時刻の比較証拠が揃わないため、#125の変更を提案しません。"
+        )
+    else:
+        lines.append(
+            "- 8ポイント以上の30秒→中盤低下を検出しなかったため、"
+            "サムネ描画文字や冒頭内容の変更をこのデータだけから提案しません。"
+        )
+    lines.append(
+        "- 中盤はData API動画長の50%地点です。傾きは範囲内の最初と最後の"
+        "実測点を結んだ値で、サムネ背景画像の意味的一致や低下原因は自動判定しません。"
+        "表示する描画文字は生成・設定成功を保存した値で、公開後のStudio手動変更や"
+        "各画面で実際に表示されたサムネイルは追跡しません。"
+        "8ポイントは報告対象を絞る検知閾値であり、相関を因果と断定しません。"
     )
     return "\n".join(lines)
 
@@ -1236,6 +1525,23 @@ def _script_for_video(row: dict) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _bounded_cycle_body(lines: list[str], guardrail_lines: list[str]) -> str:
+    """GitHub issue上限へ余裕を残し、末尾ガードレールを必ず保持する。"""
+    content = "\n".join(lines).rstrip()
+    guardrails = "\n".join(guardrail_lines).rstrip()
+    full = f"{content}\n{guardrails}\n"
+    if len(full) <= _CYCLE_BODY_MAX_CHARS:
+        return full
+    omission = (
+        "\n\n## 表示上限\n\n"
+        "- GitHub issue本文の安全上限に達したため、低優先度の後半を省略しました。"
+        "元snapshotの実測値は変更していません。\n"
+    )
+    suffix = omission + guardrails + "\n"
+    budget = max(0, _CYCLE_BODY_MAX_CHARS - len(suffix))
+    return content[:budget].rstrip() + suffix
+
+
 def _cycle_body(
     spec: ChannelSpec,
     sections: list[dict],
@@ -1281,6 +1587,10 @@ def _cycle_body(
             "",
             _opening_retention_text(snapshot, section["corner"]),
             "",
+            "### サムネの約束・合成入力文と30秒→中盤の傾き（issue #125）",
+            "",
+            _thumbnail_opening_slope_text(snapshot, section["corner"]),
+            "",
             "### 維持率カーブの山/谷とシーン照合（issue #149）",
             "",
             _retention_curve_text(snapshot, section["corner"]),
@@ -1296,7 +1606,7 @@ def _cycle_body(
                 "",
                 _share_text(snapshot, section["corner"]),
             ]
-    lines += [
+    guardrail_lines = [
         "",
         "## ガードレール",
         "",
@@ -1306,7 +1616,7 @@ def _cycle_body(
         "- 一度に試す変数は1つ",
         "- この仮説を実際の生成へ反映する作業は運用者が手動で行う（システムは自動適用しない）",
     ]
-    return "\n".join(lines) + "\n"
+    return _bounded_cycle_body(lines, guardrail_lines)
 
 
 def build_cycle_candidate(
@@ -1328,6 +1638,7 @@ def build_cycle_candidate(
     has_gap_discovery = False
     has_shorts_first_three_content = False
     has_opening_content = False
+    has_thumbnail_opening_content = False
     has_retention_content = False
     has_subscribed_retention_content = False
     has_share_content = False
@@ -1338,9 +1649,9 @@ def build_cycle_candidate(
             and str(row.get("corner") or "") in section_corners
             for row in snapshot.get("videos", [])
         )
-        # issue #127/#142/#149: 形式仮説・gap動画が無くても、matching
-        # cornerにShorts冒頭3秒の低下、冒頭30秒の低下、または明瞭な山/谷が
-        # あれば候補として報告する。
+        # issue #125/#127/#142/#149: 形式仮説・gap動画が無くても、matching
+        # cornerにShorts冒頭3秒の低下、冒頭30秒の低下、30秒→中盤の低下、
+        # または明瞭な山/谷があれば候補として報告する。
         # 無内容issueは防ぎつつ、分析結果を次の1本の手動施策へつなぐ。
         retention_status = snapshot.get("retention_curve")
         retention_status = (
@@ -1364,11 +1675,19 @@ def build_cycle_candidate(
                 opening_signal = _opening_signal_for_row(row)
                 if opening_signal and opening_signal.get("actionable"):
                     has_opening_content = True
+                thumbnail_opening_signal = _thumbnail_opening_signal_for_row(row)
+                if (
+                    thumbnail_opening_signal
+                    and thumbnail_opening_signal.get("actionable")
+                    and _thumbnail_opening_evidence_for_row(row).get("available")
+                ):
+                    has_thumbnail_opening_content = True
                 if performance.retention_moments(curve):
                     has_retention_content = True
                 if (
                     has_shorts_first_three_content
                     and has_opening_content
+                    and has_thumbnail_opening_content
                     and has_retention_content
                 ):
                     break
@@ -1404,6 +1723,7 @@ def build_cycle_candidate(
         or has_gap_discovery
         or has_shorts_first_three_content
         or has_opening_content
+        or has_thumbnail_opening_content
         or has_retention_content
         or has_subscribed_retention_content
         or has_share_content

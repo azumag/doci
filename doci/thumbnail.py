@@ -60,7 +60,7 @@ def _title_fs(title: str) -> float:
 _DASH_RE = re.compile(r"[――─—]{2,}")
 
 
-def _display_text(title: str, *, max_len: int = 24) -> str:
+def display_text(title: str, *, max_len: int = 24) -> str:
     """サムネイル表示用に短縮する。ダッシュ区切りがあれば前半句を使う。無ければ
     読点/クエスチョン/空白の自然な位置で max_len 程度に切り詰める。それでも見つから
     なければハード切り詰め+「…」。元の title(動画メタデータ等)は一切変更しない
@@ -106,7 +106,7 @@ def _html_doc(
     if bg_image is not None:
         body_style = f" style=\"background:url('file://{Path(bg_image).resolve()}') center/cover no-repeat\""
         scrim = "<div class='scrim'></div>"
-    text = _display_text(title)
+    text = display_text(title)
     fs = _title_fs(text)
     return (
         "<!doctype html><html><head><meta charset='utf-8'><style>"
