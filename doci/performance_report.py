@@ -34,6 +34,10 @@ from .channel import ChannelSpec
 
 _LOCK_WAIT_TIMEOUT_SECONDS = 30.0
 _LOCK_RETRY_SECONDS = 0.25
+_SHORTS_FIRST_THREE_SECONDS = 3.0
+_SHORTS_FIRST_THREE_THRESHOLD = 0.08
+_SHORTS_FIRST_THREE_REPORT_LIMIT = 10
+_YOUTUBE_SHORT_TIERS = frozenset({"tier:short", "tier:long_short"})
 
 
 def _lock_path(spec: ChannelSpec) -> Path:
@@ -542,7 +546,12 @@ def _discovery_satisfaction_text(snapshot: dict | None, corner: str) -> str:
     )
 
 
-def _opening_signal_for_row(row: dict) -> dict | None:
+def _opening_signal_for_row(
+    row: dict,
+    *,
+    window_seconds: float = 30.0,
+    threshold: float = 0.08,
+) -> dict | None:
     analytics = row.get("analytics")
     analytics = analytics if isinstance(analytics, dict) else {}
     curve = analytics.get("retention_curve")
@@ -555,6 +564,8 @@ def _opening_signal_for_row(row: dict) -> dict | None:
         curve,
         duration_iso,
         _script_for_video(row),
+        window_seconds=window_seconds,
+        threshold=threshold,
     )
 
 
@@ -674,6 +685,160 @@ def _opening_retention_text(snapshot: dict | None, corner: str) -> str:
     lines.append(
         "- 8ポイントはレポート対象を絞る検知閾値であり、万能な合格ラインではありません。"
         "低下の原因は動画内容と照合し、相関を因果と断定しません。"
+    )
+    return "\n".join(lines)
+
+
+def _youtube_short_tier(row: dict) -> str:
+    """履歴由来のformat traitからYouTube Shortのtierだけを返す。"""
+    traits = row.get("format_traits")
+    if not isinstance(traits, list):
+        return ""
+    for trait in traits:
+        value = str(trait or "")
+        if value in _YOUTUBE_SHORT_TIERS:
+            return value.removeprefix("tier:")
+    return ""
+
+
+def _shorts_first_three_signal_for_row(row: dict) -> dict | None:
+    """実際にShortとして配信された動画の冒頭3秒シグナルを返す。"""
+    if not _youtube_short_tier(row):
+        return None
+    return _opening_signal_for_row(
+        row,
+        window_seconds=_SHORTS_FIRST_THREE_SECONDS,
+        threshold=_SHORTS_FIRST_THREE_THRESHOLD,
+    )
+
+
+def _shorts_first_three_retention_text(snapshot: dict | None, corner: str) -> str:
+    """Shorts冒頭3秒の維持率低下と、次の1本で削る情報を表示する（issue #127）。"""
+    if not isinstance(snapshot, dict):
+        return "- Shorts冒頭3秒: snapshot未取得のため評価しません"
+    retention_status = snapshot.get("retention_curve")
+    retention_status = (
+        retention_status if isinstance(retention_status, dict) else {}
+    )
+    if not retention_status.get("available"):
+        reason = str(retention_status.get("reason") or "取得不可")
+        return (
+            "- Shorts冒頭3秒: 維持率カーブの取得に失敗しました"
+            f"（{reason}。推測で補いません）"
+        )
+
+    corner_videos = [
+        row
+        for row in snapshot.get("videos", [])
+        if str(row.get("corner") or "") == corner
+    ]
+    if not corner_videos:
+        return "- Shorts冒頭3秒: このcornerの動画がsnapshotにありません"
+    short_videos = [row for row in corner_videos if _youtube_short_tier(row)]
+    if not short_videos:
+        return (
+            "- Shorts冒頭3秒: このcornerに履歴上 `short` / `long_short` の"
+            "動画がないため評価しません"
+        )
+
+    failed = set(retention_status.get("failed_video_ids") or [])
+    analysed = 0
+    unavailable = 0
+    not_evaluated = 0
+    actionable: list[tuple[dict, dict]] = []
+    for row in short_videos:
+        video_id = str(row.get("video_id") or "")
+        if video_id in failed:
+            unavailable += 1
+            continue
+        analytics = row.get("analytics")
+        if not isinstance(analytics, dict) or "retention_curve" not in analytics:
+            not_evaluated += 1
+            continue
+        signal = _shorts_first_three_signal_for_row(row)
+        if signal is None:
+            unavailable += 1
+            continue
+        analysed += 1
+        if signal.get("actionable"):
+            actionable.append((row, signal))
+
+    if analysed == 0:
+        counts = []
+        if unavailable:
+            counts.append(f"判定材料不足 {unavailable}本")
+        if not_evaluated:
+            counts.append(f"Analytics未評価 {not_evaluated}本")
+        suffix = f"（{' / '.join(counts)}）" if counts else ""
+        return (
+            "- Shorts冒頭3秒: 分析可能な維持率カーブがありません"
+            f"{suffix}。3秒以内の有効な観測点が2点未満の場合も推測で補いません"
+        )
+
+    def priority(item: tuple[dict, dict]) -> tuple[float, float, str]:
+        row, signal = item
+        published = history._parse_ts(
+            row.get("history_ts") or row.get("published_at")
+        )
+        timestamp = published.timestamp() if published is not None else float("-inf")
+        severity = max(
+            float(signal.get("cumulative_drop_ratio") or 0.0),
+            float(signal.get("largest_step_drop_ratio") or 0.0),
+        )
+        return timestamp, severity, str(row.get("video_id") or "")
+
+    actionable.sort(key=priority, reverse=True)
+    lines = [
+        f"- Shorts対象 {len(short_videos)}本 / 分析可能 {analysed}本 / "
+        f"冒頭3秒低下シグナル {len(actionable)}本"
+        + (f" / 判定材料不足 {unavailable}本" if unavailable else "")
+        + (f" / Analytics未評価 {not_evaluated}本" if not_evaluated else "")
+    ]
+    for row, signal in actionable[:_SHORTS_FIRST_THREE_REPORT_LIMIT]:
+        video_id = str(row.get("video_id") or "")
+        tier = _youtube_short_tier(row)
+        cumulative_points = signal["cumulative_drop_ratio"] * 100
+        step_points = signal["largest_step_drop_ratio"] * 100
+        lines.append(
+            f"- `{video_id}`（tier={tier}）: 最初の観測点 "
+            f"約{signal['start_seconds']:.1f}秒 {signal['start_watch_ratio'] * 100:.1f}% → "
+            f"冒頭{signal['window_seconds']:.1f}秒以内の最終観測点 "
+            f"約{signal['end_seconds']:.1f}秒 {signal['end_watch_ratio'] * 100:.1f}%"
+            f"（累計 {cumulative_points:.1f}ポイント低下）"
+        )
+        drop_from = signal.get("drop_from_seconds")
+        drop_to = signal.get("drop_to_seconds")
+        scene = " ".join(str(signal.get("scene_caption") or "").split())[:120]
+        if drop_from is not None and drop_to is not None:
+            location = f"約{drop_from:.1f}→{drop_to:.1f}秒"
+            if scene:
+                location += f"（シーン・均等割近似: {scene}）"
+            lines.append(
+                f"  - 最大区間低下: {location}で {step_points:.1f}ポイント"
+            )
+    if len(actionable) > _SHORTS_FIRST_THREE_REPORT_LIMIT:
+        lines.append(
+            f"- 他にも{len(actionable) - _SHORTS_FIRST_THREE_REPORT_LIMIT}本ありますが、"
+            f"詳細は先頭{_SHORTS_FIRST_THREE_REPORT_LIMIT}本まで表示します"
+        )
+    if actionable:
+        lines.append(
+            "- 次の1本: 上記一覧の先頭（最新優先、同時刻なら低下が大きい動画）の"
+            "最大低下区間を検証対象に固定する。実際の映像と台本を確認し、視聴者が"
+            "冒頭3秒で理解するために不要な情報を1つだけ削る。同じcorner・同じtier・"
+            "近い尺で他の中心変数を固定し、同じ冒頭3秒の維持率低下を比較する"
+            "（反映は運用者が手動で行う）。"
+        )
+    else:
+        lines.append(
+            "- 8ポイント以上の冒頭3秒低下を検出しなかったため、情報削除を"
+            "このデータだけから提案しません。"
+        )
+    lines.append(
+        "- ここで測るのは `audienceWatchRatio` の観測点間の低下であり、"
+        "スワイプアウト率や3秒以内の離脱人数そのものではありません。"
+        "シーン位置は動画長をscene数で均等割した近似です。"
+        "8ポイントは報告対象を絞る検知閾値で、原因や合否を示しません。"
     )
     return "\n".join(lines)
 
@@ -1108,6 +1273,10 @@ def _cycle_body(
             "",
             _discovery_satisfaction_text(snapshot, section["corner"]),
             "",
+            "### Shorts冒頭3秒の維持率と削る情報（issue #127）",
+            "",
+            _shorts_first_three_retention_text(snapshot, section["corner"]),
+            "",
             "### 冒頭30秒の維持率と次の1本（issue #142）",
             "",
             _opening_retention_text(snapshot, section["corner"]),
@@ -1157,6 +1326,7 @@ def build_cycle_candidate(
     # 存在しない動画のgap_queryは、無内容issueを防ぐため候補判定に含めない
     # （Claude review指摘）。
     has_gap_discovery = False
+    has_shorts_first_three_content = False
     has_opening_content = False
     has_retention_content = False
     has_subscribed_retention_content = False
@@ -1168,8 +1338,9 @@ def build_cycle_candidate(
             and str(row.get("corner") or "") in section_corners
             for row in snapshot.get("videos", [])
         )
-        # issue #142/#149: 形式仮説・gap動画が無くても、matching cornerに
-        # 冒頭低下シグナルまたは明瞭な山/谷があれば候補として報告する。
+        # issue #127/#142/#149: 形式仮説・gap動画が無くても、matching
+        # cornerにShorts冒頭3秒の低下、冒頭30秒の低下、または明瞭な山/谷が
+        # あれば候補として報告する。
         # 無内容issueは防ぎつつ、分析結果を次の1本の手動施策へつなぐ。
         retention_status = snapshot.get("retention_curve")
         retention_status = (
@@ -1187,12 +1358,19 @@ def build_cycle_candidate(
                 curve = analytics.get("retention_curve")
                 if not isinstance(curve, list) or not curve:
                     continue
+                first_three_signal = _shorts_first_three_signal_for_row(row)
+                if first_three_signal and first_three_signal.get("actionable"):
+                    has_shorts_first_three_content = True
                 opening_signal = _opening_signal_for_row(row)
                 if opening_signal and opening_signal.get("actionable"):
                     has_opening_content = True
                 if performance.retention_moments(curve):
                     has_retention_content = True
-                if has_opening_content and has_retention_content:
+                if (
+                    has_shorts_first_three_content
+                    and has_opening_content
+                    and has_retention_content
+                ):
                     break
         subscribed_status = snapshot.get("retention_by_subscribed_status")
         subscribed_status = (
@@ -1224,6 +1402,7 @@ def build_cycle_candidate(
     has_content = (
         has_section_content
         or has_gap_discovery
+        or has_shorts_first_three_content
         or has_opening_content
         or has_retention_content
         or has_subscribed_retention_content
