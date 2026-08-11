@@ -24,6 +24,7 @@ MIN_EVAL_PEERS = 4  # 2 * MIN_GROUP_SIZE。medianとの相対比較に最低限�
 MAX_SUBSCRIBED_RETENTION_VIDEOS_PER_CORNER = 5
 MIN_SUBSCRIBED_RETENTION_SEGMENT_IMPRESSIONS = 20
 MIN_SUBSCRIBED_RETENTION_COMMON_POINTS = 5
+MIN_FORMAT_RETENTION_GROUP_SIZE = 3
 CHANNEL_PAGE_SHARE_WINDOW_DAYS = 7
 CHANNEL_PAGE_SHARE_MAX_PEERS = 5
 CHANNEL_PAGE_SHARE_MIN_VIEWS = 100
@@ -1497,6 +1498,86 @@ def _largest_format_cohort(rows: list[dict]) -> tuple[list[dict], str]:
         key=lambda item: (len(item[1]), item[0]),
     )
     return members, cohort
+
+
+def format_retention_cross_tab(rows: list[dict]) -> list[dict]:
+    """尺×フォーマット別の平均維持率クロス集計（issue #115）。
+
+    各動画行の`format_traits`から`duration:`と`tier:`を取り出し、組み合わせ
+    （cohort）ごとに`analytics.average_view_percentage`（%）の平均を集計する。
+    cohort内の動画が`MIN_FORMAT_RETENTION_GROUP_SIZE`本以上あり、全動画の
+    維持率が正の有効値（0.0は無データ扱い）の場合だけ返す（判定材料不足は
+    推測で補わない）。尺またはtierが記録されていない動画・維持率が無効な
+    動画は対象外とする。
+    返り値は平均維持率の降順で `{cohort, duration, tier, count,
+    mean_retention_percent}` のリスト。尺/フォーマットと維持率の関係は相関で
+    あり、題材・公開条件などの別要因が混ざるため、因果を証明しない。
+    """
+    groups: dict[str, list[float]] = {}
+    meta: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        raw_traits = row.get("format_traits")
+        if not isinstance(raw_traits, list):
+            continue
+        traits = [str(trait) for trait in raw_traits]
+        duration = next(
+            (
+                trait.removeprefix("duration:")
+                for trait in traits
+                if trait.startswith("duration:")
+            ),
+            "",
+        )
+        tier = next(
+            (
+                trait.removeprefix("tier:")
+                for trait in traits
+                if trait.startswith("tier:")
+            ),
+            "",
+        )
+        if not duration or not tier:
+            continue
+        analytics = row.get("analytics")
+        analytics = analytics if isinstance(analytics, dict) else {}
+        value = analytics.get("average_view_percentage")
+        if (
+            value is None
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(numeric) or numeric <= 0:
+            continue
+        cohort = f"{duration}|{tier}"
+        groups.setdefault(cohort, []).append(numeric)
+        meta.setdefault(cohort, (duration, tier))
+    result: list[dict] = []
+    for cohort, values in groups.items():
+        if len(values) < MIN_FORMAT_RETENTION_GROUP_SIZE:
+            continue
+        duration, tier = meta[cohort]
+        result.append(
+            {
+                "cohort": cohort,
+                "duration": duration,
+                "tier": tier,
+                "count": len(values),
+                "mean_retention_percent": sum(values) / len(values),
+            }
+        )
+    result.sort(
+        key=lambda item: (
+            -item["mean_retention_percent"],
+            -item["count"],
+            item["cohort"],
+        )
+    )
+    return result
 
 
 def _ranked_rows(

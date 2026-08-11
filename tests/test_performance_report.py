@@ -3843,6 +3843,367 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
         return tmp.name
 
 
+class FormatRetentionCrossTabTest(unittest.TestCase):
+    """issue #115: 尺×フォーマット別の平均維持率クロス集計。"""
+
+    def _decision(self, **overrides) -> dict:
+        decision = {
+            "decision_id": "dec-1",
+            "status": "insufficient_data",
+            "reason": "比較可能な動画が2本",
+            "metric": "youtube_analytics_api_v2.average_view_percentage",
+            "format_cohort": "duration:60_to_179s|tier:long_short",
+            "eligible_video_ids": [f"v{i}" for i in range(8)],
+            "top_video_ids": [],
+            "bottom_video_ids": [],
+            "positive_traits": [],
+            "negative_traits": [],
+        }
+        decision.update(overrides)
+        return decision
+
+    def _row(
+        self,
+        video_id: str,
+        *,
+        corner: str,
+        traits: list[str],
+        avg: float,
+    ) -> dict:
+        return {
+            "video_id": video_id,
+            "corner": corner,
+            "format_traits": traits,
+            "analytics": {"average_view_percentage": avg},
+        }
+
+    def test_cross_tab_groups_by_duration_and_tier(self) -> None:
+        """issue #115: duration×tierの組み合わせごとに平均維持率を集計する。"""
+        rows = [
+            self._row(
+                "a1", corner="video",
+                traits=["tier:long_short", "duration:60_to_179s"], avg=55.0,
+            ),
+            self._row(
+                "a2", corner="video",
+                traits=["tier:long_short", "duration:60_to_179s"], avg=65.0,
+            ),
+            self._row(
+                "a3", corner="video",
+                traits=["tier:long_short", "duration:60_to_179s"], avg=60.0,
+            ),
+            self._row(
+                "b1", corner="video",
+                traits=["tier:longform", "duration:180s_or_more"], avg=45.0,
+            ),
+            self._row(
+                "b2", corner="video",
+                traits=["tier:longform", "duration:180s_or_more"], avg=50.0,
+            ),
+            self._row(
+                "b3", corner="video",
+                traits=["tier:longform", "duration:180s_or_more"], avg=46.0,
+            ),
+        ]
+
+        tab = performance.format_retention_cross_tab(rows)
+
+        self.assertEqual(len(tab), 2)
+        self.assertEqual(tab[0]["cohort"], "60_to_179s|long_short")
+        self.assertAlmostEqual(tab[0]["mean_retention_percent"], 60.0)
+        self.assertEqual(tab[0]["count"], 3)
+        self.assertEqual(tab[1]["cohort"], "180s_or_more|longform")
+        self.assertAlmostEqual(tab[1]["mean_retention_percent"], 47.0)
+
+    def test_cross_tab_requires_min_group_size(self) -> None:
+        """issue #115: 同じ組み合わせが3本未満のcohortは表示しない。"""
+        rows = [
+            self._row(
+                "a1", corner="shorts",
+                traits=["tier:short", "duration:under_60s"], avg=70.0,
+            ),
+            self._row(
+                "a2", corner="shorts",
+                traits=["tier:short", "duration:under_60s"], avg=72.0,
+            ),
+            self._row(
+                "b1", corner="shorts",
+                traits=["tier:short", "duration:60_to_179s"], avg=60.0,
+            ),
+            self._row(
+                "b2", corner="shorts",
+                traits=["tier:short", "duration:60_to_179s"], avg=62.0,
+            ),
+            self._row(
+                "b3", corner="shorts",
+                traits=["tier:short", "duration:60_to_179s"], avg=61.0,
+            ),
+        ]
+
+        tab = performance.format_retention_cross_tab(rows)
+
+        self.assertEqual(len(tab), 1)
+        self.assertEqual(tab[0]["cohort"], "60_to_179s|short")
+
+    def test_cross_tab_is_fail_closed(self) -> None:
+        """issue #115: 属性欠落・無効維持率（None/bool/非数値/0.0）・空入力は集計しない。"""
+        rows = [
+            self._row(
+                "a1", corner="video",
+                traits=["tier:long_short"], avg=60.0,
+            ),
+            self._row(
+                "a2", corner="video",
+                traits=["duration:60_to_179s"], avg=60.0,
+            ),
+            self._row(
+                "a3", corner="video",
+                traits=["tier:long_short", "duration:60_to_179s"], avg=None,
+            ),
+            {
+                "video_id": "a4",
+                "corner": "video",
+                "format_traits": ["tier:long_short", "duration:60_to_179s"],
+                "analytics": {"average_view_percentage": "bad"},
+            },
+            self._row(
+                "a5", corner="video",
+                traits=["tier:long_short", "duration:60_to_179s"], avg=0.0,
+            ),
+            self._row(
+                "a6", corner="video",
+                traits=["tier:long_short", "duration:60_to_179s"], avg=True,
+            ),
+            {
+                "video_id": "a7",
+                "corner": "video",
+                "format_traits": ["tier:long_short", "duration:60_to_179s"],
+                "analytics": {"average_view_percentage": "70.5"},
+            },
+        ]
+
+        self.assertEqual(performance.format_retention_cross_tab(rows), [])
+        self.assertEqual(performance.format_retention_cross_tab([]), [])
+
+    def test_cross_tab_text_reports_best_cohort_as_hypothesis(self) -> None:
+        """issue #115: 最良cohortを次回の仮説候補として表示し因果断定しない。"""
+        snapshot = {
+            "videos": [
+                self._row(
+                    "a1", corner="video",
+                    traits=["tier:long_short", "duration:60_to_179s"], avg=70.0,
+                ),
+                self._row(
+                    "a2", corner="video",
+                    traits=["tier:long_short", "duration:60_to_179s"], avg=72.0,
+                ),
+                self._row(
+                    "a3", corner="video",
+                    traits=["tier:long_short", "duration:60_to_179s"], avg=71.0,
+                ),
+                self._row(
+                    "b1", corner="video",
+                    traits=["tier:longform", "duration:180s_or_more"], avg=50.0,
+                ),
+                self._row(
+                    "b2", corner="video",
+                    traits=["tier:longform", "duration:180s_or_more"], avg=52.0,
+                ),
+                self._row(
+                    "b3", corner="video",
+                    traits=["tier:longform", "duration:180s_or_more"], avg=51.0,
+                ),
+            ]
+        }
+
+        text = performance_report._format_retention_cross_tab_text(
+            snapshot, "video"
+        )
+
+        self.assertIn("duration=60_to_179s / tier=long_short", text)
+        self.assertIn("平均維持率 71.0%（3本）", text)
+        self.assertIn("次の1本の仮説候補", text)
+        self.assertIn("因果と断定せず", text)
+        self.assertIn("反映は運用者が手動で行う", text)
+
+    def test_cross_tab_text_insufficient(self) -> None:
+        """issue #115: cohortが成立しない場合は判定材料不足と表示する。"""
+        snapshot = {
+            "videos": [
+                self._row(
+                    "a1", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=70.0,
+                ),
+                self._row(
+                    "a2", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=72.0,
+                ),
+            ]
+        }
+
+        text = performance_report._format_retention_cross_tab_text(
+            snapshot, "shorts"
+        )
+        video_text = performance_report._format_retention_cross_tab_text(
+            snapshot, "video"
+        )
+
+        self.assertIn("判定材料不足", text)
+        self.assertIn("推測で補いません", text)
+        self.assertIn("このcornerの動画がsnapshotにありません", video_text)
+
+    def test_cross_tab_text_with_single_cohort_shows_no_hypothesis(self) -> None:
+        """issue #115: 比較対象の組み合わせが1つしかないcornerは集計表のみで、
+        「次の1本の仮説候補」を提示しない。"""
+        snapshot = {
+            "videos": [
+                self._row(
+                    "a1", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=70.0,
+                ),
+                self._row(
+                    "a2", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=72.0,
+                ),
+                self._row(
+                    "a3", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=71.0,
+                ),
+            ]
+        }
+
+        text = performance_report._format_retention_cross_tab_text(
+            snapshot, "shorts"
+        )
+
+        self.assertIn("平均維持率 71.0%（3本）", text)
+        self.assertNotIn(
+            "- 次の1本の仮説候補: このcornerで平均維持率が最も高い", text
+        )
+        self.assertIn("比較対象の組み合わせが1つしかないため", text)
+
+    def test_cross_tab_text_accepts_loop_retention_over_100(self) -> None:
+        """issue #115: Shortsのループ維持率など100%超も正の有効値として集計する。"""
+        snapshot = {
+            "videos": [
+                self._row(
+                    "a1", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=110.0,
+                ),
+                self._row(
+                    "a2", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=120.0,
+                ),
+                self._row(
+                    "a3", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=115.0,
+                ),
+            ]
+        }
+
+        tab = performance.format_retention_cross_tab(snapshot["videos"])
+
+        self.assertEqual(len(tab), 1)
+        self.assertAlmostEqual(tab[0]["mean_retention_percent"], 115.0)
+
+    def test_cross_tab_text_report_limit_and_truncation(self) -> None:
+        """issue #115: 表示上限（先頭5件）と打ち切りメッセージ。"""
+        rows = []
+        for index in range(7):
+            for trait_index in range(3):
+                rows.append(
+                    self._row(
+                        f"v{index}-{trait_index}", corner="video",
+                        traits=[
+                            f"tier:tier{index}",
+                            f"duration:dur{index}",
+                        ],
+                        avg=60.0 + index,
+                    )
+                )
+        snapshot = {"videos": rows}
+
+        text = performance_report._format_retention_cross_tab_text(
+            snapshot, "video"
+        )
+
+        self.assertIn("他にも2組み合わせがありますが", text)
+        self.assertIn("詳細は先頭5件まで表示します", text)
+        table_lines = [
+            line for line in text.splitlines() if line.startswith("- duration=")
+        ]
+        self.assertEqual(len(table_lines), 5)
+
+    def test_cross_tab_candidate_and_fingerprint(self) -> None:
+        """issue #115: cohortが2つ以上成立するcornerは候補化し、最良cohortを
+        fingerprintへ含める（同じ最良cohortは重複issueを作らない）。"""
+        spec = SimpleNamespace(id="youtube-growth")
+        decision = self._decision()
+        section = performance_report.build_corner_section(
+            spec, "video", decision, [], set()
+        )
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                self._row(
+                    "a1", corner="video",
+                    traits=["tier:long_short", "duration:60_to_179s"], avg=70.0,
+                ),
+                self._row(
+                    "a2", corner="video",
+                    traits=["tier:long_short", "duration:60_to_179s"], avg=72.0,
+                ),
+                self._row(
+                    "a3", corner="video",
+                    traits=["tier:long_short", "duration:60_to_179s"], avg=71.0,
+                ),
+                self._row(
+                    "b1", corner="video",
+                    traits=["tier:longform", "duration:180s_or_more"], avg=50.0,
+                ),
+                self._row(
+                    "b2", corner="video",
+                    traits=["tier:longform", "duration:180s_or_more"], avg=52.0,
+                ),
+                self._row(
+                    "b3", corner="video",
+                    traits=["tier:longform", "duration:180s_or_more"], avg=51.0,
+                ),
+            ],
+        }
+
+        candidate = performance_report.build_cycle_candidate(
+            spec, [section], datetime(2026, 7, 26, tzinfo=timezone.utc), snapshot
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("尺×フォーマット別の維持率クロス集計", candidate["body"])
+        first = performance_report.fingerprint(
+            spec.id,
+            [section],
+            format_retention_best=[
+                {"corner": "video", "cohort": "60_to_179s|long_short"}
+            ],
+        )
+        same = performance_report.fingerprint(
+            spec.id,
+            [section],
+            format_retention_best=[
+                {"corner": "video", "cohort": "60_to_179s|long_short"}
+            ],
+        )
+        changed = performance_report.fingerprint(
+            spec.id,
+            [section],
+            format_retention_best=[
+                {"corner": "video", "cohort": "180s_or_more|longform"}
+            ],
+        )
+        self.assertEqual(candidate["fingerprint"], first)
+        self.assertEqual(first, same)
+        self.assertNotEqual(first, changed)
+
+
 class CommentIntentManualReviewTest(unittest.TestCase):
     """issue #123: 最新動画の実測離脱をStudioでの手動確認へ接続する。"""
 
