@@ -3946,7 +3946,7 @@ class FormatRetentionCrossTabTest(unittest.TestCase):
         self.assertEqual(tab[0]["cohort"], "60_to_179s|short")
 
     def test_cross_tab_is_fail_closed(self) -> None:
-        """issue #115: 属性欠落・無効維持率・空入力は集計しない。"""
+        """issue #115: 属性欠落・無効維持率（None/bool/非数値/0.0）・空入力は集計しない。"""
         rows = [
             self._row(
                 "a1", corner="video",
@@ -3966,6 +3966,14 @@ class FormatRetentionCrossTabTest(unittest.TestCase):
                 "format_traits": ["tier:long_short", "duration:60_to_179s"],
                 "analytics": {"average_view_percentage": "bad"},
             },
+            self._row(
+                "a5", corner="video",
+                traits=["tier:long_short", "duration:60_to_179s"], avg=0.0,
+            ),
+            self._row(
+                "a6", corner="video",
+                traits=["tier:long_short", "duration:60_to_179s"], avg=True,
+            ),
         ]
 
         self.assertEqual(performance.format_retention_cross_tab(rows), [])
@@ -4038,6 +4046,88 @@ class FormatRetentionCrossTabTest(unittest.TestCase):
         self.assertIn("推測で補いません", text)
         self.assertIn("このcornerの動画がsnapshotにありません", video_text)
 
+    def test_cross_tab_text_with_single_cohort_shows_no_hypothesis(self) -> None:
+        """issue #115: 比較対象の組み合わせが1つしかないcornerは集計表のみで、
+        「次の1本の仮説候補」を提示しない。"""
+        snapshot = {
+            "videos": [
+                self._row(
+                    "a1", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=70.0,
+                ),
+                self._row(
+                    "a2", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=72.0,
+                ),
+                self._row(
+                    "a3", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=71.0,
+                ),
+            ]
+        }
+
+        text = performance_report._format_retention_cross_tab_text(
+            snapshot, "shorts"
+        )
+
+        self.assertIn("平均維持率 71.0%（3本）", text)
+        self.assertNotIn(
+            "- 次の1本の仮説候補: このcornerで平均維持率が最も高い", text
+        )
+        self.assertIn("比較対象の組み合わせが1つしかないため", text)
+
+    def test_cross_tab_text_accepts_loop_retention_over_100(self) -> None:
+        """issue #115: Shortsのループ維持率など100%超も正の有効値として集計する。"""
+        snapshot = {
+            "videos": [
+                self._row(
+                    "a1", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=110.0,
+                ),
+                self._row(
+                    "a2", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=120.0,
+                ),
+                self._row(
+                    "a3", corner="shorts",
+                    traits=["tier:short", "duration:under_60s"], avg=115.0,
+                ),
+            ]
+        }
+
+        tab = performance.format_retention_cross_tab(snapshot["videos"])
+
+        self.assertEqual(len(tab), 1)
+        self.assertAlmostEqual(tab[0]["mean_retention_percent"], 115.0)
+
+    def test_cross_tab_text_report_limit_and_truncation(self) -> None:
+        """issue #115: 表示上限（先頭5件）と打ち切りメッセージ。"""
+        rows = []
+        for index in range(7):
+            for trait_index in range(3):
+                rows.append(
+                    self._row(
+                        f"v{index}-{trait_index}", corner="video",
+                        traits=[
+                            f"tier:tier{index}",
+                            f"duration:dur{index}",
+                        ],
+                        avg=60.0 + index,
+                    )
+                )
+        snapshot = {"videos": rows}
+
+        text = performance_report._format_retention_cross_tab_text(
+            snapshot, "video"
+        )
+
+        self.assertIn("他にも2組み合わせがありますが", text)
+        self.assertIn("詳細は先頭5件まで表示します", text)
+        table_lines = [
+            line for line in text.splitlines() if line.startswith("- duration=")
+        ]
+        self.assertEqual(len(table_lines), 5)
+
     def test_cross_tab_candidate_and_fingerprint(self) -> None:
         """issue #115: cohortが2つ以上成立するcornerは候補化し、最良cohortを
         fingerprintへ含める（同じ最良cohortは重複issueを作らない）。"""
@@ -4103,6 +4193,7 @@ class FormatRetentionCrossTabTest(unittest.TestCase):
                 {"corner": "video", "cohort": "180s_or_more|longform"}
             ],
         )
+        self.assertEqual(candidate["fingerprint"], first)
         self.assertEqual(first, same)
         self.assertNotEqual(first, changed)
 

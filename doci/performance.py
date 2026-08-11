@@ -1515,7 +1515,10 @@ def format_retention_cross_tab(rows: list[dict]) -> list[dict]:
     groups: dict[str, list[float]] = {}
     meta: dict[str, tuple[str, str]] = {}
     for row in rows:
-        traits = [str(trait) for trait in (row.get("format_traits") or [])]
+        raw_traits = row.get("format_traits")
+        if not isinstance(raw_traits, list):
+            continue
+        traits = [str(trait) for trait in raw_traits]
         duration = next(
             (
                 trait.removeprefix("duration:")
@@ -1537,16 +1540,16 @@ def format_retention_cross_tab(rows: list[dict]) -> list[dict]:
         analytics = row.get("analytics")
         analytics = analytics if isinstance(analytics, dict) else {}
         value = analytics.get("average_view_percentage")
-        if (
-            value is None
-            or isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or float(value) < 0
-        ):
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(numeric) or numeric <= 0:
             continue
         cohort = f"{duration}|{tier}"
-        groups.setdefault(cohort, []).append(float(value))
+        groups.setdefault(cohort, []).append(numeric)
         meta.setdefault(cohort, (duration, tier))
     result: list[dict] = []
     for cohort, values in groups.items():

@@ -1710,7 +1710,8 @@ def _format_retention_cross_tab_text(snapshot: dict | None, corner: str) -> str:
         return (
             "- 尺×フォーマット別の維持率: 判定材料不足"
             f"（同じ尺×tierの組み合わせで維持率の揃った動画が"
-            f"{_FORMAT_RETENTION_GROUP_SIZE}本以上ありません。推測で補いません）"
+            f"{_FORMAT_RETENTION_GROUP_SIZE}本以上ありません。"
+            "維持率が無効な動画は集計せず、推測で補いません）"
         )
     lines: list[str] = []
     for entry in tab[:_FORMAT_RETENTION_REPORT_LIMIT]:
@@ -1719,15 +1720,21 @@ def _format_retention_cross_tab_text(snapshot: dict | None, corner: str) -> str:
             f"平均維持率 {entry['mean_retention_percent']:.1f}%"
             f"（{entry['count']}本）"
         )
-    best = tab[0]
-    lines.append(
-        f"- 次の1本の仮説候補: このcornerで平均維持率が最も高い組み合わせは "
-        f"duration={best['duration']} / tier={best['tier']}"
-        f"（平均維持率 {best['mean_retention_percent']:.1f}%、{best['count']}本）。"
-        "尺/フォーマット以外の要因（題材・公開条件・企画内容）も混ざるため、"
-        "このデータだけから因果と断定せず、同じ視聴者・近い題材で次回1本を試し、"
-        "同じ指標で比較する（反映は運用者が手動で行う）"
-    )
+    if len(tab) >= 2:
+        best = tab[0]
+        lines.append(
+            f"- 次の1本の仮説候補: このcornerで平均維持率が最も高い組み合わせは "
+            f"duration={best['duration']} / tier={best['tier']}"
+            f"（平均維持率 {best['mean_retention_percent']:.1f}%、{best['count']}本）。"
+            "尺/フォーマット以外の要因（題材・公開条件・企画内容）も混ざるため、"
+            "このデータだけから因果と断定せず、同じ視聴者・近い題材で次回1本を試し、"
+            "同じ指標で比較する（反映は運用者が手動で行う）"
+        )
+    else:
+        lines.append(
+            "- 比較対象の組み合わせが1つしかないため、このデータだけから"
+            "「次の1本の仮説候補」は提示しません（推測で補いません）"
+        )
     if len(tab) > _FORMAT_RETENTION_REPORT_LIMIT:
         lines.append(
             f"- 他にも{len(tab) - _FORMAT_RETENTION_REPORT_LIMIT}組み合わせがありますが、"
