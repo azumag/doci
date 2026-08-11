@@ -2483,6 +2483,230 @@ class RetentionCurveAnalysisTest(unittest.TestCase):
             performance.opening_retention_signal(curve, "PT1M", window_seconds=0)
         )
 
+    def test_retention_flat_regions_detects_long_flat_segment(self) -> None:
+        """issue #117: 変化量が小さいまま続く区間を平坦区間として検出する。"""
+        curve = [
+            {"elapsed_ratio": 0.00, "watch_ratio": 0.95},
+            {"elapsed_ratio": 0.10, "watch_ratio": 0.60},  # 冒頭の急落
+            {"elapsed_ratio": 0.20, "watch_ratio": 0.58},
+            {"elapsed_ratio": 0.35, "watch_ratio": 0.59},
+            {"elapsed_ratio": 0.50, "watch_ratio": 0.58},
+            {"elapsed_ratio": 0.65, "watch_ratio": 0.57},
+            {"elapsed_ratio": 0.80, "watch_ratio": 0.56},
+            {"elapsed_ratio": 0.90, "watch_ratio": 0.30},  # 終盤の急落
+            {"elapsed_ratio": 1.00, "watch_ratio": 0.29},
+        ]
+
+        regions = performance.retention_flat_regions(curve)
+
+        self.assertEqual(len(regions), 1)
+        region = regions[0]
+        self.assertAlmostEqual(region["start_ratio"], 0.10)
+        self.assertAlmostEqual(region["end_ratio"], 0.80)
+        self.assertAlmostEqual(region["span_ratio"], 0.70)
+        self.assertAlmostEqual(region["avg_watch_ratio"], 0.58, places=3)
+
+    def test_retention_flat_regions_ignores_short_or_noisy_segments(self) -> None:
+        """issue #117: 幅25%未満の区間と、急な変化をまたぐ区間は対象外。"""
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.1, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.2, "watch_ratio": 0.88},  # 短い平坦区間
+            {"elapsed_ratio": 0.3, "watch_ratio": 0.50},
+            {"elapsed_ratio": 0.4, "watch_ratio": 0.55},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.52},
+            {"elapsed_ratio": 0.6, "watch_ratio": 0.51},
+            {"elapsed_ratio": 0.7, "watch_ratio": 0.90},  # 大きな変化
+            {"elapsed_ratio": 0.8, "watch_ratio": 0.91},
+            {"elapsed_ratio": 0.9, "watch_ratio": 0.92},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.93},
+        ]
+
+        regions = performance.retention_flat_regions(curve)
+
+        # 0.3→0.7は中間で0.52→0.51→0.90と大きな変化があるため平坦区間にならない。
+        # 0.7→1.0は幅0.3で平坦だが、0.6→0.7が大きな変化なので別区間として検出される。
+        self.assertEqual(len(regions), 1)
+        self.assertAlmostEqual(regions[0]["start_ratio"], 0.7)
+        self.assertAlmostEqual(regions[0]["end_ratio"], 1.0)
+
+    def test_retention_flat_regions_exact_threshold_is_flat(self) -> None:
+        """issue #117: 変化量がちょうどmax_slopeの点列も平坦区間として扱う。"""
+        curve = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.80},
+            {"elapsed_ratio": 0.25, "watch_ratio": 0.77},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.74},
+            {"elapsed_ratio": 0.75, "watch_ratio": 0.71},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.68},
+        ]
+
+        regions = performance.retention_flat_regions(curve)
+
+        self.assertEqual(len(regions), 1)
+        self.assertAlmostEqual(regions[0]["span_ratio"], 1.0)
+
+    def test_retention_flat_regions_exact_min_span_ratio(self) -> None:
+        """issue #117: 幅がちょうどmin_span_ratio（0.25）の区間は検出する。"""
+        curve = [
+            {"elapsed_ratio": 0.00, "watch_ratio": 0.90},
+            {"elapsed_ratio": 0.25, "watch_ratio": 0.89},
+            {"elapsed_ratio": 0.50, "watch_ratio": 0.88},
+            {"elapsed_ratio": 0.75, "watch_ratio": 0.87},
+            {"elapsed_ratio": 0.90, "watch_ratio": 0.30},
+            {"elapsed_ratio": 1.00, "watch_ratio": 0.29},
+        ]
+
+        regions = performance.retention_flat_regions(curve)
+
+        self.assertEqual(len(regions), 1)
+        self.assertAlmostEqual(regions[0]["start_ratio"], 0.0)
+        self.assertAlmostEqual(regions[0]["end_ratio"], 0.75)
+        self.assertAlmostEqual(regions[0]["span_ratio"], 0.75)
+
+    def test_retention_flat_region_text_separates_insufficient_points(self) -> None:
+        """issue #117: 観測点が3点未満の動画は「変化量の大きい曲線」と
+        断定せず、判定材料不足として分離表示する。"""
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "v-sparse",
+                    "corner": "video",
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.9},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.5},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        text = performance_report._retention_flat_region_text(snapshot, "video")
+
+        self.assertIn("判定材料不足（観測点が3点未満）", text)
+        self.assertIn("`v-sparse`", text)
+        self.assertNotIn("変化量の大きい曲線", text)
+
+    def test_retention_flat_regions_is_fail_closed(self) -> None:
+        """issue #117: 無効データ・矛盾重複・点不足は空を返す。"""
+        self.assertEqual(performance.retention_flat_regions([]), [])
+        self.assertEqual(
+            performance.retention_flat_regions(
+                [{"elapsed_ratio": 0.0, "watch_ratio": 0.9}]
+            ),
+            [],
+        )
+        self.assertEqual(
+            performance.retention_flat_regions(
+                [
+                    {"elapsed_ratio": 0.0, "watch_ratio": "bad"},
+                    {"elapsed_ratio": 0.5, "watch_ratio": 0.9},
+                    {"elapsed_ratio": 1.0, "watch_ratio": 0.9},
+                ]
+            ),
+            [],
+        )
+        conflicting = [
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.9},
+            {"elapsed_ratio": 0.0, "watch_ratio": 0.5},
+            {"elapsed_ratio": 0.5, "watch_ratio": 0.9},
+            {"elapsed_ratio": 1.0, "watch_ratio": 0.9},
+        ]
+        self.assertEqual(
+            performance.retention_flat_regions(conflicting), []
+        )
+
+    def test_retention_flat_region_scenes_annotates_scene(self) -> None:
+        """issue #117: 平坦区間の中間点をシーンへ照合して秒位置を返す。"""
+        regions = [
+            {
+                "start_ratio": 0.2,
+                "end_ratio": 0.8,
+                "span_ratio": 0.6,
+                "start_watch_ratio": 0.58,
+                "end_watch_ratio": 0.56,
+                "avg_watch_ratio": 0.57,
+            }
+        ]
+        script = {
+            "scenes": [
+                {"caption": "導入"},
+                {"caption": "展開"},
+                {"caption": "結び"},
+            ]
+        }
+
+        annotated = performance.retention_flat_region_scenes(
+            regions, script, "PT100S"
+        )
+
+        self.assertEqual(len(annotated), 1)
+        self.assertEqual(annotated[0]["start_seconds"], 20.0)
+        self.assertEqual(annotated[0]["end_seconds"], 80.0)
+        self.assertEqual(annotated[0]["scene_index"], 1)
+        self.assertEqual(annotated[0]["scene_caption"], "展開")
+
+    def test_retention_flat_region_text_reports_longest_region(self) -> None:
+        """issue #117: snapshotから最長の平坦区間を秒位置とシーンで表示する。"""
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "v-flat",
+                    "corner": "video",
+                    "workdir": "missing",
+                    "data_api": {"duration": "PT100S"},
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": 0.0, "watch_ratio": 0.9},
+                            {"elapsed_ratio": 0.1, "watch_ratio": 0.5},
+                            {"elapsed_ratio": 0.3, "watch_ratio": 0.49},
+                            {"elapsed_ratio": 0.5, "watch_ratio": 0.48},
+                            {"elapsed_ratio": 0.7, "watch_ratio": 0.47},
+                            {"elapsed_ratio": 0.9, "watch_ratio": 0.46},
+                            {"elapsed_ratio": 1.0, "watch_ratio": 0.2},
+                        ]
+                    },
+                }
+            ],
+        }
+
+        text = performance_report._retention_flat_region_text(snapshot, "video")
+
+        self.assertIn("v-flat", text)
+        self.assertIn("最長の平坦区間", text)
+        self.assertIn("約10.0〜90.0秒", text)
+        self.assertIn("平坦区間の長さだけで良し悪しは判定せず", text)
+
+    def test_retention_flat_region_text_no_region_message(self) -> None:
+        """issue #117: 平坦区間なし・取得不可・他cornerは分離表示する。"""
+        snapshot = {
+            "retention_curve": {"available": True},
+            "videos": [
+                {
+                    "video_id": "v-steep",
+                    "corner": "shorts",
+                    "analytics": {
+                        "retention_curve": [
+                            {"elapsed_ratio": i / 10, "watch_ratio": 0.9 - i * 0.05}
+                            for i in range(11)
+                        ]
+                    },
+                }
+            ],
+        }
+
+        shorts_text = performance_report._retention_flat_region_text(
+            snapshot, "shorts"
+        )
+        video_text = performance_report._retention_flat_region_text(
+            snapshot, "video"
+        )
+
+        self.assertIn("明瞭な平坦区間を検出しませんでした", shorts_text)
+        self.assertIn("このcornerの動画がsnapshotにありません", video_text)
+
     def test_opening_to_midpoint_signal_uses_real_points_and_slope(self) -> None:
         """issue #125: 30秒から50%地点内の端点だけで変化と傾きを算出する。"""
         signal = performance.opening_to_midpoint_retention_signal(
