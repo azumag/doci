@@ -1118,6 +1118,61 @@ def check_ambiguous_date_title(title: str, facts: list[dict] | None) -> dict | N
     }
 
 
+
+# 判定・帰属の主張そのものではなく、それを打ち消す否定文
+# （「〜即判定することはできません」等、今回追加したガードレールに
+# 従った望ましい記述ほど誤検出してしまう）を除外するための後読み。
+_SEGMENT_CLAIM_NEGATION_LOOKAHEAD = (
+    r"(?![^。]{0,12}(できません|できない|ではありません|ではない|"
+    r"とは言えません|とは言えない|とは限らない|とは限りません|"
+    r"わけでは(ない|ありません)|られません|られない))"
+)
+
+_SEGMENT_IMMEDIACY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "segment_instant_judgment",
+        re.compile(
+            r"(新規・ライト・コア|ライト・コア|コア(な)?視聴者)"
+            r"[^。]{0,25}(で(即)?判定|で見分け|ですぐ分か|即判定)"
+            + _SEGMENT_CLAIM_NEGATION_LOOKAHEAD
+        ),
+    ),
+    (
+        "single_video_retention_attribution",
+        re.compile(
+            r"((コア|ライト)(な)?視聴者[^。]{0,30}(増|伸)[^。]{0,40}"
+            r"(この|今回の|その)(一本|1本|動画)[^。]{0,20}(定着|ファン)"
+            r"|(この|今回の|その)(一本|1本|動画)で[^。]{0,30}"
+            r"(コア|ライト)(な)?視聴者[^。]{0,20}(増|定着))"
+            + _SEGMENT_CLAIM_NEGATION_LOOKAHEAD
+        ),
+    ),
+)
+
+
+def check_segment_immediacy_claim(title: str, narration: str) -> dict | None:
+    """新規・ライト・コア等の視聴者セグメントを、急上昇1本の即時指標として
+    扱う記述を検出する(issue #185)。
+
+    正規表現のみで通信・LLMを伴わないため誤動作しにくい。
+    生成をブロックせず検出・記録のみに使う（check_ambiguous_date_titleと同じ運用）。
+
+    戻り値: 該当表現が無ければNone。あれば
+    {"matched_patterns": [...], "matched_texts": [...]} を持つdict。
+    """
+    matched: list[tuple[str, str]] = []
+    for name, pattern in _SEGMENT_IMMEDIACY_PATTERNS:
+        m = pattern.search(title) or pattern.search(narration)
+        if m:
+            matched.append((name, m.group(0)))
+    if not matched:
+        return None
+    return {
+        "matched_patterns": [name for name, _ in matched],
+        "matched_texts": [text for _, text in matched],
+    }
+
+
 # 文体はnarrationと同じ「ですます調」に揃える。doci/prompts/output_rules.md が
 # narrationにですます調を強制している一方、以前はこのプロンプトだけが
 # 「〜だよね？」「〜な気がする」を余白の例として挙げていたため、公開直後の

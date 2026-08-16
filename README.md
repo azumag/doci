@@ -192,7 +192,7 @@ token = "secrets/sample/youtube_token.json"
 |---|---|
 | `channel` | `id`, `name`, `rotation` |
 | `corners.<key>` | `label`, `persona`, `corner`, `voice` |
-| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `research_requires_youtube_case_studies`, `title_pattern_check`, `narration_opening_guard`, `narration_pattern_check`, `ambiguous_date_title_check`, `plan_topic_retries`, `max_uploads_per_day`, `feedback_repository`, `youtube_auto_playlist`, `youtube_auto_engagement_comment`, `youtube_engagement_comment_mode`, `tactic_issues` |
+| `pipeline` | `seconds_per_image`, `max_images`, `research`, `factcheck`, `plan`, `asset_media`, `topic_cooldown_days`, `performance_feedback`, `research_requires_youtube_case_studies`, `title_pattern_check`, `narration_opening_guard`, `narration_pattern_check`, `ambiguous_date_title_check`, `viewer_segment_claim_check`, `plan_topic_retries`, `max_uploads_per_day`, `feedback_repository`, `youtube_auto_playlist`, `youtube_auto_engagement_comment`, `youtube_engagement_comment_mode`, `tactic_issues` |
 | `style` | `theme` |
 | `style.subtitle` | `font`, `fill`, `stroke`, `box_color`, `box_alpha`, `position_ratio`, `box_radius` |
 | `style.thumbnail` | `font_family`, `title_color` |

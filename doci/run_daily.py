@@ -186,6 +186,25 @@ def _apply_ambiguous_date_title_check(spec: ChannelSpec, script: dict) -> None:
         )
 
 
+def _apply_viewer_segment_claim_check(spec: ChannelSpec, script: dict) -> None:
+    """新規・ライト・コア等の視聴者セグメントの即時判定主張を検出し、scriptへ記録する(issue #185)。
+
+    正規表現のみで通信・LLMを伴わないため誤動作しにくく、検出・記録のみで
+    公開判断は変えない（_apply_ambiguous_date_title_checkと同じ運用）。
+    """
+    if not spec.pipeline_get("viewer_segment_claim_check", False):
+        return
+    match = ai_text.check_segment_immediacy_claim(
+        str(script.get("title", "")), str(script.get("narration", ""))
+    )
+    script["_viewer_segment_claim_check"] = {"checked": True, "match": match}
+    if match is not None:
+        _log(
+            "視聴者セグメント即時判定表現の疑い: "
+            f"「{script.get('title', '')}」({'/'.join(match['matched_texts'])})"
+        )
+
+
 # generate_engagement_comment()のmodeに対応するログ表示名(issue #98)。
 _ENGAGEMENT_MODE_LABELS = {
     "debate": "討論誘発",
@@ -435,6 +454,7 @@ def _run_once(
     )
     _apply_narration_pattern_check(spec, script, recent_openings_for_prompt)
     _apply_ambiguous_date_title_check(spec, script)
+    _apply_viewer_segment_claim_check(spec, script)
     from . import youtube_review
 
     youtube_privacy, theme_assessment = youtube_review.choose_privacy(spec, script)
