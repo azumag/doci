@@ -43,7 +43,9 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, val)
 
 
-_load_dotenv(ROOT / ".env")
+# 検証用に .env のパスを差し替えられるようにする（doci.admin の保存前検証専用）。
+# 未設定なら従来どおり ROOT/.env を読む＝運用挙動は一切変わらない。
+_load_dotenv(Path(os.environ["DOCI_DOTENV"]) if os.environ.get("DOCI_DOTENV") else ROOT / ".env")
 
 
 def get(key: str, default: str = "") -> str:

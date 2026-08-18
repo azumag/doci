@@ -17,6 +17,10 @@ anthropic = ["anthropic>=0.40"]
 
 [project.scripts]
 doci = "doci.run_daily:main"
+doci-admin = "doci.admin.server:main"
 
 [tool.setuptools]
-packages = ["doci"]
+packages = ["doci", "doci.admin"]
+
+[tool.setuptools.package-data]
+"doci.admin" = ["static/*"]
