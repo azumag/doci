@@ -92,9 +92,20 @@ class BackupEntry:
     size: int
 
 
+_UNSAFE_NAME_CHARS_RE = re.compile(r"[^A-Za-z0-9_:-]")
+
+
 def _backup_dir(surface: str, name: str) -> Path:
     _require_valid_surface(surface)
-    safe_name = name.replace("/", "__")
+    # `.replace("/", "__")` だけでは ".." 単体を素通りさせてしまい、
+    # `_backup_root()/surface/".."` が `_backup_root()` 自身へ解決されて
+    # 他surfaceのディレクトリ構造が疑似バックアップとして見えてしまう
+    # (surfaceのallowlistと同じ「クライアントは生パスを渡さない」不変条件が
+    # name側では貫徹されていなかった。リポジトリ側Claude Actionのレビューで
+    # 指摘・実際に再現した)。英数字・アンダースコア・コロン・ハイフン以外は
+    # 全て "_" に置き換えるallowlist方式にし、"." を残さないことで
+    # ".."を含むあらゆる相対パス表現を無害化する。
+    safe_name = _UNSAFE_NAME_CHARS_RE.sub("_", name)
     return _backup_root() / surface / safe_name
 
 

@@ -74,7 +74,14 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
 
     def _read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            # 不正なクライアント/プロキシが送るヘッダ(例: "Content-Length: abc")。
+            # ここは _handle_api の `except Exception` より手前(ボディ読み込み時点)
+            # なので、ここで捕まえないと接続が無言で切れてしまう
+            # (リポジトリ側Claude Actionのレビューで指摘・実際に再現した)。
+            length = 0
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
@@ -126,8 +133,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                 {"error": "code-prompts機能は --enable-code-prompts 未指定のため無効です"},
             )
             return
-        body = self._read_json_body() if method == "POST" else None
         try:
+            # ボディ読み込み(_read_json_body)とdispatchの両方をここで囲む。
+            # 以前はdispatchだけを囲んでおり、その手前のボディ読み込み側の
+            # 想定外の例外(例: 不正なContent-Lengthヘッダ)は素通りして接続が
+            # 無言で切れていた(リポジトリ側Claude Actionのレビューで指摘・
+            # 実際に再現した。_read_json_body自体も併せて修正済みだが、
+            # トークン検証より後で起こりうる例外はここで一括して受け止める)。
+            body = self._read_json_body() if method == "POST" else None
             status, payload = api.dispatch(method, path, body)
         except Exception:  # noqa: BLE001 - 想定外の例外でも接続を無言で落とさず、
             # JSONで500を返す。内部の例外詳細はレスポンスに含めず(スタック情報の

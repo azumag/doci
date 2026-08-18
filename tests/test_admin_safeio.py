@@ -108,6 +108,17 @@ class BackupTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             safeio.list_backups("/etc", "passwd")
 
+    def test_dotdot_in_name_does_not_escape_surface_directory(self) -> None:
+        # surfaceはallowlistで守られているが、nameは以前 "/" を "__" に
+        # 置換するだけで ".." を素通りさせていた。
+        # `_backup_root()/channel/".."` は `_backup_root()` 自身へ解決され、
+        # env/prompt/code_prompt の各ディレクトリが疑似バックアップとして
+        # 見えてしまっていた(実際に確認した)。
+        for name in ("..", "../..", "../../etc/passwd", "a/../b"):
+            resolved = safeio._backup_dir("channel", name)
+            self.assertEqual(resolved.parent, safeio._backup_root() / "channel")
+            self.assertNotIn("..", resolved.name)
+
 
 class SurfaceLockTest(unittest.TestCase):
     def setUp(self) -> None:

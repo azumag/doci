@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 import unittest
 from unittest import mock
@@ -94,6 +95,44 @@ class AdminServerTest(unittest.TestCase):
         self.assertIn("error", payload)
         # スタックトレース等の内部詳細をレスポンスへ漏らさない。
         self.assertNotIn("RuntimeError", json.dumps(payload))
+
+    def test_malformed_content_length_header_does_not_drop_connection(self) -> None:
+        # `int(Content-Length)` は以前 _handle_api の try/except より手前
+        # (ボディ読み込み時点)で実行されており、不正なヘッダ(例: 数値でない)を
+        # 受けるとValueErrorが素通りして接続が無言で切れていた
+        # (リポジトリ側Claude Actionのレビューで指摘・実際に再現した)。
+        # http.clientはContent-Lengthを自動計算し直してしまうため、生ソケットで
+        # 意図的に壊れたヘッダを送る。修正後は不正なヘッダを「ボディ無し」として
+        # 扱うため、空ボディを許容する/api/env/validateはむしろ200で正常応答する
+        # (=クラッシュせず、意味のある応答を返せている)。
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        try:
+            request = (
+                f"POST /api/env/validate HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                f"X-Doci-Token: {self.token}\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: not-a-number\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode("utf-8")
+            sock.sendall(request)
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        finally:
+            sock.close()
+        self.assertTrue(response, "接続が無言で切れ、何も返ってこなかった")
+        status_line = response.split(b"\r\n", 1)[0]
+        status_code = int(status_line.split()[1])
+        # 200(ボディ無し扱いで正常応答)・500(何らかの理由で失敗)のいずれでも、
+        # 「接続が無言で切れる」ことさえなければ良い。重要なのはレスポンスが
+        # 実際に届くこと自体。
+        self.assertIn(status_code, (200, 500))
+        self.assertIn(b'"', response)  # JSON応答が返っている(空でクラッシュしていない)
 
     def test_post_with_foreign_origin_is_forbidden(self) -> None:
         status, _, _ = self._request(
