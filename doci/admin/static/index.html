@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>doci admin</title>
+<meta name="doci-admin-token" content="__DOCI_ADMIN_TOKEN__">
+<meta name="doci-admin-enable-code-prompts" content="__DOCI_ADMIN_ENABLE_CODE_PROMPTS__">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="banner"></div>
+<nav>
+  <h1>doci admin</h1>
+  <a href="#env" data-route="env">Env</a>
+  <a href="#channels" data-route="channels">Channels</a>
+  <a href="#prompts" data-route="prompts">Prompts (md)</a>
+  <a href="#code-prompts" data-route="code-prompts" id="nav-code-prompts">Code prompts</a>
+</nav>
+<main id="app"></main>
+<script src="/static/app.js"></script>
+</body>
+</html>
