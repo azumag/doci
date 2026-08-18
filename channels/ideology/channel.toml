@@ -35,6 +35,7 @@ token = "secrets/ideology/youtube_token.json"
 analytics_token = "secrets/ideology/youtube_analytics_token.json"
 
 [pipeline]
+max_uploads_per_day = 1
 performance_feedback = true
 feedback_repository = "azumag/doci"
 narration_opening_guard = true

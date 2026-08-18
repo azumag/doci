@@ -364,7 +364,13 @@ def _run_once(
     )
 
     # 1) 台本
-    _log("台本生成 (OpenCode Go / qwen3.7-plus)…")
+    if config.TEXT_BACKEND == "codex":
+        _label_model = config.CODEX_MODEL
+    elif config.OPENCODE_MODEL:
+        _label_model = config.OPENCODE_MODEL
+    else:
+        _label_model = config.TEXT_MODEL
+    _log(f"台本生成 ({config.TEXT_BACKEND} / {_label_model})…")
     cooldown_days = int(
         spec.pipeline_get("topic_cooldown_days", config.TOPIC_COOLDOWN_DAYS)
     )

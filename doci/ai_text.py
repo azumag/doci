@@ -1604,7 +1604,11 @@ def generate(
     if spec.pipeline_get("plan", config.SCRIPT_PLAN):
         from . import plan as plan_mod
 
-        _log(f"構成プラン (minimax) …")
+        if config.PLAN_BACKEND == "codex":
+            _plan_model = config.CODEX_MODEL
+        else:
+            _plan_model = config.PLAN_MODEL
+        _log(f"構成プラン ({config.PLAN_BACKEND} / {_plan_model}) …")
         if not research and topic_guard:
             # researchが無いコーナー(ideology等)は、plan.topic(起承転結の実質テーマ)を
             # 執筆前にcooldown照合する。タイトルは煽り文句で言い換えられやすく文字列/意味

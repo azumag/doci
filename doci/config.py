@@ -104,8 +104,9 @@ LEGACY_CLAUDE_RESEARCH_MODEL = get("CLAUDE_RESEARCH_MODEL", "claude-sonnet-4-6")
 LEGACY_CLAUDE_FACTCHECK_MODEL = get(
     "CLAUDE_FACTCHECK_MODEL", LEGACY_CLAUDE_MODEL
 )
-# 運用の既定経路はOpenCode Go直API。Claudeは明示的に選んだ旧経路以外では呼ばない。
-TEXT_BACKEND = get("TEXT_BACKEND", "opencode_go")
+# 運用の既定経路はCodex（CODEX_PROVIDER/CODEX_MODEL で接続先を選ぶ）。
+# OpenCode系・Claudeは明示的に選んだ旧経路以外では呼ばない。
+TEXT_BACKEND = get("TEXT_BACKEND", "codex")
 TEXT_MODEL = get("TEXT_MODEL", OPENCODE_GO_DEFAULT_MODEL)
 # 旧設定との互換性のため値は残すが、本文生成の自動フォールバックには使わない。
 FALLBACK_TEXT_MODEL = get("FALLBACK_TEXT_MODEL", "")
@@ -143,10 +144,10 @@ FACTCHECK_REWRITE_MODEL = get(
 _RESEARCH_MODEL_EXPLICIT = bool(get("RESEARCH_MODEL"))
 _FACTCHECK_MODEL_EXPLICIT = bool(get("FACTCHECK_MODEL"))
 _FACTCHECK_REWRITE_MODEL_EXPLICIT = bool(get("FACTCHECK_REWRITE_MODEL"))
-# リサーチ・検証・図表背景はOpenCode Goを既定にする。codex は明示時の選択肢、
-# claude は既存設定を明示した場合だけ使える後方互換経路。補助段の設定を省略した
-# 既存ユーザーが TEXT_BACKEND=anthropic/claude_cli を明示している場合だけ、その
-# 互換経路へ追随させ、それ以外はClaudeへ暗黙に戻らない。
+# リサーチ・検証・図表背景はCodexを既定にする。opencode系・claudeは明示指定した
+# 場合だけ使える後方互換経路。補助段の設定を省略した既存ユーザーが
+# TEXT_BACKEND=opencode/opencode_go/anthropic/claude_cli を明示している場合だけ、
+# その互換経路へ追随させ、それ以外はCodexへ戻る（Claudeへ暗黙に戻らない）。
 def _default_aux_backend() -> str:
     if TEXT_BACKEND in {"anthropic", "claude_cli"}:
         return "claude"
@@ -154,7 +155,9 @@ def _default_aux_backend() -> str:
         return "codex"
     if TEXT_BACKEND == "opencode":
         return "opencode"
-    return "opencode_go"
+    if TEXT_BACKEND == "opencode_go":
+        return "opencode_go"
+    return "codex"
 
 
 _AUX_BACKEND_DEFAULT = _default_aux_backend()
