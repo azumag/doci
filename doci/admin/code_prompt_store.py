@@ -333,6 +333,24 @@ def save(
         test_result = None
         if run_guarded_tests and entry.guarded_by:
             test_result = _run_guarded_tests(entry.guarded_by)
+            if not test_result.get("ok", False):
+                # guarded_by は「この定数の内容をアサートする既存テスト」であり、
+                # 失敗はまさにこの書き込みが本番プロンプトを壊したことを意味する。
+                # 以前はここで ok=True/code=200 を返しており、UIが先に「保存しました」
+                # と表示しテスト失敗はその下に付記されるだけだった(自己レビューで
+                # 未検出だったが、リポジトリ側Claude Actionのレビューで指摘され実際に
+                # 再現した: guarded testが失敗しても書き込みは取り消されなかった)。
+                # 直前に取ったバックアップを待たず、既に手元にある元のソース(source)
+                # へ直接書き戻して自動的に取り消す(fail-closed。他の自己検証と同じ方針)。
+                safeio.atomic_write_text(path, source)
+                return SaveResult(
+                    ok=False,
+                    error="この定数の内容をアサートする既存テストが失敗したため、変更を取り消しました。",
+                    errors=[],
+                    warnings=result.warnings,
+                    code=400,
+                    test_result=test_result,
+                )
 
         return SaveResult(
             ok=True,

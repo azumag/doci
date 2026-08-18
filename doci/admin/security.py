@@ -101,7 +101,15 @@ def check_origin(origin_header: str | None, expected_port: int) -> bool:
     parts = urlsplit(origin_header)
     if parts.hostname not in {"127.0.0.1", "localhost"}:
         return False
-    if parts.port and parts.port != expected_port:
+    # `parts.port` はOriginにポートが明示されていない場合Noneになる(その場合は
+    # スキームの既定ポート80/443が暗黙のポート)。`if parts.port and ...`だと
+    # Noneの場合に条件全体が偽になりポート検証そのものがスキップされてしまい、
+    # `Origin: http://127.0.0.1`(ポート省略=80番のつもり)がadminサーバの実際の
+    # 待受ポート(既定8787)と一致しなくても通ってしまう実バグがあった
+    # (リポジトリ側Claude Actionのレビューで指摘・実際に再現して確認した)。
+    # 省略時は既定ポートとして扱い、必ず比較する。
+    origin_port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
+    if origin_port != expected_port:
         return False
     return True
 

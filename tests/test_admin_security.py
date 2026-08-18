@@ -103,6 +103,18 @@ class HostOriginTest(unittest.TestCase):
         self.assertFalse(security.check_origin("http://evil.example.com", 8787))
         self.assertFalse(security.check_origin("http://127.0.0.1:9999", 8787))
 
+    def test_check_origin_rejects_omitted_port_when_not_default(self) -> None:
+        # ポート省略は既定ポート(http=80/https=443)を意味する。以前は
+        # `if parts.port and ...` がNoneで偽になり検証自体をスキップしていたため、
+        # adminサーバの実ポート(既定8787)と一致しなくても通っていた
+        # (リポジトリ側Claude Actionのレビューで指摘・実際に再現した)。
+        self.assertFalse(security.check_origin("http://127.0.0.1", 8787))
+        self.assertFalse(security.check_origin("https://127.0.0.1", 8787))
+
+    def test_check_origin_accepts_omitted_port_when_it_matches_default(self) -> None:
+        self.assertTrue(security.check_origin("http://127.0.0.1", 80))
+        self.assertTrue(security.check_origin("https://127.0.0.1", 443))
+
 
 class StaticWhitelistTest(unittest.TestCase):
     def test_whitelisted_names_pass(self) -> None:

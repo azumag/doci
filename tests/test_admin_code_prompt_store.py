@@ -267,6 +267,31 @@ class SaveIsolatedTest(unittest.TestCase):
         mocked.assert_called_once()
         self.assertEqual(result.test_result["ok"], True)
 
+    def test_guarded_test_failure_reverts_write_and_reports_failure(self) -> None:
+        # guarded_by は「この定数の内容をアサートする既存テスト」であり、失敗は
+        # まさにこの書き込みが本番プロンプトを壊したことを意味する。以前は
+        # test_resultをレスポンスに含めるだけでok=True/code=200を返しており、
+        # 書き込みも取り消されなかった(リポジトリ側Claude Actionのレビューで
+        # 指摘・実際に再現して確認した)。
+        entry = reg.BY_ID["tactic_backfill:_EXTRACT_PROMPT"]
+        original_value = "narration: {narration}\n"
+        src = f'{entry.name} = """\\\n{original_value}"""\n'
+        path = self.root / entry.relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(src, encoding="utf-8")
+        with mock.patch(
+            "doci.admin.code_prompt_store._run_guarded_tests",
+            return_value={"ok": False, "modules": list(entry.guarded_by), "output": "FAILED"},
+        ):
+            result = store.save(
+                entry.id, "narration: {narration}\nbroken\n", confirm_warnings=True
+            )
+        self.assertFalse(result.ok)
+        self.assertFalse(result.test_result["ok"])
+        # 書き込みは自動的に取り消され、元の内容へ戻っている。
+        self.assertEqual(path.read_text(encoding="utf-8"), src)
+        self.assertEqual(store.read(entry.id)["text"], original_value)
+
 
 if __name__ == "__main__":
     unittest.main()
