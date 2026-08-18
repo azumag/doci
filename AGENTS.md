@@ -9,6 +9,29 @@
 - Runtime generation must use the OpenCode Go defaults; Claude CLI/API is not a runtime dependency.
   The repository-side Claude Action is review-only and must not be introduced into the production path.
 
+## Admin UI synchronization
+
+`doci/admin/` is a local web UI (added in PR #190) for editing `.env`,
+`channels/<id>/channel.toml`, Markdown prompts, and 11 hardcoded prompt string
+constants. When changing anything it depends on, update it in the same change,
+not as follow-up work:
+
+- Adding/removing/renaming a prompt string constant in `doci/ai_text.py`,
+  `doci/factcheck.py`, `doci/research.py`, `doci/plan.py`, or
+  `doci/tactic_backfill.py`, or changing its `.format()` call-site kwargs:
+  update `doci/admin/code_prompt_registry.py` (a hand-maintained static list by
+  design — it does not auto-discover new constants).
+- Changing `channel.toml`'s schema in `doci/channel.py`: verify
+  `doci/admin/channel_store.py`'s `_summarize()` still surfaces the new fields.
+- Adding a new `.env` key with a bounded choice set: register it in
+  `doci/admin/env_schema.py`'s `_CHOICES_ATTR_BY_KEY` so it renders as a
+  dropdown instead of free text (type harvesting is automatic via AST; choice
+  sets are not).
+- Changing prompt assembly or template placeholders in `doci/corners.py`:
+  update `doci/admin/markdown_store.py`'s `required_tokens`.
+
+Run `tests/test_admin_*.py` after any such change.
+
 ## Required validation
 
 - Run focused tests for the changed behavior.
