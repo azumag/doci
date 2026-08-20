@@ -639,10 +639,17 @@ python -m doci.shorts_bridge complete \
 python -m doci.shorts_bridge summary --channel youtube-growth
 ```
 
-同一観測期間の元Shortの`views`と、遷移先動画の`RELATED_VIDEO`上位25参照元のうち
-元ShortのIDと一致した`views`を記録する。ただし公式資料はShortsの「関連動画」リンクが
-Analyticsの`RELATED_VIDEO`へ必ず分類されるとは明記していない。参照元行が無い場合は
-0件とせず`insufficient_data`にする。この比率はクリック率ではなく、5%などの万能な
+同一観測期間の元Shortの`views`を記録する。公式Reporting APIでは`traffic_source_type=24`
+（Shortsの縦スワイプ）と`32`（Shortsプレーヤーの関連動画リンク）を別流入として定義する。
+Targeted Queries APIの`RELATED_VIDEO`は通常の関連動画（Reporting type `7`）であり、
+type `32`の代替にはしない。現在のCLIはtype `32`のbulk reportを取得しないため、関連動画
+リンクの値を0件と推測せず`insufficient_data`にする。
+結果には`source_short_id`、`related_video_id`、`traffic_source_type`、
+`reporting_traffic_source_type=32`、`related_video_views=null`、`shorts_swipe_views=null`、
+`observation_start` / `observation_end`、`attribution_available`を保存する。導線は
+`acquisition`、参照元Shortに帰属する視聴時間・維持率は別の`satisfaction`として記録し、
+後者を取得できない現在のreadbackでは`available=false`のまま推測しない。
+この比率はクリック率ではなく、5%などの万能な
 合格ラインは適用しない。同じ条件の有効な観測が3件以上揃った場合だけmedianを参考表示し、
 因果・勝者・次施策を自動決定しない。観測中に橋渡し文または関連動画設定を変えた場合は
 `complete --setup-changed`で`invalidated`にする。`complete`時は先に`day`次元で`views`の

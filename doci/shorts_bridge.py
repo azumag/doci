@@ -3,11 +3,9 @@
 YouTubeへの書込みは行わない。dociの投稿履歴にあるShortと同一チャンネルの
 遷移先動画を固定し、Short終盤に実在する橋渡し文と、YouTube Studioで手動設定した
 関連動画を記録する。観測完了後はYouTube Analytics APIをread-onlyで照会し、同一
-期間の元Short視聴数と、RELATED_VIDEOの参照元が元Shortと確認できた遷移先視聴数を
-保存する。
-
-公式資料はShortsの関連動画リンクがRELATED_VIDEOへ必ず分類されるとは明記して
-いない。そのため、該当する参照元行が返らない場合を0件とせず判定材料不足にする。
+期間の元Short視聴数を保存する。Shortsプレーヤー内リンクの帰属はReporting API
+type 32だけを受理し、Targeted Queries APIのRELATED_VIDEO（Reporting type 7）や
+SHORTS流入で代用しない。type 32を取得できない場合を0件とせず判定材料不足にする。
 5%などの万能な合格ラインも置かず、同じcorner・source/target tier・観測日数を持つ
 3件以上の観測だけを相対比較する。
 """
@@ -42,6 +40,9 @@ ANALYTICS_DIMENSIONS_URL = (
     "https://developers.google.com/youtube/analytics/dimensions"
 )
 DECISION_METRIC = "related_video_attributed_views_per_source_short_view"
+LEGACY_RELATED_VIDEO_QUERY_SOURCE_TYPE = "RELATED_VIDEO"
+RELATED_VIDEO_REPORTING_SOURCE_TYPE = 32
+SHORTS_SWIPE_QUERY_SOURCE_TYPE = "SHORTS"
 OBSERVATION_TIME_ZONE = "America/Los_Angeles"
 DEFAULT_OBSERVATION_DAYS = 7
 MIN_OBSERVATION_DAYS = 1
@@ -384,6 +385,51 @@ def _validate_manifest_result(data: dict, path: Path) -> None:
     attributed_views = _validate_optional_count(
         result.get("attributed_target_views"), "attributed_target_views"
     )
+    # Issue #193以前のschema v1 manifestも読み続けられるよう、新しい構造化結果は
+    # 存在する場合に厳密検証する。新規completeは常に全フィールドを書き込む。
+    structured_attribution = "source_short_id" in result
+    attribution_available = result.get("attribution_available")
+    if structured_attribution:
+        if result.get("source_short_id") != data["source"]["video_id"]:
+            raise ShortsBridgeError("result source_short_id is inconsistent")
+        if result.get("related_video_id") != data["target"]["video_id"]:
+            raise ShortsBridgeError("result related_video_id is inconsistent")
+        if result.get("traffic_source_type") != RELATED_VIDEO_REPORTING_SOURCE_TYPE:
+            raise ShortsBridgeError("result traffic_source_type is invalid")
+        if (
+            result.get("reporting_traffic_source_type")
+            != RELATED_VIDEO_REPORTING_SOURCE_TYPE
+        ):
+            raise ShortsBridgeError("result reporting_traffic_source_type is invalid")
+        if result.get("excluded_traffic_source_types") != [
+            SHORTS_SWIPE_QUERY_SOURCE_TYPE,
+            LEGACY_RELATED_VIDEO_QUERY_SOURCE_TYPE,
+        ]:
+            raise ShortsBridgeError("result excluded traffic source types are invalid")
+        if result.get("shorts_swipe_views") is not None:
+            raise ShortsBridgeError("SHORTS swipe views must not be used for attribution")
+        if result.get("observation_start") != data.get("observation_start_date"):
+            raise ShortsBridgeError("result observation_start is inconsistent")
+        if result.get("observation_end") != data.get("observation_end_date"):
+            raise ShortsBridgeError("result observation_end is inconsistent")
+        if result.get("related_video_views") != attributed_views:
+            raise ShortsBridgeError("result related_video_views is inconsistent")
+        if not isinstance(attribution_available, bool):
+            raise ShortsBridgeError("result attribution_available must be boolean")
+        if attribution_available != (attributed_views is not None):
+            raise ShortsBridgeError(
+                "result attribution availability and views are inconsistent"
+            )
+        acquisition = result.get("acquisition")
+        satisfaction = result.get("satisfaction")
+        if not isinstance(acquisition, dict) or not isinstance(satisfaction, dict):
+            raise ShortsBridgeError("result must separate acquisition and satisfaction")
+        if acquisition.get("related_video_views") != attributed_views:
+            raise ShortsBridgeError("result acquisition views are inconsistent")
+        if acquisition.get("shorts_swipe_views") is not None:
+            raise ShortsBridgeError("acquisition must not map SHORTS swipe views")
+        if satisfaction.get("available") is not False:
+            raise ShortsBridgeError("source-attributed satisfaction must remain unavailable")
     ratio = result.get("transition_ratio_percent")
     if result.get("universal_threshold_applied") is not False:
         raise ShortsBridgeError("universal_threshold_applied must be false")
@@ -431,10 +477,19 @@ def _validate_manifest_result(data: dict, path: Path) -> None:
                 raise ShortsBridgeError(
                     "unconfirmed Analytics period must not contain metrics"
                 )
-        if result.get("attribution_source_type") != "RELATED_VIDEO":
-            raise ShortsBridgeError("result attribution source type is invalid")
-        if result.get("attribution_detail_limit") != 25:
-            raise ShortsBridgeError("result attribution detail limit is invalid")
+        if structured_attribution:
+            if result.get("attribution_source_type") != "REPORTING_TYPE_32":
+                raise ShortsBridgeError("result attribution source type is invalid")
+            if result.get("attribution_detail_limit") is not None:
+                raise ShortsBridgeError("result attribution detail limit is invalid")
+        else:
+            if (
+                result.get("attribution_source_type")
+                != LEGACY_RELATED_VIDEO_QUERY_SOURCE_TYPE
+            ):
+                raise ShortsBridgeError("legacy result attribution source type is invalid")
+            if result.get("attribution_detail_limit") != 25:
+                raise ShortsBridgeError("legacy result attribution detail limit is invalid")
     if result_status == "observed":
         if data.get("status") != "completed":
             raise ShortsBridgeError("observed result must be completed")
@@ -447,6 +502,8 @@ def _validate_manifest_result(data: dict, path: Path) -> None:
             raise ShortsBridgeError("transition ratio is inconsistent with view counts")
         if result.get("setup_unchanged_confirmed") is not True:
             raise ShortsBridgeError("observed result requires unchanged setup confirmation")
+        if structured_attribution and attribution_available is not True:
+            raise ShortsBridgeError("observed result requires available attribution")
     elif result_status == "insufficient_data":
         if data.get("status") != "completed":
             raise ShortsBridgeError("insufficient_data result must be completed")
@@ -467,6 +524,8 @@ def _validate_manifest_result(data: dict, path: Path) -> None:
             raise ShortsBridgeError(
                 "changed setup result must not confirm unchanged setup"
             )
+        if structured_attribution and attribution_available is not False:
+            raise ShortsBridgeError("invalidated result must not claim attribution")
     comparison = result.get("comparison")
     if not isinstance(comparison, dict):
         raise ShortsBridgeError("result.comparison must be an object")
@@ -616,7 +675,7 @@ def _plan_markdown(manifest: dict) -> str:
 - 遷移先: `{target['video_id']}`（tier: `{target['tier']}`）
 - 終盤の橋渡し文: `{_safe_cell(setup['bridge_text'])}`
 - 観測期間: 太平洋時間の完了日 {manifest['observation_days']}日分
-- 判定材料: 元Short視聴数と、RELATED_VIDEOで参照元Shortを確認できた遷移先視聴数
+- 判定材料: 元Short視聴数と、Reporting API type 32の関連動画リンク由来views
 - 公式設定手順: {OFFICIAL_HELP_URL}
 - Analyticsディメンション: {ANALYTICS_DIMENSIONS_URL}
 
@@ -648,6 +707,16 @@ def _comparison_key(manifest: dict) -> tuple[str, str, str, int]:
 def _observed_entry(manifest: dict) -> dict | None:
     result = manifest.get("result")
     if not isinstance(result, dict) or result.get("status") != "observed":
+        return None
+    # Issue #193以前のRELATED_VIDEO(type 7)観測は閲覧互換性だけを保ち、
+    # Shortsプレーヤー内リンク(type 32)の比較・medianへ混ぜない。
+    if (
+        result.get("traffic_source_type") != RELATED_VIDEO_REPORTING_SOURCE_TYPE
+        or result.get("reporting_traffic_source_type")
+        != RELATED_VIDEO_REPORTING_SOURCE_TYPE
+        or result.get("attribution_source_type") != "REPORTING_TYPE_32"
+        or result.get("attribution_available") is not True
+    ):
         return None
     ratio = result.get("transition_ratio_percent")
     if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
@@ -744,7 +813,7 @@ def _result_memo(manifest: dict) -> str:
 - Analytics期間: `{period_confirmed}`（日次行: `{data_through}`まで）
 - availability確認日: `{result.get('availability_probe_end_date') or '取得不可'}`
 - 元Short視聴数: `{source_text}`
-- 参照元Shortを確認できた遷移先視聴数: `{attributed_text}`
+- Reporting API type 32の関連動画リンク由来views: `{attributed_text}`
 - 視聴遷移比: `{ratio_text}`
 - 比較可能な観測数: `{comparison['comparable_count']}` / 必要数 `{comparison['required_count']}`
 - 比較groupのmedian: `{median_text}`
@@ -754,8 +823,8 @@ def _result_memo(manifest: dict) -> str:
 
 {notes}
 
-視聴遷移比はクリック率ではなく、同一期間の「RELATED_VIDEOで参照元Shortを確認できた
-遷移先視聴数 ÷ 元Short視聴数」です。該当行が返らない場合は0件と断定しません。
+視聴遷移比はクリック率ではなく、同一期間の「Reporting API type 32の関連動画リンク
+由来views ÷ 元Short視聴数」です。type 32を取得できない場合は0件と断定しません。
 5%などの万能な合格ラインは使わず、同じcorner・source/target tier・観測日数の観測が
 3件以上揃った場合だけ相対的なmedianを参考表示します。因果や勝者は自動判定しません。
 """
@@ -836,7 +905,7 @@ def plan_experiment(
                 "target": _video_record(target_record),
                 "warnings": [
                     "Shortsの関連動画設定はYouTube Studioで手動実施します。",
-                    "RELATED_VIDEOに元Shortの行が無ければ0件とせず判定材料不足にします。",
+                    "Reporting API type 32を取得できなければ0件とせず判定材料不足にします。",
                     "Analytics期間を確認できなければ再試行し、7完了日後は取得不可で閉じます。",
                     "視聴遷移比はクリック率ではなく、5%等の万能基準を使いません。",
                 ],
@@ -915,7 +984,7 @@ def _insufficient_reason(metrics: dict) -> str:
         reasons.append("元Shortのviewsが0以下です")
     if attributed is None:
         reasons.append(
-            "RELATED_VIDEOの上位25参照元に元Shortを確認できませんでした"
+            str(metrics.get("attribution_reason") or "Reporting API type 32を取得できませんでした")
         )
     elif isinstance(attributed, bool) or not isinstance(attributed, int):
         reasons.append("遷移先viewsが不正です")
@@ -933,14 +1002,30 @@ def _validate_metric_provenance(metrics: object, query: dict) -> dict:
         "start_date": query["start_date"],
         "end_date": query["end_date"],
         "availability_probe_end_date": query["availability_probe_end_date"],
-        "attribution_source_type": "RELATED_VIDEO",
-        "attribution_detail_limit": 25,
+        "attribution_source_type": "REPORTING_TYPE_32",
+        "attribution_detail_limit": None,
     }
     for key, value in expected.items():
         if metrics.get(key) != value:
             raise ShortsBridgeError(
                 f"Analytics readback provenance mismatch for {key}"
             )
+    attribution_available = metrics.get("attribution_available")
+    if not isinstance(attribution_available, bool):
+        raise ShortsBridgeError(
+            "Analytics readback attribution_available must be boolean"
+        )
+    attributed = metrics.get("attributed_target_views")
+    if not attribution_available and attributed is not None:
+        raise ShortsBridgeError(
+            "Analytics readback must not substitute RELATED_VIDEO for Reporting type 32"
+        )
+    if attribution_available and (
+        isinstance(attributed, bool) or not isinstance(attributed, int) or attributed < 0
+    ):
+        raise ShortsBridgeError(
+            "Reporting type 32 attribution requires a non-negative view count"
+        )
     data_through = metrics.get("views_data_through_date")
     if data_through is not None:
         _validate_date(data_through, "views_data_through_date")
@@ -951,6 +1036,47 @@ def _validate_metric_provenance(metrics: object, query: dict) -> dict:
                 "Analytics readback data-through date is outside the requested period"
             )
     return metrics
+
+
+def _attribution_result_fields(
+    manifest: dict,
+    *,
+    attributed_views: int | None,
+    attribution_available: bool,
+) -> dict:
+    """関連動画の導線指標を、SHORTSスワイプや視聴品質と混同せず記録する。"""
+    return {
+        "source_short_id": manifest["source"]["video_id"],
+        "related_video_id": manifest["target"]["video_id"],
+        "traffic_source_type": RELATED_VIDEO_REPORTING_SOURCE_TYPE,
+        "reporting_traffic_source_type": RELATED_VIDEO_REPORTING_SOURCE_TYPE,
+        "excluded_traffic_source_types": [
+            SHORTS_SWIPE_QUERY_SOURCE_TYPE,
+            LEGACY_RELATED_VIDEO_QUERY_SOURCE_TYPE,
+        ],
+        "related_video_views": attributed_views,
+        # SHORTSは縦スワイプ流入であり、関連動画リンクの導線値へ転用しない。
+        "shorts_swipe_views": None,
+        "observation_start": manifest["observation_start_date"],
+        "observation_end": manifest["observation_end_date"],
+        "attribution_available": attribution_available,
+        "acquisition": {
+            "metric": DECISION_METRIC,
+            "traffic_source_type": RELATED_VIDEO_REPORTING_SOURCE_TYPE,
+            "reporting_traffic_source_type": RELATED_VIDEO_REPORTING_SOURCE_TYPE,
+            "related_video_views": attributed_views,
+            "shorts_swipe_views": None,
+        },
+        "satisfaction": {
+            "available": False,
+            "watch_time": None,
+            "retention": None,
+            "reason": (
+                "参照元Shortに帰属した視聴時間・維持率はこのreadbackでは取得せず、"
+                "関連動画の導線viewsと混同しません"
+            ),
+        },
+    }
 
 
 def complete_experiment(
@@ -986,6 +1112,11 @@ def complete_experiment(
                 "source_views": None,
                 "attributed_target_views": None,
                 "transition_ratio_percent": None,
+                **_attribution_result_fields(
+                    manifest,
+                    attributed_views=None,
+                    attribution_available=False,
+                ),
                 "reason": "橋渡し文または関連動画設定が観測中に変更されました",
                 "recorded_at": recorded_at,
                 "notes": clean_notes,
@@ -1099,14 +1230,24 @@ def complete_experiment(
                 else None
             ),
             "transition_ratio_percent": ratio,
+            **_attribution_result_fields(
+                manifest,
+                attributed_views=(
+                    attributed
+                    if isinstance(attributed, int)
+                    and not isinstance(attributed, bool)
+                    else None
+                ),
+                attribution_available=bool(metrics.get("attribution_available")),
+            ),
             "reason": reason,
             "requested_start_date": query["start_date"],
             "requested_end_date": query["end_date"],
             "availability_probe_end_date": query["availability_probe_end_date"],
             "views_data_through_date": data_through,
             "analytics_period_confirmed": period_confirmed,
-            "attribution_source_type": "RELATED_VIDEO",
-            "attribution_detail_limit": 25,
+            "attribution_source_type": "REPORTING_TYPE_32",
+            "attribution_detail_limit": None,
             "recorded_at": recorded_at,
             "notes": clean_notes,
             "setup_unchanged_confirmed": True,
