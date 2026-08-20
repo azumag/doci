@@ -535,6 +535,58 @@ YouTube公式仕様どおり、判定指標はクリック率ではなく総再�
 コピー済みサムネイルのSHA-256を`start`時に再検証し、計画後に案が変わっていれば
 Studioでの開始記録を拒否する。
 
+### 同一cohortの1変数Tactic比較（issues #194/#196）
+
+別動画どうしの比較では、同じ形式・近い視聴者を狙った動画を明示的な
+`comparison_key`で固定し、一度に変える変数を1つに限定する。dociはYouTubeを変更せず、
+YouTube Studioから人が転記した同一観測窓の値だけを
+`output/<channel>/tactic_experiments/<experiment-id>/`へ保存する。
+
+`thumbnail_traffic`（issue #194）は通常動画だけを対象とし、サムネイル以外を固定する。
+baseline/candidateの双方に同じtraffic source集合を要求し、各sourceの
+viewsを`traffic_sources`へ記録する。それとは別にStudioの「インプレッションと総再生時間」
+ファネルの`impressions`、`ctr_percent`、`watch_time_minutes`を組で記録する。
+インプレッション対象外の流入元へCTRを誤帰属せず、チャンネル全体平均や異なる流入元の値を
+混ぜず、CTR単独でサムネイルの良否を決めない。
+
+`shorts_hook`（issue #196）は同じShorts tierだけを対象とし、冒頭1秒以外を固定する。
+Studioの「フィードに表示」と「視聴を選択した割合」をそれぞれ`shown_in_feed`、
+`chose_to_view_percent`として記録する。`swiped_away_percent`は後者の補数として保存するが、
+視聴選択率と維持率、`engagedViews/views`、traffic source `SHORTS`を同一指標とみなさない。
+
+```bash
+# baselineと変更する1変数を、candidate公開前に固定
+python -m doci.tactic_experiment plan \
+  --channel youtube-growth --kind thumbnail_traffic --issue 194 \
+  --baseline-video-id <baseline-id> --comparison-key "同じ形式・近い視聴者" \
+  --planned-change "サムネイルだけ変更" --confirm-one-variable
+
+# candidate公開後、同じcohortかつ計画した1変数だけを変えたことを確認
+python -m doci.tactic_experiment start \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --candidate-video-id <candidate-id> \
+  --confirm-same-cohort --confirm-only-planned-variable
+
+# 同じ観測窓・同じStudio画面から転記した値だけを記録
+python -m doci.tactic_experiment complete \
+  --channel youtube-growth --experiment-id <experiment-id> \
+  --baseline-metrics-json '{"traffic_sources":{"YT_SEARCH":40,"BROWSE":60},"impressions_funnel":{"impressions":100,"ctr_percent":4.0,"watch_time_minutes":50}}' \
+  --candidate-metrics-json '{"traffic_sources":{"YT_SEARCH":45,"BROWSE":75},"impressions_funnel":{"impressions":120,"ctr_percent":4.5,"watch_time_minutes":62}}' \
+  --baseline-observation-start 2026-08-02 --baseline-observation-end 2026-08-08 \
+  --candidate-observation-start 2026-08-11 --candidate-observation-end 2026-08-17 \
+  --confirm-same-observation-window --confirm-studio-values
+
+# Shortsでは kind=shorts_hook / issue=196 とし、completeのJSONを次の形にする
+# {"shown_in_feed":1000,"chose_to_view_percent":45.0}
+```
+
+結果はbaseline/candidate間の差を記述するだけで、勝者・因果・万能な合格ラインを生成しない。
+欠損値、不正範囲、異なるcorner/tier、異なるtraffic source集合、確認不足はfail-closedで拒否する。
+Studioの値が期間内に利用できない動画は`{"available":false,"reason":"..."}`として記録でき、
+0へ置換せず`insufficient_data`で終了する。各観測窓は計画した日数（既定7日）と一致しなければならない。
+日付境界はYouTube Analyticsと同じ太平洋時間で、各動画の公開翌日（最初の完全な1日）から
+開始する。記録時点でまだ完了していない太平洋時間の当日や未来日は受理しない。
+
 ### YouTube終了画面の比較実験（issues #165/#171）
 
 通常動画の終了画面について、内容が直結するvideo要素1枠を普遍的な正解にせず、
@@ -792,6 +844,7 @@ cron で日次実行。Secrets は GitHub Secrets に格納する。
 - `doci/performance.py` 実績readbackと形式仮説の生成（自動適用はしない）
 - `doci/performance_report.py` 3日毎の実績レポートissueサイクル（issue #92、`run_daily`とは独立）
 - `doci/youtube_ab_test.py` YouTube Studioの通常動画A/Bテスト計画・結果記録（YouTube書込みなし）
+- `doci/tactic_experiment.py` 同一cohortのサムネイル／Shorts冒頭1秒の1変数比較記録（YouTube書込みなし）
 - `doci/end_screen.py` YouTube終了画面variantの比較・二段階KPI記録（YouTube書込みなし）
 - `doci/shorts_bridge.py` Shorts関連動画への橋渡し計画・read-only検証記録（YouTube書込みなし）
 - `doci/feedback_issues.py` issueの重複防止・週次レート制御・GitHub I/O基盤
