@@ -135,6 +135,7 @@ class ShortsBridgeTest(unittest.TestCase):
         *,
         source_views: int | None = 1000,
         attributed_views: int | None = 25,
+        attribution_available: bool = True,
         data_through: str | None = "2026-08-17",
         availability_probe_end: str = "2026-08-18",
     ) -> dict:
@@ -147,8 +148,12 @@ class ShortsBridgeTest(unittest.TestCase):
             "views_data_through_date": data_through,
             "source_views": source_views,
             "attributed_target_views": attributed_views,
-            "attribution_source_type": "RELATED_VIDEO",
-            "attribution_detail_limit": 25,
+            "attribution_source_type": "REPORTING_TYPE_32",
+            "attribution_available": attribution_available,
+            "attribution_reason": (
+                "" if attribution_available else "Reporting API type 32を取得できませんでした"
+            ),
+            "attribution_detail_limit": None,
         }
 
     def _manifest_path(self, experiment_id: str) -> Path:
@@ -310,6 +315,24 @@ class ShortsBridgeTest(unittest.TestCase):
         self.assertEqual(manifest["result"]["transition_ratio_percent"], 2.5)
         self.assertFalse(manifest["result"]["universal_threshold_applied"])
         self.assertTrue(manifest["result"]["analytics_period_confirmed"])
+        result = manifest["result"]
+        self.assertEqual(result["source_short_id"], self.source_id)
+        self.assertEqual(result["related_video_id"], self.target_id)
+        self.assertEqual(result["traffic_source_type"], 32)
+        self.assertEqual(result["reporting_traffic_source_type"], 32)
+        self.assertEqual(
+            result["excluded_traffic_source_types"], ["SHORTS", "RELATED_VIDEO"]
+        )
+        self.assertEqual(result["related_video_views"], 25)
+        self.assertIsNone(result["shorts_swipe_views"])
+        self.assertEqual(result["observation_start"], "2026-08-11")
+        self.assertEqual(result["observation_end"], "2026-08-17")
+        self.assertTrue(result["attribution_available"])
+        self.assertEqual(result["acquisition"]["related_video_views"], 25)
+        self.assertIsNone(result["acquisition"]["shorts_swipe_views"])
+        self.assertFalse(result["satisfaction"]["available"])
+        self.assertIsNone(result["satisfaction"]["watch_time"])
+        self.assertIsNone(result["satisfaction"]["retention"])
         comparison = manifest["result"]["comparison"]
         self.assertEqual(comparison["comparable_count"], 1)
         self.assertIsNone(comparison["median_transition_ratio_percent"])
@@ -325,7 +348,10 @@ class ShortsBridgeTest(unittest.TestCase):
         with mock.patch.object(
             shorts_bridge.youtube,
             "shorts_bridge_metrics",
-            return_value=self._metrics(attributed_views=None),
+            return_value=self._metrics(
+                attributed_views=None,
+                attribution_available=False,
+            ),
         ):
             manifest = shorts_bridge.complete_experiment(
                 self.spec,
@@ -337,8 +363,83 @@ class ShortsBridgeTest(unittest.TestCase):
         result = manifest["result"]
         self.assertEqual(result["status"], "insufficient_data")
         self.assertIsNone(result["attributed_target_views"])
+        self.assertIsNone(result["related_video_views"])
+        self.assertFalse(result["attribution_available"])
+        self.assertIsNone(result["shorts_swipe_views"])
         self.assertIsNone(result["transition_ratio_percent"])
-        self.assertIn("確認できませんでした", result["reason"])
+        self.assertIn("type 32", result["reason"])
+
+    def test_legacy_completed_manifest_without_issue_193_fields_remains_readable(self) -> None:
+        self._plan()
+        self._start()
+        with mock.patch.object(
+            shorts_bridge.youtube,
+            "shorts_bridge_metrics",
+            return_value=self._metrics(),
+        ):
+            completed = shorts_bridge.complete_experiment(
+                self.spec,
+                "sbr-0000000000000001",
+                setup_unchanged_confirmed=True,
+                now=self.complete_now,
+            )
+
+        legacy = json.loads(json.dumps(completed))
+        for key in (
+            "source_short_id",
+            "related_video_id",
+            "traffic_source_type",
+            "reporting_traffic_source_type",
+            "excluded_traffic_source_types",
+            "related_video_views",
+            "shorts_swipe_views",
+            "observation_start",
+            "observation_end",
+            "attribution_available",
+            "acquisition",
+            "satisfaction",
+        ):
+            legacy["result"].pop(key)
+        legacy["result"]["attribution_source_type"] = "RELATED_VIDEO"
+        legacy["result"]["attribution_detail_limit"] = 25
+        self._manifest_path(legacy["experiment_id"]).write_text(
+            json.dumps(legacy, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        shown = shorts_bridge.show_experiment(self.spec, legacy["experiment_id"])
+        self.assertEqual(shown["status"], "completed")
+        self.assertEqual(shown["result"]["attributed_target_views"], 25)
+        self.assertEqual(
+            shorts_bridge.summarize_experiments(self.spec)["groups"], []
+        )
+
+    def test_type_32_availability_is_independent_from_ratio_denominator(self) -> None:
+        for index, source_views in enumerate((None, 0), start=1):
+            experiment_id = f"sbr-{index + 100:016x}"
+            self._plan(experiment_id)
+            self._start(experiment_id)
+            with mock.patch.object(
+                shorts_bridge.youtube,
+                "shorts_bridge_metrics",
+                return_value=self._metrics(
+                    source_views=source_views,
+                    attributed_views=25,
+                    attribution_available=True,
+                ),
+            ):
+                completed = shorts_bridge.complete_experiment(
+                    self.spec,
+                    experiment_id,
+                    setup_unchanged_confirmed=True,
+                    now=self.complete_now,
+                )
+
+            result = completed["result"]
+            self.assertEqual(result["status"], "insufficient_data")
+            self.assertTrue(result["attribution_available"])
+            self.assertEqual(result["related_video_views"], 25)
+            self.assertIsNone(result["transition_ratio_percent"])
 
     def test_incomplete_analytics_period_stays_running_until_retry(self) -> None:
         self._plan()
@@ -346,6 +447,7 @@ class ShortsBridgeTest(unittest.TestCase):
         incomplete = self._metrics(
             source_views=None,
             attributed_views=None,
+            attribution_available=False,
             data_through="2026-08-15",
         )
         with mock.patch.object(
@@ -372,7 +474,10 @@ class ShortsBridgeTest(unittest.TestCase):
         with mock.patch.object(
             shorts_bridge.youtube,
             "shorts_bridge_metrics",
-            return_value=self._metrics(),
+            return_value=self._metrics(
+                attributed_views=None,
+                attribution_available=False,
+            ),
         ):
             completed = shorts_bridge.complete_experiment(
                 self.spec,
@@ -392,6 +497,7 @@ class ShortsBridgeTest(unittest.TestCase):
         unavailable = self._metrics(
             source_views=None,
             attributed_views=None,
+            attribution_available=False,
             data_through=None,
             availability_probe_end="2026-08-25",
         )
@@ -431,6 +537,8 @@ class ShortsBridgeTest(unittest.TestCase):
         readback.assert_not_called()
         self.assertEqual(manifest["status"], "invalidated")
         self.assertEqual(manifest["result"]["status"], "stopped_changed_setup")
+        self.assertFalse(manifest["result"]["attribution_available"])
+        self.assertIsNone(manifest["result"]["shorts_swipe_views"])
         shown = shorts_bridge.show_experiment(
             self.spec, "sbr-0000000000000001"
         )
@@ -471,7 +579,7 @@ class ShortsBridgeTest(unittest.TestCase):
                     "running",
                 )
 
-    def test_three_comparable_observations_enable_relative_median(self) -> None:
+    def test_legacy_type_7_observation_does_not_complete_type_32_group(self) -> None:
         completed: dict | None = None
         for index, attributed in enumerate((10, 20, 30), start=1):
             source_id = f"CmpSrc{index:06d}"
@@ -517,16 +625,43 @@ class ShortsBridgeTest(unittest.TestCase):
                     setup_unchanged_confirmed=True,
                     now=self.complete_now,
                 )
+            if index == 1:
+                path = self._manifest_path(experiment_id)
+                legacy = json.loads(path.read_text(encoding="utf-8"))
+                for key in (
+                    "source_short_id",
+                    "related_video_id",
+                    "traffic_source_type",
+                    "reporting_traffic_source_type",
+                    "excluded_traffic_source_types",
+                    "related_video_views",
+                    "shorts_swipe_views",
+                    "observation_start",
+                    "observation_end",
+                    "attribution_available",
+                    "acquisition",
+                    "satisfaction",
+                ):
+                    legacy["result"].pop(key)
+                legacy["result"]["attribution_source_type"] = "RELATED_VIDEO"
+                legacy["result"]["attribution_detail_limit"] = 25
+                path.write_text(
+                    json.dumps(legacy, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
 
         self.assertIsNotNone(completed)
         comparison = completed["result"]["comparison"]
-        self.assertEqual(comparison["status"], "ready")
-        self.assertEqual(comparison["comparable_count"], 3)
-        self.assertEqual(comparison["median_transition_ratio_percent"], 2.0)
+        self.assertEqual(comparison["status"], "insufficient_comparable_experiments")
+        self.assertEqual(comparison["comparable_count"], 2)
+        self.assertIsNone(comparison["median_transition_ratio_percent"])
         self.assertFalse(comparison["universal_threshold_applied"])
         summary = shorts_bridge.summarize_experiments(self.spec)
         self.assertEqual(len(summary["groups"]), 1)
-        self.assertEqual(summary["groups"][0]["status"], "ready")
+        self.assertEqual(
+            summary["groups"][0]["status"], "insufficient_comparable_experiments"
+        )
+        self.assertEqual(summary["groups"][0]["comparable_count"], 2)
 
     def test_tampered_plan_checksum_is_rejected(self) -> None:
         self._plan()
@@ -584,13 +719,6 @@ class ShortsBridgeYouTubeMetricsTest(unittest.TestCase):
                     "columnHeaders": [{"name": "video"}, {"name": "views"}],
                     "rows": [[source_id, 1000]],
                 },
-                {
-                    "columnHeaders": [
-                        {"name": "insightTrafficSourceDetail"},
-                        {"name": "views"},
-                    ],
-                    "rows": target_rows,
-                },
             ]
         )
         with mock.patch.object(
@@ -614,7 +742,7 @@ class ShortsBridgeYouTubeMetricsTest(unittest.TestCase):
             load_credentials.call_args.kwargs["scopes"],
         )
 
-    def test_reads_same_period_and_sums_only_matching_related_source(self) -> None:
+    def test_reads_source_period_without_substituting_related_video_type_7(self) -> None:
         result, reports, scopes = self._read(
             [
                 ["SourceA12345", 21],
@@ -624,30 +752,33 @@ class ShortsBridgeYouTubeMetricsTest(unittest.TestCase):
         )
 
         self.assertEqual(result["source_views"], 1000)
-        self.assertEqual(result["attributed_target_views"], 25)
+        self.assertIsNone(result["attributed_target_views"])
+        self.assertFalse(result["attribution_available"])
+        self.assertEqual(result["attribution_source_type"], "REPORTING_TYPE_32")
+        self.assertIn("type 32", result["attribution_reason"])
         self.assertEqual(result["views_data_through_date"], "2026-08-17")
         self.assertEqual(scopes, youtube.ANALYTICS_READONLY_SCOPES)
         self.assertNotIn(youtube.SCOPES[0], scopes)
-        self.assertEqual(len(reports.queries), 3)
+        self.assertEqual(len(reports.queries), 2)
         self.assertEqual(reports.queries[0]["dimensions"], "day")
         self.assertEqual(reports.queries[0]["startDate"], "2026-08-11")
         self.assertEqual(reports.queries[0]["endDate"], "2026-08-18")
         self.assertEqual(reports.queries[1]["endDate"], "2026-08-17")
-        self.assertEqual(
-            reports.queries[2]["dimensions"], "insightTrafficSourceDetail"
+        self.assertFalse(
+            any(
+                query.get("dimensions") == "insightTrafficSourceDetail"
+                for query in reports.queries
+            )
         )
-        self.assertIn(
-            "insightTrafficSourceType==RELATED_VIDEO",
-            reports.queries[2]["filters"],
-        )
-        self.assertEqual(reports.queries[2]["maxResults"], 25)
 
-    def test_missing_source_detail_is_none_but_explicit_zero_is_zero(self) -> None:
+    def test_related_video_query_rows_are_never_used_as_type_32(self) -> None:
         missing, _, _ = self._read([["Different111", 8]])
         explicit_zero, _, _ = self._read([["SourceA12345", 0]])
 
         self.assertIsNone(missing["attributed_target_views"])
-        self.assertEqual(explicit_zero["attributed_target_views"], 0)
+        self.assertIsNone(explicit_zero["attributed_target_views"])
+        self.assertFalse(missing["attribution_available"])
+        self.assertFalse(explicit_zero["attribution_available"])
 
     def test_incomplete_daily_availability_skips_metric_queries(self) -> None:
         result, reports, _ = self._read([], data_through="2026-08-15")
@@ -658,14 +789,13 @@ class ShortsBridgeYouTubeMetricsTest(unittest.TestCase):
         self.assertEqual(len(reports.queries), 1)
 
     def test_post_observation_day_proves_period_availability(self) -> None:
-        result, reports, _ = self._read(
-            [["SourceA12345", 5]], data_through="2026-08-18"
-        )
+        result, reports, _ = self._read([], data_through="2026-08-18")
 
         self.assertEqual(result["views_data_through_date"], "2026-08-18")
         self.assertEqual(result["source_views"], 1000)
-        self.assertEqual(result["attributed_target_views"], 5)
-        self.assertEqual(len(reports.queries), 3)
+        self.assertIsNone(result["attributed_target_views"])
+        self.assertFalse(result["attribution_available"])
+        self.assertEqual(len(reports.queries), 2)
 
 
 if __name__ == "__main__":

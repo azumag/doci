@@ -13,6 +13,34 @@ from doci.channel import CornerSpec
 
 
 class ResearchPromptTest(unittest.TestCase):
+    def test_related_video_rules_separate_shorts_swipes_from_link_attribution(self) -> None:
+        root = Path(research.__file__).resolve().parents[1]
+        for relpath in (
+            "channels/youtube-growth/prompts/corner_shorts.md",
+            "channels/youtube-growth/prompts/corner_analytics.md",
+        ):
+            with self.subTest(relpath=relpath):
+                text = (root / relpath).read_text(encoding="utf-8")
+                self.assertIn("`SHORTS` 流入", text)
+                self.assertIn("縦方向にスワイプ", text)
+                self.assertIn("traffic source type `32`", text)
+                self.assertIn("`RELATED_VIDEO`は通常の関連動画", text)
+                self.assertIn("Reporting type `7`", text)
+                self.assertIn("代替指標にしません", text)
+                self.assertIn("取得できなければ", text)
+                self.assertIn("成功・失敗を断定しません", text)
+                self.assertIn("導線の視聴数と、遷移後の視聴時間・維持率", text)
+
+        rule = research._YOUTUBE_CASE_STUDY_RULE
+        self.assertIn("`SHORTS` 流入をリンククリックの証拠にしない", rule)
+        self.assertIn("traffic source type `32`", rule)
+        self.assertIn("Reporting type `7`", rule)
+        self.assertIn("で代用しない", rule)
+        self.assertIn("導線と遷移後の視聴品質を別々に扱う", rule)
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("`RELATED_VIDEO`上位25参照元", readme)
+        self.assertIn("現在のCLIはtype `32`のbulk reportを取得しない", readme)
+
     def test_search_parser_accepts_supported_result_link_classes(self) -> None:
         parser = research._SearchResultParser()
         parser.feed(

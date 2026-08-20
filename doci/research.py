@@ -848,6 +848,11 @@ _YOUTUBE_CASE_STUDY_RULE = """\
    - youtube_creator_audience は必ず「YouTube制作者」とする。
    - youtube_creator_problem は、その制作者が解決したいYouTube上の具体的な課題または指標を1文で書く。
    - viewer_action は、視聴後にYouTube Studioまたは次の動画制作で実行できる操作を1文で書く。
+   - Shortsの関連動画リンクを扱う場合、`SHORTS` 流入をリンククリックの証拠にしない。
+     `SHORTS` は前のShortsからの縦スワイプ、Reporting APIのtraffic source type `32`
+     はShortsプレーヤーの関連動画リンク由来として区別する。Targeted Queries APIの
+     `RELATED_VIDEO`（通常の関連動画、Reporting type `7`）で代用しない。type `32`を
+     取得できない場合は導線の成功・失敗を断定せず、導線と遷移後の視聴品質を別々に扱う。
 5. theme_fit は、YouTube運用が主題の中心で、題材・切り口・想定タイトルからも明確な場合だけ clear とする。
    他分野の比喩は説明手段に限定し、比喩自体が主題やタイトルの中心になる場合は ambiguous または
    off_topic とする。迷った場合は必ず ambiguous にする。

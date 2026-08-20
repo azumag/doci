@@ -1128,11 +1128,11 @@ def shorts_bridge_metrics(
 ) -> dict:
     """Shortsから関連動画へ遷移した視聴を同一期間で読む（issue #138）。
 
-    分母は元Shortの ``views``、分子候補は遷移先動画の
-    ``insightTrafficSourceType==RELATED_VIDEO`` 詳細のうち、参照元動画IDが
-    元Shortと一致する ``views``。後者は公式APIが返す上位25件だけであり、行が
-    無い場合は0と断定せず ``None`` を返す。これはクリック数ではなく遷移先で
-    発生した視聴数なので、呼び出し側もCTRとは呼ばない。
+    分母の元Short ``views`` だけをTargeted Queries APIから取得する。Shorts
+    プレーヤー内の関連動画リンクはReporting APIのtraffic source type ``32``
+    であり、Targeted Queries APIの ``RELATED_VIDEO``（通常の関連動画、Reporting
+    type ``7``）では代替しない。この関数はbulk reportを取得しないため、分子は
+    ``None``、帰属は利用不可として返す。
 
     最初に ``day`` 次元で ``views`` の利用可能最終日を、観測終了日より後の
     完了日も含めて確認する。終了日以降の行が無ければ集計クエリを実行せず、
@@ -1202,8 +1202,10 @@ def shorts_bridge_metrics(
         "views_data_through_date": data_through_date,
         "source_views": None,
         "attributed_target_views": None,
-        "attribution_source_type": "RELATED_VIDEO",
-        "attribution_detail_limit": 25,
+        "attribution_source_type": "REPORTING_TYPE_32",
+        "attribution_available": False,
+        "attribution_reason": "Reporting API traffic source type 32 is not available",
+        "attribution_detail_limit": None,
     }
     if data_through_date is None or data_through_date < end_date:
         return base_result
@@ -1235,41 +1237,9 @@ def shorts_bridge_metrics(
         source_views = int(raw_views)
         break
 
-    target_data = (
-        service.reports()
-        .query(
-            ids="channel==MINE",
-            startDate=start_date,
-            endDate=end_date,
-            metrics="views",
-            dimensions="insightTrafficSourceDetail",
-            filters=(
-                f"video=={target_id};"
-                "insightTrafficSourceType==RELATED_VIDEO"
-            ),
-            sort="-views",
-            maxResults=25,
-        )
-        .execute()
-    )
-    target_headers = [
-        header.get("name", "") for header in target_data.get("columnHeaders", [])
-    ]
-    attributed_views: int | None = None
-    for values in target_data.get("rows", []):
-        row = dict(zip(target_headers, values))
-        if str(row.get("insightTrafficSourceDetail") or "") != source_id:
-            continue
-        raw_views = row.get("views")
-        if raw_views is None:
-            continue
-        value = int(raw_views)
-        attributed_views = (attributed_views or 0) + value
-
     return {
         **base_result,
         "source_views": source_views,
-        "attributed_target_views": attributed_views,
     }
 
 
