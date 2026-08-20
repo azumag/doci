@@ -66,7 +66,10 @@ def _root(spec: ChannelSpec) -> Path:
 def _manifest_path(spec: ChannelSpec, experiment_id: str) -> Path:
     if not _EXPERIMENT_ID_RE.fullmatch(experiment_id):
         raise TacticExperimentError(f"invalid experiment id: {experiment_id!r}")
-    directory = _root(spec) / experiment_id
+    root = _root(spec)
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise TacticExperimentError(f"unsafe experiment root: {root}")
+    directory = root / experiment_id
     if directory.is_symlink():
         raise TacticExperimentError(f"experiment directory must not be a symlink: {directory}")
     return directory / "manifest.json"

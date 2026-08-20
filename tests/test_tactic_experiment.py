@@ -446,6 +446,18 @@ class TacticExperimentTest(unittest.TestCase):
         with self.assertRaisesRegex(tactic_experiment.TacticExperimentError, "result checksum"):
             tactic_experiment.show_experiment(self.spec, completed["experiment_id"])
 
+    def test_show_rejects_symlinked_experiment_root(self) -> None:
+        manifest = self._plan()
+        root = self.spec.output_dir / "tactic_experiments"
+        moved = self.spec.output_dir / "moved_tactic_experiments"
+        root.rename(moved)
+        root.symlink_to(moved, target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            tactic_experiment.TacticExperimentError, "unsafe experiment root"
+        ):
+            tactic_experiment.show_experiment(self.spec, manifest["experiment_id"])
+
     def test_result_memo_write_failure_keeps_running_and_retryable(self) -> None:
         running = self._start("shorts_hook")
         real_write = tactic_experiment._write_text_atomic
