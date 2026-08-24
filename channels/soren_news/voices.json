@@ -1,0 +1,11 @@
+{
+  "narrator": {
+    "voicevox_speaker": 109,
+    "label": "ナレーター (東北イタコ/ノーマル)",
+    "speed": 1.15,
+    "pitch": -0.02,
+    "intonation": 0.8,
+    "volume": 1.0,
+    "note": "soren_radio と統一。VOICEVOX 109: 東北イタコ。soviet_now の radio_state.sh で固定の声。"
+  }
+}

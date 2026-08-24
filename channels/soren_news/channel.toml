@@ -1,0 +1,40 @@
+voices = "voices.json"
+
+[channel]
+id = "soren_news"
+name = "ソ連ゲーム時事ショート"
+rotation = ["news_short"]
+
+[corners.news_short]
+label = "時事ショート"
+persona = "prompts/persona_news.md"
+corner = "prompts/corner_news_short.md"
+voice = "narrator"
+
+[style]
+theme = "tech"
+
+[style.subtitle]
+position_ratio = 0.78
+
+[style.bgm]
+dir = "bgm"
+
+[pipeline]
+seconds_per_image = 6
+max_images = 6
+research = true
+factcheck = true
+plan = true
+topic_cooldown_days = 7
+max_uploads_per_day = 3
+performance_feedback = false
+
+[publish]
+platforms = ["youtube"]
+
+[publish.youtube]
+privacy = "unlisted"
+client_secret = "secrets/soren_news/client_secret.json"
+token = "secrets/soren_news/youtube_token.json"
+analytics_token = "secrets/soren_news/youtube_analytics_token.json"
