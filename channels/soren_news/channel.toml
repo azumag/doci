@@ -34,7 +34,7 @@ performance_feedback = false
 platforms = ["youtube"]
 
 [publish.youtube]
-privacy = "unlisted"
+privacy = "public"
 client_secret = "secrets/soren_news/client_secret.json"
 token = "secrets/soren_news/youtube_token.json"
 analytics_token = "secrets/soren_news/youtube_analytics_token.json"
