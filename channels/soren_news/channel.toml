@@ -15,7 +15,7 @@ voice = "narrator"
 theme = "tech"
 
 [style.subtitle]
-position_ratio = 0.78
+position_ratio = 0.64
 
 [style.bgm]
 dir = "bgm"
