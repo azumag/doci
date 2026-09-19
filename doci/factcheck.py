@@ -655,6 +655,10 @@ def _validate_subtitle_rewrite(
                 raise SubtitleRewriteValidationError(
                     "表示本文で削除対象が残っています"
                 )
+            if decision in {"correct", "soften"} and not replacement:
+                raise SubtitleRewriteValidationError(
+                    "表示本文の修正判定に置換形がありません"
+                )
             if decision in {"correct", "soften"} and original_count:
                 replacement_added = comparable_rewritten.count(replacement) - (
                     comparable_original.count(replacement) if replacement else 0

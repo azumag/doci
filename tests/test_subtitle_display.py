@@ -194,6 +194,24 @@ class SubtitleDisplayTest(unittest.TestCase):
                 audit=[audit],
             )
 
+    def test_subtitle_factcheck_rejects_empty_correct_replacement(self) -> None:
+        with self.assertRaisesRegex(
+            factcheck.SubtitleRewriteValidationError, "置換形"
+        ):
+            factcheck._validate_subtitle_rewrite(
+                "Appleは誤りです。",
+                "Appleは正しいです。",
+                original_narration="アップルは誤りです。",
+                rewritten_narration="アップルは正しいです。",
+                audit=[
+                    {
+                        "before": "誤り",
+                        "decision": "correct",
+                        "replacement": "",
+                    }
+                ],
+            )
+
     def test_single_stage_factcheck_falls_back_without_actionable_audit(self) -> None:
         raw = (
             '{"narration":"アップルは正しいです。",'
