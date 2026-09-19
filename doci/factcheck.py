@@ -346,7 +346,7 @@ def _attempt(
         raise ValueError("ファクトチェック結果に subtitle_narration がありません")
     if require_subtitle_narration and subtitle_narration and original_narration:
         try:
-            _validate_subtitle_rewrite(
+            data["subtitle_narration"] = _validate_subtitle_rewrite(
                 subtitle_narration,
                 str(data["subtitle_narration"]),
                 original_narration=original_narration,
@@ -939,10 +939,10 @@ def verify_and_correct(
         return None
     subtitle_section = ""
     output_schema = (
-        '{{"narration": "修正後の最終ナレーション全文",\n'
+        '{"narration": "修正後の最終ナレーション全文",\n'
         '  "changed": true/false,\n'
-        '  "issues": [{{"before": "問題のあった記述", "after": "修正後", '
-        '"reason": "理由（出典があれば併記）"}}]}}'
+        '  "issues": [{"before": "問題のあった記述", "after": "修正後", '
+        '"reason": "理由（出典があれば併記）"}]}'
     )
     if display_narration is not None:
         subtitle_section = (
@@ -955,11 +955,11 @@ def verify_and_correct(
             "自然な原綴り・通常の漢字・ひらがなを維持してください。"
         )
         output_schema = (
-            '{{"narration": "修正後の最終ナレーション全文",\n'
+            '{"narration": "修正後の最終ナレーション全文",\n'
             '  "subtitle_narration": "同じ修正を反映した画面表示用全文",\n'
             '  "changed": true/false,\n'
-            '  "issues": [{{"before": "問題のあった記述", "after": "修正後", '
-            '"reason": "理由（出典があれば併記）"}}]}}'
+            '  "issues": [{"before": "問題のあった記述", "after": "修正後", '
+            '"reason": "理由（出典があれば併記）"}]}'
         )
     prompt = _PROMPT.format(
         reference=_reference_block(research),

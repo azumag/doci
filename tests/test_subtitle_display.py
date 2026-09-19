@@ -211,6 +211,46 @@ class SubtitleDisplayTest(unittest.TestCase):
 
         self.assertEqual(result["subtitle_narration"], result["narration"])
 
+    def test_single_stage_factcheck_sanitizes_display_text(self) -> None:
+        raw = (
+            '{"narration":"アップルは正しいです。",'
+            '"subtitle_narration":"Appleは正しい\\u200bです。",'
+            '"changed":true,"issues":[{"before":"誤り",'
+            '"decision":"correct","replacement":"正しい"}]}'
+        )
+        with patch.object(factcheck.llm, "run_codex", return_value=raw):
+            result = factcheck._attempt(
+                "prompt",
+                "codex",
+                require_subtitle_narration=True,
+                subtitle_narration="Appleは誤りです。",
+                original_narration="アップルは誤りです。",
+            )
+
+        self.assertEqual(result["subtitle_narration"], "Appleは正しいです。")
+
+    def test_factcheck_prompt_renders_single_brace_output_schema(self) -> None:
+        raw = (
+            '{"narration":"アップルを使います。",'
+            '"subtitle_narration":"Appleを使います。",'
+            '"changed":false,"issues":[]}'
+        )
+        with patch.object(
+            config, "FACTCHECK_BACKEND", "codex"
+        ), patch.object(factcheck.llm, "run_codex", return_value=raw) as run_codex:
+            result = factcheck.verify_and_correct(
+                "アップルを使います。",
+                subtitle_narration="Appleを使います。",
+            )
+
+        prompt = run_codex.call_args.args[0]
+        self.assertIn('{"narration": "修正後の最終ナレーション全文"', prompt)
+        self.assertIn(
+            '"subtitle_narration": "同じ修正を反映した画面表示用全文"', prompt
+        )
+        self.assertNotIn('{{"narration"', prompt)
+        self.assertEqual(result["subtitle_narration"], "Appleを使います。")
+
     def test_subtitle_factcheck_accepts_synced_remove_audit(self) -> None:
         result = factcheck._validate_subtitle_rewrite(
             "Appleは誤りを含みます。",
