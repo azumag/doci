@@ -25,6 +25,9 @@ class Segment:
     text: str
     start: float
     end: float
+    # narrationとは別の画面表示用表記。文区切りが対応しない場合はNoneにして
+    # compose側で音声入力文へ安全にフォールバックする。
+    subtitle_text: str | None = None
 
 
 @dataclass
@@ -32,6 +35,7 @@ class TtsResult:
     wav_path: Path
     duration: float
     segments: list[Segment] = field(default_factory=list)
+    subtitle_aligned: bool = False
 
 
 def _healthy(base: str, timeout: float = 4.0) -> bool:
@@ -66,6 +70,23 @@ def split_sentences(text: str) -> list[str]:
         else:
             out.append(p)
     return out
+
+
+def align_subtitle_sentences(
+    narration_sentences: list[str], subtitle_text: str | None
+) -> list[str | None]:
+    """字幕本文を音声合成の文区切りへ対応づける。
+
+    字幕本文は表記だけが違い、句読点と文の構成は narration と同じであることを
+    生成プロンプトで要求する。モデルがその契約を破った場合は全区間をNoneにし、
+    呼び出し側が音声用本文を使って同期を壊さず続行できるようにする。
+    """
+    if not subtitle_text or not subtitle_text.strip():
+        return [None] * len(narration_sentences)
+    subtitle_sentences = split_sentences(subtitle_text)
+    if len(subtitle_sentences) != len(narration_sentences):
+        return [None] * len(narration_sentences)
+    return subtitle_sentences
 
 
 _T = TypeVar("_T")
@@ -162,18 +183,25 @@ def synthesize(
     intonation: float = 1.0,
     intonation_vary: bool = False,
     volume: float = 1.0,
+    subtitle_text: str | None = None,
 ) -> TtsResult:
     base = active_base()
     sentences = split_sentences(text)
     if not sentences:
         raise ValueError("合成するテキストが空です")
+    subtitle_sentences = align_subtitle_sentences(sentences, subtitle_text)
+    subtitle_aligned = bool(
+        subtitle_text
+        and subtitle_sentences
+        and all(sentence is not None for sentence in subtitle_sentences)
+    )
 
     frames_list: list[bytes] = []
     params = None  # (framerate, sampwidth, nchannels)
     segments: list[Segment] = []
     cursor = 0.0
 
-    for s in sentences:
+    for index, s in enumerate(sentences):
         q = _audio_query(base, s, speaker)
         into = _sentence_intonation(s, intonation, intonation_vary)
         _apply_params(q, speed, pitch, into, volume)
@@ -185,7 +213,14 @@ def synthesize(
         if params is None:
             params = (fr, sw, ch)
         dur = n / float(fr)
-        segments.append(Segment(text=s, start=cursor, end=cursor + dur))
+        segments.append(
+            Segment(
+                text=s,
+                start=cursor,
+                end=cursor + dur,
+                subtitle_text=subtitle_sentences[index],
+            )
+        )
         cursor += dur
         frames_list.append(frames)
 
@@ -205,7 +240,12 @@ def synthesize(
         if tail:
             out.writeframes(tail)
 
-    return TtsResult(wav_path=out_path, duration=cursor + tail_frames / float(fr), segments=segments)
+    return TtsResult(
+        wav_path=out_path,
+        duration=cursor + tail_frames / float(fr),
+        segments=segments,
+        subtitle_aligned=subtitle_aligned,
+    )
 
 
 def main() -> None:

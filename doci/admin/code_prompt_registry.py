@@ -78,8 +78,10 @@ REGISTRY: tuple[PromptConstant, ...] = (
         id="factcheck:_PROMPT",
         relpath="doci/factcheck.py",
         name="_PROMPT",
-        fields=frozenset({"reference", "narration", "web_howto"}),
-        call_site="doci/factcheck.py:735",
+        fields=frozenset(
+            {"reference", "narration", "subtitle_section", "output_schema", "web_howto"}
+        ),
+        call_site="doci/factcheck.py:826",
         guarded_by=("tests/test_viewer_segment_claims.py",),
         description="ファクトチェック監査資料の収集プロンプト",
     ),
@@ -96,8 +98,8 @@ REGISTRY: tuple[PromptConstant, ...] = (
         id="factcheck:_REWRITE_PROMPT",
         relpath="doci/factcheck.py",
         name="_REWRITE_PROMPT",
-        fields=frozenset({"narration", "audit"}),
-        call_site="doci/factcheck.py:545",
+        fields=frozenset({"narration", "subtitle_section", "audit", "output_schema"}),
+        call_site="doci/factcheck.py:598",
         guarded_by=(),
         description="監査結果に基づくナレーション書き換えプロンプト",
     ),
