@@ -286,6 +286,22 @@ class SubtitleDisplayTest(unittest.TestCase):
 
         self.assertEqual(result, "Appleです。")
 
+    def test_subtitle_factcheck_infers_remove_without_decision(self) -> None:
+        result = factcheck._validate_subtitle_rewrite(
+            "Appleは誤りを含みます。",
+            "Appleです。",
+            original_narration="アップルは誤りを含みます。",
+            rewritten_narration="アップルです。",
+            audit=[
+                {
+                    "before": "誤りを含みます",
+                    "after": "",
+                }
+            ],
+        )
+
+        self.assertEqual(result, "Appleです。")
+
 
 if __name__ == "__main__":
     unittest.main()
