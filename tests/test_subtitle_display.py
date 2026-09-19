@@ -24,6 +24,18 @@ class SubtitleDisplayTest(unittest.TestCase):
 
         self.assertEqual(validated["subtitle_narration"], "Appleを使います。次です。")
 
+    def test_generated_validation_requires_display_text(self) -> None:
+        script = {
+            "title": "テスト",
+            "description": "概要",
+            "tags": [],
+            "narration": "アップルを使います。",
+            "scenes": [{}],
+        }
+
+        with self.assertRaisesRegex(ValueError, "subtitle_narration"):
+            ai_text._validate(script, require_subtitle_narration=True)
+
     def test_alignment_accepts_same_sentence_boundaries(self) -> None:
         narration = voicevox.split_sentences("アップルを使います。次です。")
 
@@ -41,6 +53,19 @@ class SubtitleDisplayTest(unittest.TestCase):
         self.assertEqual(
             voicevox.align_subtitle_sentences(narration, "Appleを使います。"),
             [None, None],
+        )
+
+    def test_alignment_reuses_audio_comma_boundaries_when_display_is_shorter(self) -> None:
+        narration = voicevox.split_sentences(
+            ("カタカナ" * 16) + "、読み上げ用の長い説明です。"
+        )
+
+        self.assertEqual(
+            voicevox.align_subtitle_sentences(
+                narration,
+                "Appleの短い説明、表示用の文です。",
+            ),
+            ["Appleの短い説明、", "表示用の文です。"],
         )
 
     def test_build_subtitles_prefers_display_text(self) -> None:
@@ -152,6 +177,22 @@ class SubtitleDisplayTest(unittest.TestCase):
         self.assertEqual(
             result["subtitle_narration"], "Appleは正しいです。次です。"
         )
+
+    def test_subtitle_factcheck_rewrite_rejects_stale_display_claim(self) -> None:
+        audit = {
+            "before": "誤り",
+            "decision": "correct",
+            "replacement": "正しい",
+        }
+
+        with self.assertRaises(factcheck.SubtitleRewriteValidationError):
+            factcheck._validate_subtitle_rewrite(
+                "Appleは誤りです。",
+                "Appleは誤りです。",
+                original_narration="アップルは誤りです。",
+                rewritten_narration="アップルは正しいです。",
+                audit=[audit],
+            )
 
 
 if __name__ == "__main__":

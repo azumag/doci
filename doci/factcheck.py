@@ -22,6 +22,10 @@ class FactcheckSourcesUnavailableError(RuntimeError):
     """OpenCode系ファクトチェックに検証済み資料がないことを示す。"""
 
 
+class SubtitleRewriteValidationError(ValueError):
+    """字幕側の事実修正が音声側と対応していないことを示す。"""
+
+
 _RETRYABLE_ERRORS = (
     ValueError,
     RuntimeError,
@@ -295,6 +299,8 @@ def _attempt(
     backend: str,
     *,
     require_subtitle_narration: bool = False,
+    subtitle_narration: str | None = None,
+    original_narration: str | None = None,
 ) -> dict:
     if backend == "codex":
         raw = llm.run_codex(
@@ -338,6 +344,21 @@ def _attempt(
         data.get("subtitle_narration") or ""
     ).strip():
         raise ValueError("ファクトチェック結果に subtitle_narration がありません")
+    if require_subtitle_narration and subtitle_narration and original_narration:
+        try:
+            _validate_subtitle_rewrite(
+                subtitle_narration,
+                str(data["subtitle_narration"]),
+                original_narration=original_narration,
+                rewritten_narration=str(data["narration"]),
+                audit=data.get("issues"),
+            )
+        except SubtitleRewriteValidationError as exc:
+            # 事実修正済みの音声本文は保持し、検証不能な表示本文だけを
+            # 置き換える。誤った自然表記を字幕へ残すより、安全側のフォール
+            # バックとして読み上げ本文を表示する。
+            _log(f"字幕本文の事実修正を検証できないため音声本文へフォールバック: {exc}")
+            data["subtitle_narration"] = data["narration"]
     return data
 
 
@@ -516,26 +537,110 @@ def _attempt_audit(
     return data
 
 
-def _validate_subtitle_rewrite(original: str, rewritten: str) -> str:
+def _sentence_units(text: str) -> list[str]:
+    normalized = str(text or "").replace("\n", " ").strip()
+    return [part.strip() for part in re.split(r"(?<=[。！？])", normalized) if part.strip()]
+
+
+def _validate_subtitle_rewrite(
+    original: str,
+    rewritten: str,
+    *,
+    original_narration: str | None = None,
+    rewritten_narration: str | None = None,
+    audit: object = None,
+) -> str:
     """表示本文の書き換えが原文から逸脱していないことを確認する。"""
     cleaned = _without_invisible_chars(str(rewritten or "").strip())
     if not cleaned:
-        raise ValueError("Qwen修正結果に subtitle_narration がありません")
+        raise SubtitleRewriteValidationError(
+            "Qwen修正結果に subtitle_narration がありません"
+        )
     comparable_original = _target_comparison_text(original)
     comparable_rewritten = _target_comparison_text(cleaned)
     if not comparable_rewritten:
-        raise ValueError("subtitle_narration の修正結果が実質的に空です")
+        raise SubtitleRewriteValidationError(
+            "subtitle_narration の修正結果が実質的に空です"
+        )
     length_ratio = len(comparable_rewritten) / max(1, len(comparable_original))
     if not 0.5 <= length_ratio <= 1.5:
-        raise ValueError("subtitle_narration の長さが原文から大きく逸脱しています")
+        raise SubtitleRewriteValidationError(
+            "subtitle_narration の長さが原文から大きく逸脱しています"
+        )
     if len(comparable_original) >= 40 and difflib.SequenceMatcher(
         None, comparable_original, comparable_rewritten
     ).ratio() < 0.45:
-        raise ValueError("subtitle_narration が原文から大きく逸脱しています")
+        raise SubtitleRewriteValidationError(
+            "subtitle_narration が原文から大きく逸脱しています"
+        )
     if len(re.findall(r"[。？！]", original)) != len(
         re.findall(r"[。？！]", cleaned)
     ):
-        raise ValueError("subtitle_narration の文区切りが原文と一致しません")
+        raise SubtitleRewriteValidationError(
+            "subtitle_narration の文区切りが原文と一致しません"
+        )
+
+    if original_narration is not None and rewritten_narration is not None:
+        narration_before = _sentence_units(original_narration)
+        narration_after = _sentence_units(rewritten_narration)
+        subtitle_before = _sentence_units(original)
+        subtitle_after = _sentence_units(cleaned)
+        if not (
+            len(narration_before)
+            == len(narration_after)
+            == len(subtitle_before)
+            == len(subtitle_after)
+        ):
+            raise SubtitleRewriteValidationError(
+                "音声本文と表示本文の文対応を検証できません"
+            )
+        for narration_old, narration_new, subtitle_old, subtitle_new in zip(
+            narration_before, narration_after, subtitle_before, subtitle_after
+        ):
+            if _target_comparison_text(narration_old) != _target_comparison_text(
+                narration_new
+            ) and _target_comparison_text(subtitle_old) == _target_comparison_text(
+                subtitle_new
+            ):
+                raise SubtitleRewriteValidationError(
+                    "音声本文の事実修正が表示本文へ反映されていません"
+                )
+
+    if isinstance(audit, list):
+        for issue in audit:
+            if not isinstance(issue, dict):
+                continue
+            decision = str(issue.get("decision") or "")
+            before = _target_comparison_text(str(issue.get("before") or ""))
+            replacement = _target_comparison_text(
+                str(issue.get("replacement") or issue.get("after") or "")
+            )
+            if not decision and replacement:
+                decision = "correct"
+            if not before or decision == "keep":
+                continue
+            if before not in comparable_original:
+                # narration側がカタカナ、表示側が原綴りのように表面形が
+                # 異なる箇所は、監査対象との対応を文字列だけで証明できない。
+                # 検証不能な自然字幕を残さず、呼び出し側で修正済みnarrationへ
+                # フォールバックする。
+                raise SubtitleRewriteValidationError(
+                    "表示本文で監査対象を対応づけられません"
+                )
+            original_count = comparable_original.count(before)
+            rewritten_count = comparable_rewritten.count(before)
+            if decision == "remove" and original_count and rewritten_count >= original_count:
+                raise SubtitleRewriteValidationError(
+                    "表示本文で削除対象が残っています"
+                )
+            if decision in {"correct", "soften"} and original_count:
+                replacement_added = comparable_rewritten.count(replacement) - (
+                    comparable_original.count(replacement) if replacement else 0
+                )
+                if rewritten_count >= original_count or replacement_added <= 0:
+                    raise SubtitleRewriteValidationError(
+                        "表示本文に監査済みの修正が反映されていません"
+                    )
     return cleaned
 
 
@@ -759,10 +864,20 @@ def _attempt_rewrite(
     # しまうため、ここでは不可視文字の除去だけを返却値に適用する。
     rewritten = _without_invisible_chars(rewritten)
     if has_subtitle:
-        rewritten_subtitle = _validate_subtitle_rewrite(
-            subtitle_narration or "",
-            str(data.get("subtitle_narration") or ""),
-        )
+        try:
+            rewritten_subtitle = _validate_subtitle_rewrite(
+                subtitle_narration or "",
+                str(data.get("subtitle_narration") or ""),
+                original_narration=narration,
+                rewritten_narration=rewritten,
+                audit=audit.get("issues"),
+            )
+        except SubtitleRewriteValidationError as exc:
+            # ナレーションの事実修正は有効でも、表示側が同じ箇所を直した
+            # 証拠を持たない場合は、修正前の自然表記を残さず修正済み音声本文へ
+            # フォールバックする。音声と字幕の内容同期を優先する安全弁。
+            _log(f"字幕本文の事実修正を検証できないため音声本文へフォールバック: {exc}")
+            rewritten_subtitle = rewritten
         return rewritten, rewritten_subtitle
     return rewritten
 
@@ -969,6 +1084,8 @@ def verify_and_correct(
                 prompt,
                 backend,
                 require_subtitle_narration=display_narration is not None,
+                subtitle_narration=display_narration,
+                original_narration=narration,
             )
         except _RETRYABLE_ERRORS as e:  # JSON不正/不十分/CLI失敗を再試行
             last_err = e

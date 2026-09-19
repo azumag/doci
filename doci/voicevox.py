@@ -55,20 +55,25 @@ def active_base() -> str:
     )
 
 
-def split_sentences(text: str) -> list[str]:
-    """。！？で文分割（句点は残す）。長すぎる文は読点でも分割。"""
+def _terminal_sentences(text: str) -> list[str]:
+    """。！？で文分割する（句点は残す）。長さによる分割は行わない。"""
     text = text.replace("\n", " ").strip()
     parts = re.split(r"(?<=[。！？])", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def split_sentences(text: str) -> list[str]:
+    """。！？で文分割（句点は残す）。長すぎる文は読点でも分割。"""
     out: list[str] = []
-    for p in parts:
-        p = p.strip()
-        if not p:
-            continue
-        if len(p) > 60:
-            sub = re.split(r"(?<=、)", p)
-            out.extend(s.strip() for s in sub if s.strip())
+    for sentence in _terminal_sentences(text):
+        if len(sentence) > 60:
+            out.extend(
+                part.strip()
+                for part in re.split(r"(?<=、)", sentence)
+                if part.strip()
+            )
         else:
-            out.append(p)
+            out.append(sentence)
     return out
 
 
@@ -83,10 +88,42 @@ def align_subtitle_sentences(
     """
     if not subtitle_text or not subtitle_text.strip():
         return [None] * len(narration_sentences)
-    subtitle_sentences = split_sentences(subtitle_text)
-    if len(subtitle_sentences) != len(narration_sentences):
+    narration_groups: list[list[str]] = []
+    current_group: list[str] = []
+    for sentence in narration_sentences:
+        current_group.append(sentence)
+        if sentence.endswith(("。", "！", "？")):
+            narration_groups.append(current_group)
+            current_group = []
+    if current_group:
+        narration_groups.append(current_group)
+
+    subtitle_sentences = _terminal_sentences(subtitle_text)
+    if len(subtitle_sentences) != len(narration_groups):
         return [None] * len(narration_sentences)
-    return subtitle_sentences
+
+    aligned: list[str] = []
+    for narration_group, subtitle_sentence in zip(
+        narration_groups, subtitle_sentences
+    ):
+        # split_sentences は音声側だけ、60文字超の文を読点で分ける。
+        # 表示側の文字数は原綴り化で変わるため、同じ閾値を独立に適用すると
+        # 正常な二本文でも区間数がずれる。音声側が作った区間数を正として、
+        # 表示側は対応する読点の数だけ分割する。
+        if len(narration_group) > 1:
+            subtitle_parts = [
+                part.strip()
+                for part in re.split(r"(?<=、)", subtitle_sentence)
+                if part.strip()
+            ]
+            if len(subtitle_parts) != len(narration_group):
+                return [None] * len(narration_sentences)
+            aligned.extend(subtitle_parts)
+        else:
+            aligned.append(subtitle_sentence)
+    if len(aligned) != len(narration_sentences):
+        return [None] * len(narration_sentences)
+    return aligned
 
 
 _T = TypeVar("_T")
