@@ -211,6 +211,23 @@ class SubtitleDisplayTest(unittest.TestCase):
 
         self.assertEqual(result["subtitle_narration"], result["narration"])
 
+    def test_subtitle_factcheck_accepts_synced_remove_audit(self) -> None:
+        result = factcheck._validate_subtitle_rewrite(
+            "Appleは誤りを含みます。",
+            "Appleです。",
+            original_narration="アップルは誤りを含みます。",
+            rewritten_narration="アップルです。",
+            audit=[
+                {
+                    "before": "誤りを含みます",
+                    "decision": "remove",
+                    "replacement": "",
+                }
+            ],
+        )
+
+        self.assertEqual(result, "Appleです。")
+
 
 if __name__ == "__main__":
     unittest.main()

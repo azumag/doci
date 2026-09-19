@@ -591,7 +591,9 @@ def _validate_subtitle_rewrite(
                 replacement = _target_comparison_text(
                     str(issue.get("replacement") or issue.get("after") or "")
                 )
-                if before and decision != "keep" and replacement:
+                if not decision and replacement:
+                    decision = "correct"
+                if before and decision in {"correct", "soften", "remove"}:
                     audit_targets.append((before, replacement))
         if (
             _target_comparison_text(original_narration)
