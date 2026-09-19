@@ -581,6 +581,26 @@ def _validate_subtitle_rewrite(
         )
 
     if original_narration is not None and rewritten_narration is not None:
+        audit_targets: list[tuple[str, str]] = []
+        if isinstance(audit, list):
+            for issue in audit:
+                if not isinstance(issue, dict):
+                    continue
+                decision = str(issue.get("decision") or "")
+                before = _target_comparison_text(str(issue.get("before") or ""))
+                replacement = _target_comparison_text(
+                    str(issue.get("replacement") or issue.get("after") or "")
+                )
+                if before and decision != "keep" and replacement:
+                    audit_targets.append((before, replacement))
+        if (
+            _target_comparison_text(original_narration)
+            != _target_comparison_text(rewritten_narration)
+            and not audit_targets
+        ):
+            raise SubtitleRewriteValidationError(
+                "音声本文の修正根拠が監査結果にありません"
+            )
         narration_before = _sentence_units(original_narration)
         narration_after = _sentence_units(rewritten_narration)
         subtitle_before = _sentence_units(original)

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from doci import ai_text, compose, config, factcheck, run_daily, voicevox
+from doci import ai_text, compose, config, factcheck, llm, run_daily, voicevox
 
 
 class SubtitleDisplayTest(unittest.TestCase):
@@ -193,6 +193,23 @@ class SubtitleDisplayTest(unittest.TestCase):
                 rewritten_narration="アップルは正しいです。",
                 audit=[audit],
             )
+
+    def test_single_stage_factcheck_falls_back_without_actionable_audit(self) -> None:
+        raw = (
+            '{"narration":"アップルは正しいです。",'
+            '"subtitle_narration":"Appleは間違いです。",'
+            '"changed":true,"issues":[]}'
+        )
+        with patch.object(llm, "run_codex", return_value=raw):
+            result = factcheck._attempt(
+                "prompt",
+                "codex",
+                require_subtitle_narration=True,
+                subtitle_narration="Appleは誤りです。",
+                original_narration="アップルは誤りです。",
+            )
+
+        self.assertEqual(result["subtitle_narration"], result["narration"])
 
 
 if __name__ == "__main__":
