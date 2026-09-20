@@ -503,6 +503,7 @@ narration_opening_guard = {guard}
                 "description": "概要",
                 "tags": ["a"],
                 "narration": narration,
+                "subtitle_narration": narration,
                 "scenes": [{}],
             },
             ensure_ascii=False,

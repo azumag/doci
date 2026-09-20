@@ -1394,7 +1394,7 @@ def generate_engagement_comment(
     return _clean_engagement_comment(text)
 
 
-def _validate(script: dict) -> dict:
+def _validate(script: dict, *, require_subtitle_narration: bool = False) -> dict:
     for k in REQUIRED_KEYS:
         if k not in script:
             raise ValueError(f"生成JSONに必須キー '{k}' がありません: {list(script)}")
@@ -1412,6 +1412,23 @@ def _validate(script: dict) -> dict:
     # それは配信物として本物の冒頭違反になるため検出すべき（除去前の原文を見ると
     # 素通りしてしまう）。
     script["narration"] = _strip_bracket_quotes(script.get("narration", ""))
+    # 新規生成結果では表示用本文を必須にする。旧台本やテスト用fixtureを直接
+    # _validateする経路は既定値(False)で従来互換を保ち、run_dailyへ渡る新規候補
+    # だけは字幕欠落をリトライへ戻す。表示本文にも、音声本文と同じ図表マーカー/
+    # 鉤括弧の防波堤を適用する。
+    subtitle_narration = script.get("subtitle_narration")
+    if require_subtitle_narration and (
+        not isinstance(subtitle_narration, str) or not subtitle_narration.strip()
+    ):
+        raise ValueError(
+            "生成JSONに必須キー 'subtitle_narration' がありません"
+        )
+    if isinstance(subtitle_narration, str) and subtitle_narration.strip():
+        script["subtitle_narration"] = _strip_bracket_quotes(
+            _strip_chart_markers(subtitle_narration)
+        )
+    elif "subtitle_narration" in script:
+        script.pop("subtitle_narration", None)
     _check_cold_open(script["narration"])
     return script
 
@@ -1547,6 +1564,10 @@ def _recover_inline_charts(script: dict) -> int:
             have.add(cid)
             moved += 1
     script["narration"] = _strip_chart_markers(narration)
+    if isinstance(script.get("subtitle_narration"), str):
+        script["subtitle_narration"] = _strip_chart_markers(
+            script["subtitle_narration"]
+        )
     return moved
 
 
@@ -1751,7 +1772,10 @@ def generate(
                 else remaining_budget
             )
         try:
-            candidate = _validate(_extract_json(_dispatch(prompt, timeout=attempt_timeout)))
+            candidate = _validate(
+                _extract_json(_dispatch(prompt, timeout=attempt_timeout)),
+                require_subtitle_narration=True,
+            )
             if publication_timing_policy:
                 research_mod.validate_publication_timing_script(
                     candidate,
@@ -1869,7 +1893,19 @@ def generate(
 
         _log(f"後段ファクトチェック ({config.FACTCHECK_BACKEND}+Web)…")
         try:
-            fc = factcheck.verify_and_correct(script["narration"], factcheck_research)
+            subtitle_narration = script.get("subtitle_narration")
+            if isinstance(subtitle_narration, str) and subtitle_narration.strip():
+                fc = factcheck.verify_and_correct(
+                    script["narration"],
+                    factcheck_research,
+                    subtitle_narration=subtitle_narration,
+                )
+            else:
+                # 旧形式の台本は従来の呼び出し形を維持し、字幕側はrun_dailyで
+                # narrationへフォールバックする。
+                fc = factcheck.verify_and_correct(
+                    script["narration"], factcheck_research
+                )
             if fc and fc.get("narration", "").strip():
                 issues = fc.get("issues") or []
                 if fc.get("changed") and issues:
@@ -1877,6 +1913,12 @@ def generate(
                 script["narration"] = _strip_bracket_quotes(
                     _strip_chart_markers(fc["narration"])
                 )
+                if isinstance(subtitle_narration, str) and subtitle_narration.strip():
+                    corrected_subtitle = fc.get("subtitle_narration")
+                    if isinstance(corrected_subtitle, str) and corrected_subtitle.strip():
+                        script["subtitle_narration"] = _strip_bracket_quotes(
+                            _strip_chart_markers(corrected_subtitle)
+                        )
                 script["_factcheck"] = issues
         except factcheck.FactcheckSourcesUnavailableError:
             _log("ファクトチェック資料がないため失敗として扱います")

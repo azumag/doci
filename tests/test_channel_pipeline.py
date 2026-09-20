@@ -297,6 +297,7 @@ factcheck = false
                 "description": "Description",
                 "tags": [],
                 "narration": "本題から始まるナレーションです。",
+                "subtitle_narration": "本題から始まるナレーションです。",
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             }
         )
@@ -383,6 +384,11 @@ factcheck = false
                     "24時間値を初動の主要観測、7日値を補助観測にします。"
                     "長期効果は不明で、データ不足の間は最適時刻を決めません。"
                 ),
+                "subtitle_narration": (
+                    "公開時刻A/Bは同じ形式の動画を複数本で交互に比較します。"
+                    "24時間値を初動の主要観測、7日値を補助観測にします。"
+                    "長期効果は不明で、データ不足の間は最適時刻を決めません。"
+                ),
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             },
             ensure_ascii=False,
@@ -418,6 +424,7 @@ factcheck = false
                     "description": "公開時刻A/Bの比較手順です。",
                     "tags": [],
                     "narration": narration,
+                    "subtitle_narration": narration,
                     "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
                 },
                 ensure_ascii=False,
@@ -456,6 +463,11 @@ factcheck = false
                 "description": "公開時刻A/Bの比較手順です。",
                 "tags": [],
                 "narration": (
+                    "公開時刻A/Bは同じ形式の動画を複数本で交互に比較します。"
+                    "24時間値を初動の主要観測、7日値を補助観測にします。"
+                    "長期効果は不明で、データ不足の間は最適時刻を決めません。"
+                ),
+                "subtitle_narration": (
                     "公開時刻A/Bは同じ形式の動画を複数本で交互に比較します。"
                     "24時間値を初動の主要観測、7日値を補助観測にします。"
                     "長期効果は不明で、データ不足の間は最適時刻を決めません。"
@@ -538,6 +550,7 @@ factcheck = true
                 "description": "Description",
                 "tags": [],
                 "narration": "本題から始まるナレーションです。",
+                "subtitle_narration": "本題から始まるナレーションです。",
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             }
         )
@@ -561,7 +574,11 @@ factcheck = true
 
         research_mock.assert_called_once()
         self.assertFalse(research_mock.call_args.kwargs["require_youtube_examples"])
-        factcheck_mock.assert_called_once_with("本題から始まるナレーションです。", research_data)
+        factcheck_mock.assert_called_once_with(
+            "本題から始まるナレーションです。",
+            research_data,
+            subtitle_narration="本題から始まるナレーションです。",
+        )
         self.assertEqual(script["narration"], "確認済みのナレーションです。")
 
     def test_failed_research_is_not_repeated_for_factcheck(self) -> None:
@@ -580,6 +597,7 @@ factcheck = true
                 "description": "Description",
                 "tags": [],
                 "narration": "本題から始まるナレーションです。",
+                "subtitle_narration": "本題から始まるナレーションです。",
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             }
         )
@@ -610,6 +628,7 @@ factcheck = true
                 "description": "Description",
                 "tags": [],
                 "narration": "本題から始まるナレーションです。",
+                "subtitle_narration": "本題から始まるナレーションです。",
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             }
         )
@@ -643,6 +662,7 @@ factcheck = true
                 "description": "Description",
                 "tags": [],
                 "narration": "本題から始まるナレーションです。",
+                "subtitle_narration": "本題から始まるナレーションです。",
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             }
         )
@@ -724,6 +744,7 @@ factcheck = false
                 "description": "Description",
                 "tags": [],
                 "narration": "本題から始まるナレーションです。",
+                "subtitle_narration": "本題から始まるナレーションです。",
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             }
         )
@@ -860,6 +881,7 @@ plan_topic_retries = 3
                 "description": "Description",
                 "tags": [],
                 "narration": "本題から始まるナレーションです。",
+                "subtitle_narration": "本題から始まるナレーションです。",
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             }
         )
@@ -944,6 +966,7 @@ factcheck = false
                 "description": "YouTubeの視聴維持率を改善します。",
                 "tags": [],
                 "narration": "YouTube Studioの視聴維持率を見て冒頭を編集します。",
+                "subtitle_narration": "YouTube Studioの視聴維持率を見て冒頭を編集します。",
                 "scenes": [{"caption": "Scene", "visual_prompt": "Image"}],
             }
         )

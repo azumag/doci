@@ -113,7 +113,11 @@ def build_subtitles(segments) -> list[tuple[str, float, float]]:
     """
     raw: list[list] = []  # [text, start, end, seg_id]
     for si, seg in enumerate(segments):
-        chunks = _segment_chunks(seg.text)
+        # 音声用のseg.textはVOICEVOXの読み上げ優先表記、subtitle_textは
+        # 画面表示優先表記。未設定（旧出力・文区切り不一致時）は従来どおり
+        # 音声用本文へフォールバックして、タイミングだけは必ず維持する。
+        text = getattr(seg, "subtitle_text", None) or seg.text
+        chunks = _segment_chunks(text)
         if not chunks:
             continue
         total = sum(len(c) for c in chunks) or 1
@@ -698,8 +702,9 @@ def compose(
         ]
         silent = _concat(clips, tmp)
 
-        # 字幕PNG。segments があれば「発話フル字幕」（チャンク窓に同期: issue #5）、
-        # 無ければ従来のシーン見出し（シーン窓）にフォールバック。
+        # 字幕PNG。segments があれば「発話フル字幕」（チャンク窓に同期: issue #5）。
+        # 表示用本文が付いたsegmentは自然な表記を使い、旧segmentは発話本文へ
+        # フォールバックする。segmentsが無ければ従来のシーン見出しを使う。
         caps: list[tuple[Path, float, float]] = []
         if segments:
             for text, s, e in build_subtitles(segments):

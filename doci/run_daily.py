@@ -93,6 +93,9 @@ def _tts_timing_payload(result: voicevox.TtsResult) -> dict[str, object]:
                 "end_seconds": round(end, 6),
             }
         )
+        subtitle_text = str(getattr(segment, "subtitle_text", None) or "").strip()
+        if subtitle_text:
+            segments[-1]["subtitle_text"] = subtitle_text
         previous_end = end
     return {
         "duration_seconds": round(duration, 6),
@@ -527,11 +530,17 @@ def _run_once(
     # 2) 音声（voices.json の話者＋速度/ピッチ/抑揚/音量を適用: issue #1）
     _log("音声合成 (VOICEVOX)…")
     v = voice
+    subtitle_narration = script.get("subtitle_narration")
+    if not isinstance(subtitle_narration, str) or not subtitle_narration.strip():
+        subtitle_narration = None
     tts = voicevox.synthesize(
         script["narration"], v.speaker, workdir / "narration.wav",
         speed=v.speed, pitch=v.pitch, intonation=v.intonation,
         intonation_vary=v.intonation_vary, volume=v.volume,
+        subtitle_text=subtitle_narration,
     )
+    if subtitle_narration and not tts.subtitle_aligned:
+        _log("字幕本文の文区切りが音声本文と一致しないため、音声用本文へフォールバック")
     try:
         script["_tts_timing"] = _tts_timing_payload(tts)
     except Exception as exc:  # noqa: BLE001
