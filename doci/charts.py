@@ -899,8 +899,11 @@ _VID_LEAD = 0.6     # アニメはシーン末尾の lead 秒前に完了（残�
 
 
 def _chrome_shot(html_path: Path, out_png: Path, w: int, h: int, budget: int = 1500) -> bool:
+    # プロファイルは html と同じ一時ディレクトリに置く。省略すると Chrome が
+    # ~/Library/Application Support/Google/Chrome-headless/scoped_dir* を作り、終了後も残り続ける。
     cmd = [
-        _CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+        _CHROME, "--headless=new", f"--user-data-dir={Path(html_path).parent / 'chrome-profile'}",
+        "--disable-gpu", "--hide-scrollbars",
         "--force-device-scale-factor=1", f"--window-size={w},{h}",
         f"--virtual-time-budget={budget}", f"--screenshot={out_png}", f"file://{html_path}",
     ]
@@ -932,7 +935,7 @@ class _CDP:
     """Chrome DevTools Protocol を pipe(FD3/4)経由で駆動。1 Chrome セッションで多数フレームを
     撮影できる（毎フレーム Chrome 起動＝コールドスタートを避け、尺いっぱいの長尺アニメを高速に）。"""
 
-    def __init__(self, w: int, h: int):
+    def __init__(self, w: int, h: int, profile_dir: Path):
         cmd_r, self._cmd_w = os.pipe()
         self._resp_r, resp_w = os.pipe()
         for fd in (cmd_r, resp_w):
@@ -940,7 +943,8 @@ class _CDP:
         fa = [(os.POSIX_SPAWN_DUP2, cmd_r, 3), (os.POSIX_SPAWN_DUP2, resp_w, 4)]
         self._pid = os.posix_spawn(
             _CHROME,
-            [_CHROME, "--headless=new", "--disable-gpu", "--remote-debugging-pipe",
+            [_CHROME, "--headless=new", f"--user-data-dir={profile_dir}",
+             "--disable-gpu", "--remote-debugging-pipe",
              "--force-device-scale-factor=1", f"--window-size={w},{h}",
              "--hide-scrollbars", "about:blank"],
             os.environ, file_actions=fa,
@@ -1024,7 +1028,7 @@ def render_chart_video(
         )
         fdir = td / "frames"
         fdir.mkdir()
-        cdp = _CDP(W, H)
+        cdp = _CDP(W, H, td / "chrome-profile")  # td と一緒に消える一時プロファイル
         try:
             cdp.call("Browser.getVersion")
             tgt = cdp.call("Target.createTarget", {"url": "about:blank"})["targetId"]
